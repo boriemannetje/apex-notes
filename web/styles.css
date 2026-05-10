@@ -1,0 +1,588 @@
+:root {
+  --bg: #0b0b0b;
+  --fg: #f2f0ea;
+  --line-1: rgba(242, 240, 234, 0.14);
+  --line-2: rgba(242, 240, 234, 0.28);
+  --line-3: rgba(242, 240, 234, 0.54);
+  --muted: rgba(242, 240, 234, 0.58);
+  --tag: #9fc5ff;
+  --tag-missing: #ffb6d1;
+  --purple: #b88cff;
+  --purple-soft: rgba(184, 140, 255, 0.2);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+input,
+select {
+  height: 36px;
+  border: 1px solid var(--line-2);
+  border-radius: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+button {
+  padding: 0 13px;
+  cursor: pointer;
+}
+
+button:hover,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  border-color: var(--fg);
+  outline: none;
+}
+
+button:hover,
+button:focus-visible {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.dangerButton {
+  border-color: rgba(255, 120, 150, 0.72);
+  color: #ff7896;
+}
+
+.dangerButton:hover,
+.dangerButton:focus-visible {
+  border-color: #ff7896;
+  background: #ff7896;
+  color: var(--bg);
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+button:disabled:hover {
+  border-color: var(--line-2);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(160px, 300px) auto auto auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 56px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line-1);
+}
+
+.brand {
+  overflow: hidden;
+  color: var(--fg);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 640;
+}
+
+.search {
+  min-width: 0;
+  padding: 0 12px;
+}
+
+.search::placeholder {
+  color: var(--muted);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 38vw);
+  height: calc(100vh - 56px);
+}
+
+.graphPane,
+.editorPane {
+  min-width: 0;
+  min-height: 0;
+}
+
+.graphPane {
+  display: grid;
+  grid-template-rows: 42px minmax(0, 1fr);
+  border-right: 1px solid var(--line-1);
+}
+
+.paneHeader,
+.editorHeader,
+.status {
+  border-bottom: 1px solid var(--line-1);
+}
+
+.paneHeader {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 0 10px;
+}
+
+.paneStatus {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.zoomControls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.zoomControls button {
+  width: 36px;
+  padding: 0;
+}
+
+.zoomControls #resetViewButton {
+  width: auto;
+  padding: 0 10px;
+}
+
+.graphScroller {
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.graph {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+.graph:active {
+  cursor: grabbing;
+}
+
+.edge {
+  fill: none;
+  stroke: var(--level-color, var(--line-3));
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.hierarchyEdge {
+  stroke-width: 1;
+}
+
+.referenceEdge {
+  opacity: 0.66;
+  stroke-width: 0.85;
+  stroke-dasharray: 5 8;
+}
+
+.pendingRope {
+  fill: none;
+  stroke: var(--purple);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 7 7;
+  filter: drop-shadow(0 0 6px rgba(184, 140, 255, 0.34));
+  pointer-events: none;
+  vector-effect: non-scaling-stroke;
+  animation: ropeFlow 760ms linear infinite;
+}
+
+.pendingRope.returning {
+  transition: d 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes ropeFlow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+.node {
+  cursor: pointer;
+}
+
+.nodeHit {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: all;
+}
+
+.nodeDot {
+  fill: var(--bg);
+  stroke: var(--level-color, var(--fg));
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.nodeLabel {
+  fill: var(--level-color, var(--fg));
+  font-size: 12px;
+  font-weight: 560;
+  pointer-events: none;
+}
+
+.node:hover .nodeDot,
+.node:focus-visible .nodeDot {
+  stroke-width: 2.5;
+}
+
+.node:focus-visible {
+  outline: none;
+}
+
+.node.selected .nodeDot {
+  fill: var(--level-color, var(--fg));
+  stroke: var(--level-color, var(--fg));
+  stroke-width: 2.5;
+}
+
+.node.selected .nodeLabel {
+  fill: var(--fg);
+  font-weight: 720;
+}
+
+.pendingNode .nodeDot {
+  fill: var(--purple-soft);
+  stroke: var(--purple);
+}
+
+.pendingNode .nodeLabel {
+  fill: var(--purple);
+}
+
+.ropeTarget .nodeDot {
+  fill: var(--level-color, var(--fg));
+  stroke-width: 3;
+}
+
+.node.dimmed {
+  opacity: 0.22;
+}
+
+.edge.dimmed {
+  opacity: 0.14;
+}
+
+.editorPane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) 34px;
+}
+
+.editorHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+}
+
+.noteMeta {
+  min-width: 0;
+}
+
+h1,
+h2 {
+  margin: 0;
+  color: var(--fg);
+}
+
+h1 {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 18px;
+}
+
+h2 {
+  font-size: 16px;
+}
+
+.muted {
+  overflow: hidden;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+}
+
+.noteInfo {
+  min-width: 0;
+}
+
+.noteInfo summary {
+  width: max-content;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid rgba(184, 140, 255, 0.7);
+  background: var(--purple-soft);
+  color: var(--purple);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.noteInfo summary::-webkit-details-marker {
+  display: none;
+}
+
+.noteInfo[open] summary {
+  background: var(--purple);
+  color: var(--bg);
+}
+
+.infoGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.infoGrid label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.infoGrid input,
+.infoGrid select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 9px;
+}
+
+.infoGrid input[readonly] {
+  color: var(--muted);
+}
+
+.infoActions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 10px;
+}
+
+.editorWrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.editorHost,
+.cm-editor {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.cm-editor {
+  font-size: 14px;
+}
+
+.cm-scroller {
+  scrollbar-color: var(--line-2) transparent;
+}
+
+.cm-placeholder {
+  color: var(--muted);
+}
+
+.cm-wikiLink {
+  color: var(--wiki-link-color, var(--tag));
+  cursor: pointer;
+  font-weight: 650;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.cm-wikiLink.is-missing {
+  color: var(--tag-missing);
+}
+
+.emptyGraphText {
+  fill: var(--muted);
+  font-size: 13px;
+  text-anchor: middle;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-top: 1px solid var(--line-1);
+  border-bottom: 0;
+}
+
+.newNoteDialog {
+  width: min(420px, calc(100vw - 28px));
+  padding: 0;
+  border: 1px solid var(--line-2);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.newNoteDialog::backdrop {
+  background: rgba(11, 11, 11, 0.82);
+}
+
+.newNoteDialog form {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.newNoteDialog label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.newNoteDialog input,
+.newNoteDialog select {
+  width: 100%;
+  padding: 0 10px;
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.graphCreatePopover {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  width: min(300px, calc(100vw - 24px));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(184, 140, 255, 0.62);
+  background: rgba(11, 11, 11, 0.96);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  color: var(--fg);
+  transform: translate(10px, 10px);
+}
+
+.graphCreatePopover[hidden] {
+  display: none;
+}
+
+.graphCreatePopover label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.graphCreatePopover input {
+  width: 100%;
+  padding: 0 10px;
+}
+
+.popoverActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  body {
+    overflow: auto;
+  }
+
+  .topbar {
+    grid-template-columns: 1fr 1fr;
+    height: auto;
+  }
+
+  .brand,
+  .search {
+    grid-column: 1 / -1;
+  }
+
+  .layout {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .graphPane {
+    height: 58vh;
+    min-height: 420px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-1);
+  }
+
+  .editorPane {
+    height: 70vh;
+    min-height: 460px;
+  }
+
+  .infoGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .paneHeader {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .zoomControls {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 520px) {
+  .topbar {
+    grid-template-columns: 1fr;
+  }
+
+  .paneHeader {
+    min-height: 82px;
+    grid-template-columns: 1fr;
+    align-content: center;
+    gap: 6px;
+  }
+
+  .paneStatus {
+    justify-content: flex-start;
+  }
+
+  .graphPane {
+    grid-template-rows: 82px minmax(0, 1fr);
+  }
+}

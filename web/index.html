@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Apex Notes</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Apex Notes</div>
+      <input id="searchInput" class="search" type="search" placeholder="Search">
+      <button id="newNoteButton" type="button">New note</button>
+      <button id="openFolderButton" type="button">Open notes folder</button>
+      <button id="createFolderButton" type="button">Create folder</button>
+    </header>
+
+    <main class="layout">
+      <section class="graphPane" aria-label="Graph">
+        <div class="paneHeader">
+          <span>Graph</span>
+          <div class="paneStatus">
+            <span id="validationStatus" class="muted"></span>
+            <span id="sourceStatus" class="muted"></span>
+          </div>
+          <div class="zoomControls" aria-label="Graph zoom controls">
+            <button id="zoomOutButton" type="button" aria-label="Zoom out">-</button>
+            <button id="resetViewButton" type="button">Reset</button>
+            <button id="zoomInButton" type="button" aria-label="Zoom in">+</button>
+          </div>
+        </div>
+        <div id="graphScroller" class="graphScroller">
+          <svg id="graph" class="graph" role="img" aria-label="Markdown hierarchy graph"></svg>
+        </div>
+      </section>
+
+      <aside class="editorPane" aria-label="Editor">
+        <div class="editorHeader">
+          <div class="noteMeta">
+            <h1 id="noteTitle">Select a note</h1>
+            <div id="notePath" class="muted"></div>
+          </div>
+          <details id="noteInfo" class="noteInfo">
+            <summary>Info</summary>
+            <div class="infoGrid">
+              <label>
+                <span>Title</span>
+                <input id="infoTitle" type="text" autocomplete="off">
+              </label>
+              <label>
+                <span>Parent</span>
+                <select id="infoParent"></select>
+              </label>
+              <label>
+                <span>Level</span>
+                <input id="infoLevel" type="text" readonly>
+              </label>
+            </div>
+            <div class="infoActions">
+              <button id="deleteNoteButton" class="dangerButton" type="button">Delete note</button>
+            </div>
+          </details>
+        </div>
+        <div class="editorWrap">
+          <div id="editor" class="editorHost"></div>
+        </div>
+        <div id="editorStatus" class="status muted"></div>
+      </aside>
+    </main>
+
+    <dialog id="newNoteDialog" class="newNoteDialog">
+      <form id="newNoteForm" method="dialog">
+        <h2>New note</h2>
+        <label>
+          <span>Title</span>
+          <input id="newNoteTitle" type="text" autocomplete="off" required>
+        </label>
+        <label>
+          <span>Parent</span>
+          <select id="newNoteParent" required></select>
+        </label>
+        <div id="newNoteHint" class="muted"></div>
+        <div class="dialogActions">
+          <button id="cancelNewNoteButton" type="button">Cancel</button>
+          <button type="submit">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="createFolderDialog" class="newNoteDialog">
+      <form id="createFolderForm" method="dialog">
+        <h2>Create folder</h2>
+        <label>
+          <span>Folder name</span>
+          <input id="createFolderName" type="text" autocomplete="off" value="apex-notes" required>
+        </label>
+        <label>
+          <span>Apex note title</span>
+          <input id="createApexTitle" type="text" autocomplete="off" value="Apex" required>
+        </label>
+        <div class="muted">Choose where to create it in the native folder picker.</div>
+        <div class="dialogActions">
+          <button id="cancelCreateFolderButton" type="button">Cancel</button>
+          <button type="submit">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <form id="graphCreatePopover" class="graphCreatePopover" hidden>
+      <label>
+        <span>Title</span>
+        <input id="graphNewTitle" type="text" autocomplete="off" required>
+      </label>
+      <div class="popoverActions">
+        <button id="cancelGraphCreateButton" type="button">Cancel</button>
+        <button type="submit">Create</button>
+      </div>
+    </form>
+
+    <script src="./app.bundle.js"></script>
+  </body>
+</html>

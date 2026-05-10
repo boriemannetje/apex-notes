@@ -1,0 +1,8 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+web/app.bundle.js
+.DS_Store
+
+# Local Netlify folder
+.netlify

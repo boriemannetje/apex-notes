@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Apex Notes",
+  "version": "0.1.0",
+  "identifier": "app.apex.notes",
+  "build": {
+    "beforeDevCommand": "npm run serve",
+    "devUrl": "http://localhost:8765",
+    "frontendDist": "../web"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Apex Notes",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 620
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}
