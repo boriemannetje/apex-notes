@@ -249,6 +249,19 @@ button:disabled:hover {
   font-size: 12px;
   font-weight: 560;
   pointer-events: none;
+  transition: opacity 120ms ease;
+  user-select: none;
+}
+
+.node.label-hidden .nodeLabel,
+.node.labelHidden .nodeLabel,
+.nodeLabel.label-hidden,
+.nodeLabel.labelHidden,
+.nodeLabel.isLabelHidden,
+.nodeLabel.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .node:hover .nodeDot,
@@ -269,6 +282,23 @@ button:disabled:hover {
 .node.selected .nodeLabel {
   fill: var(--fg);
   font-weight: 720;
+}
+
+.node.selected .nodeLabel,
+.node:hover .nodeLabel,
+.node:focus-visible .nodeLabel,
+.node.hovered .nodeLabel,
+.node.focused .nodeLabel,
+.node.search-matched .nodeLabel,
+.node.searchMatched .nodeLabel,
+.node.label-visible .nodeLabel,
+.node.labelVisible .nodeLabel,
+.nodeLabel.label-visible,
+.nodeLabel.labelVisible,
+.nodeLabel.is-visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: none;
 }
 
 .pendingNode .nodeDot {
@@ -456,6 +486,10 @@ h2 {
   color: var(--fg);
 }
 
+.hierarchyPromptDialog {
+  width: min(560px, calc(100vw - 28px));
+}
+
 .newNoteDialog::backdrop {
   background: rgba(11, 11, 11, 0.82);
 }
@@ -464,6 +498,17 @@ h2 {
   display: grid;
   gap: 14px;
   padding: 16px;
+}
+
+.dialogBody {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.dialogBody p {
+  margin: 0;
+  color: var(--muted);
 }
 
 .newNoteDialog label {

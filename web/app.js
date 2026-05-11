@@ -3,10 +3,28 @@ import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap } from "@codemirror/view";
+import {
+  computeWrappedLevelMetadata,
+  detectLargeGraphMode,
+  selectLargeModeReferenceEdges
+} from "./graphLargeMode.js";
+import { computeNoteLinkStats, decideVisibleLabels } from "./labelVisibility.js";
+import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
 const LEVEL_COLORS = ["#f2f0ea", "#9fc5ff", "#b8f0c0", "#ffe08a", "#ffb6d1", "#b88cff", "#7de3ff", "#f6a86d"];
 const STORAGE_PREFIX = "hamkg-layout-v2";
-const MIN_ZOOM = 0.35;
+const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
+- check for pre existing hyrachy, sometimes only a few files don't have the correct formatting
+- Build one sensible hierarchy from the notes in this folder following the note writing skill. 
+- The level 0 apex should be the guiding belief principle: the most abstract, central idea that explains why the rest of the graph exists.
+- Moving down the graph should become progressively less abstract and more concrete: principles -> themes -> projects/areas -> concrete notes, examples, tasks, or observations.
+- Every non-apex note must have exactly one immediate parent that is one level above it.
+- Use body wiki links only for contextual references between related notes, not as hierarchy.
+
+Full Apex Notes writing skill, copied from skills/apex-notes-writing/SKILL.md:
+
+${apexNotesWritingSkill.trim()}`;
+const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 2.2;
 const DOT_RADIUS = 7;
 const SELECTED_DOT_RADIUS = 12;
@@ -15,6 +33,10 @@ const LEVEL_GAP = 138;
 const NODE_GAP = 168;
 const GRAPH_PAD = 96;
 const PENDING_PATH = "__pending_node__";
+const LARGE_GRAPH_NOTE_THRESHOLD = 500;
+const LARGE_GRAPH_REFERENCE_EDGE_THRESHOLD = 1000;
+const MAX_LEVEL_NODES_PER_SUBROW = 80;
+const LARGE_GRAPH_REFERENCE_EDGE_LIMIT = 500;
 
 const editorEditable = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
@@ -43,9 +65,19 @@ const state = {
   positions: new Map(),
   nodeElements: new Map(),
   edgeElements: [],
+  referenceEdges: [],
+  referenceEdgeCount: 0,
+  largeGraphMode: false,
+  labelStats: new Map(),
+  labelVisibility: null,
+  hoveredPath: null,
+  focusedPath: null,
   editorView: null,
   editorHydrating: false,
   infoHydrating: false,
+  graphHasHierarchy: true,
+  hierarchyPromptShown: false,
+  hierarchyPromptText: "",
   pendingCreatePoint: null,
   pendingNode: null,
   ropeElement: null,
@@ -92,6 +124,9 @@ const els = {
   createFolderName: document.querySelector("#createFolderName"),
   createApexTitle: document.querySelector("#createApexTitle"),
   cancelCreateFolderButton: document.querySelector("#cancelCreateFolderButton"),
+  hierarchyPromptDialog: document.querySelector("#hierarchyPromptDialog"),
+  copyHierarchyPromptButton: document.querySelector("#copyHierarchyPromptButton"),
+  closeHierarchyPromptButton: document.querySelector("#closeHierarchyPromptButton"),
   graphCreatePopover: document.querySelector("#graphCreatePopover"),
   graphNewTitle: document.querySelector("#graphNewTitle"),
   cancelGraphCreateButton: document.querySelector("#cancelGraphCreateButton")
@@ -223,6 +258,8 @@ function bindEvents() {
   els.resetViewButton.addEventListener("click", () => fitGraphView());
   els.cancelNewNoteButton.addEventListener("click", () => closeNewNoteDialog());
   els.cancelCreateFolderButton.addEventListener("click", () => closeCreateFolderDialog());
+  els.closeHierarchyPromptButton.addEventListener("click", () => closeHierarchyPromptDialog());
+  els.copyHierarchyPromptButton.addEventListener("click", () => copyHierarchyPrompt());
   els.newNoteParent.addEventListener("change", updateNewNoteHint);
   els.newNoteForm.addEventListener("submit", createNewNote);
   els.createFolderForm.addEventListener("submit", createGraphFolder);
@@ -235,11 +272,19 @@ function bindEvents() {
   els.searchInput.addEventListener("input", () => {
     state.filter = els.searchInput.value.trim().toLowerCase();
     applyGraphDimming();
+    updateLabelVisibility();
+    if (state.largeGraphMode) {
+      requestGraphRender({ preserveView: true });
+    }
   });
 
   els.graph.addEventListener("wheel", onGraphWheel, { passive: false });
   els.graph.addEventListener("dblclick", openGraphCreatePopover);
   els.graph.addEventListener("pointerdown", startGraphPointerDown);
+  els.graph.addEventListener("pointerover", onGraphPointerOver);
+  els.graph.addEventListener("pointerout", onGraphPointerOut);
+  els.graph.addEventListener("focusin", onGraphFocusIn);
+  els.graph.addEventListener("focusout", onGraphFocusOut);
   els.graph.addEventListener("pointermove", continueInteraction);
   els.graph.addEventListener("pointerup", endInteraction);
   els.graph.addEventListener("pointercancel", cancelInteraction);
@@ -279,7 +324,16 @@ function startEmpty() {
   state.filter = "";
   state.validation = [];
   state.layoutKey = "";
+  state.graphHasHierarchy = true;
+  state.hierarchyPromptShown = false;
   state.manualPositions = {};
+  state.referenceEdges = [];
+  state.referenceEdgeCount = 0;
+  state.largeGraphMode = false;
+  state.labelStats = new Map();
+  state.labelVisibility = null;
+  state.hoveredPath = null;
+  state.focusedPath = null;
   state.pendingCreatePoint = null;
   state.pendingNode = null;
   els.searchInput.value = "";
@@ -389,23 +443,24 @@ function setNativeWorkspace(workspace, statusMessage) {
   state.source = "folder";
   state.workspaceName = workspace.workspaceName || workspace.rootPath || "Folder";
   const notes = workspace.notes.map((note) => parseNote(note.path, note.raw));
-  setNotes(notes, statusMessage);
+  setNotes(notes, statusMessage, workspace.positions || {});
 }
 
 function hasWritableWorkspace() {
   return state.source === "folder" && Boolean(state.notesPath);
 }
 
-function setNotes(notes, statusMessage) {
+function setNotes(notes, statusMessage, persistedPositions = {}) {
   cancelQueuedGraphRender();
   state.notes = notes;
   state.dirty = false;
   state.pendingCreatePoint = null;
   state.pendingNode = null;
+  state.hierarchyPromptShown = false;
   rebuildIndex();
   state.validation = validateNotes();
   state.layoutKey = `${STORAGE_PREFIX}:${state.source}:${state.rootPath || state.workspaceName || "workspace"}`;
-  state.manualPositions = readStoredPositions();
+  state.manualPositions = readStoredPositions(persistedPositions);
 
   if (!state.selectedPath || !state.byPath.has(state.selectedPath)) {
     const firstRoot = state.notes.find((note) => note.level === 0) || state.notes[0];
@@ -416,6 +471,7 @@ function setNotes(notes, statusMessage) {
   renderNewNoteParents();
   renderGraph({ preserveView: false });
   updateSourceStatus();
+  maybeShowHierarchyPrompt();
   renderValidationStatus();
 }
 
@@ -457,8 +513,105 @@ function rebuildIndex() {
 
   state.sortedNotes = [...state.notes].sort(compareGraphNotes);
   state.sortedParentOptions = [...state.notes].sort(compareParentOptions);
+  state.graphHasHierarchy = isHierarchyComplete(state.notes);
+  state.referenceEdges = collectReferenceEdges(state.sortedNotes);
+  state.referenceEdgeCount = state.referenceEdges.length;
+  state.largeGraphMode = detectLargeGraphMode(
+    {
+      noteCount: state.sortedNotes.length,
+      referenceEdgeCount: state.referenceEdgeCount
+    },
+    {
+      noteCountThreshold: LARGE_GRAPH_NOTE_THRESHOLD,
+      referenceEdgeCountThreshold: LARGE_GRAPH_REFERENCE_EDGE_THRESHOLD
+    }
+  );
+  state.labelStats = computeNoteLinkStats(state.sortedNotes);
+  state.labelVisibility = null;
 
   refreshEditorDecorations();
+}
+
+function isHierarchyComplete(notes) {
+  if (!notes.length) return true;
+
+  for (const note of notes) {
+    if (!note.hasFrontmatter || !note.hasLevel || !note.hasTitle) {
+      return false;
+    }
+  }
+
+  for (const note of notes) {
+    if (note.level === 0) continue;
+    if (!note.parentNote) return false;
+    if (!Number.isFinite(note.parentNote.level) || note.parentNote.level !== note.level - 1) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function maybeShowHierarchyPrompt() {
+  if (state.hierarchyPromptShown) return;
+  if (state.source !== "folder") return;
+  if (state.graphHasHierarchy) return;
+  if (!state.notesPath) return;
+  if (!state.notes.length) return;
+
+  state.hierarchyPromptShown = true;
+  const folderPath = state.notesPath;
+  openHierarchyPromptDialog(buildHierarchyAgentPrompt(folderPath));
+}
+
+function buildHierarchyAgentPrompt(folderPath) {
+  return `Open ${folderPath} and apply the instructions below to build the hierarchy in this note folder.\n\n${HIERARCHY_AGENT_INSTRUCTIONS}`;
+}
+
+function openHierarchyPromptDialog(promptText) {
+  state.hierarchyPromptText = promptText;
+
+  if (typeof els.hierarchyPromptDialog.showModal === "function") {
+    els.hierarchyPromptDialog.showModal();
+  } else {
+    els.hierarchyPromptDialog.removeAttribute("hidden");
+  }
+}
+
+function closeHierarchyPromptDialog() {
+  if (typeof els.hierarchyPromptDialog.close === "function") {
+    els.hierarchyPromptDialog.close();
+  } else {
+    els.hierarchyPromptDialog.setAttribute("hidden", "");
+  }
+}
+
+async function copyHierarchyPrompt() {
+  const text = state.hierarchyPromptText;
+  if (!text) return;
+
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("Prompt copied");
+    return;
+  } catch {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.top = "-9999px";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+      setStatus(copied ? "Prompt copied" : "Could not copy prompt");
+    } catch {
+      setStatus("Could not copy prompt");
+    }
+  }
 }
 
 function parseNote(path, raw) {
@@ -705,6 +858,10 @@ async function selectNote(path, force = false) {
   state.dirty = false;
   renderSelectedNote(state.source === "folder" ? "Loaded" : "Read-only");
   updateGraphSelection(previousPath, path);
+  updateLabelVisibility();
+  if (state.largeGraphMode) {
+    requestGraphRender({ preserveView: true });
+  }
   updateSourceStatus();
 }
 
@@ -874,7 +1031,7 @@ async function deleteSelectedNote() {
     state.dirty = false;
     rebuildIndex();
     state.validation = validateNotes();
-    saveStoredPositions();
+    void saveStoredPositions();
     await updateManifestFile();
     renderSelectedNote("Moved note to Trash");
     renderNewNoteParents();
@@ -939,7 +1096,7 @@ async function autosaveSelectedNote() {
       rebuildIndex();
       state.validation = validateNotes();
       state.manualPositions = pruneStoredPositions(state.manualPositions);
-      saveStoredPositions();
+      void saveStoredPositions();
       state.selectedPath = updated.path;
 
       els.noteTitle.textContent = updated.title;
@@ -1070,23 +1227,25 @@ function renderGraph({ preserveView } = { preserveView: true }) {
 
   const fragment = document.createDocumentFragment();
 
-  for (const note of notes) {
-    if (!note.parentNote) continue;
-    const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    edge.setAttribute("class", `edge hierarchyEdge${isDimmed(note) || isDimmed(note.parentNote) ? " dimmed" : ""}`);
-    edge.setAttribute("aria-hidden", "true");
-    edge.style.setProperty("--level-color", getLevelColor(note.level));
-    fragment.appendChild(edge);
-    state.edgeElements.push({ path: edge, from: note.parentNote.path, to: note.path, type: "hierarchy" });
-  }
+  if (state.graphHasHierarchy) {
+    for (const note of notes) {
+      if (!note.parentNote) continue;
+      const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      edge.setAttribute("class", `edge hierarchyEdge${isDimmed(note) || isDimmed(note.parentNote) ? " dimmed" : ""}`);
+      edge.setAttribute("aria-hidden", "true");
+      edge.style.setProperty("--level-color", getLevelColor(note.level));
+      fragment.appendChild(edge);
+      state.edgeElements.push({ path: edge, from: note.parentNote.path, to: note.path, type: "hierarchy" });
+    }
 
-  for (const referenceEdge of getReferenceEdges(notes)) {
-    const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    edge.setAttribute("class", `edge referenceEdge${referenceEdge.dimmed ? " dimmed" : ""}`);
-    edge.setAttribute("aria-hidden", "true");
-    edge.style.setProperty("--level-color", getLevelColor(referenceEdge.level));
-    fragment.appendChild(edge);
-    state.edgeElements.push({ path: edge, from: referenceEdge.from, to: referenceEdge.to, type: "reference" });
+    for (const referenceEdge of getRenderableReferenceEdges(notes)) {
+      const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      edge.setAttribute("class", `edge referenceEdge${referenceEdge.dimmed ? " dimmed" : ""}`);
+      edge.setAttribute("aria-hidden", "true");
+      edge.style.setProperty("--level-color", getLevelColor(referenceEdge.level));
+      fragment.appendChild(edge);
+      state.edgeElements.push({ path: edge, from: referenceEdge.from, to: referenceEdge.to, type: "reference" });
+    }
   }
 
   for (const note of notes) {
@@ -1101,6 +1260,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   els.graph.appendChild(canvas);
   applyViewTransform();
   updateGraphGeometry();
+  updateLabelVisibility();
 }
 
 function requestGraphRender(options = { preserveView: true }) {
@@ -1144,6 +1304,7 @@ function applyGraphDimming() {
     const note = state.byPath.get(path);
     if (note) {
       group.classList.toggle("dimmed", isDimmed(note));
+      group.classList.toggle("search-matched", isSearchMatched(note));
     }
   }
 
@@ -1152,6 +1313,7 @@ function applyGraphDimming() {
     const to = state.byPath.get(edge.to);
     edge.path.classList.toggle("dimmed", Boolean((from && isDimmed(from)) || (to && isDimmed(to))));
   }
+  updateLabelVisibility();
 }
 
 function getRenderableNotes() {
@@ -1173,7 +1335,7 @@ function compareText(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function getReferenceEdges(notes) {
+function collectReferenceEdges(notes) {
   const renderable = new Set(notes.map((note) => note.path));
   const hierarchyPairs = new Set();
   const referenceEdges = new Map();
@@ -1192,15 +1354,44 @@ function getReferenceEdges(notes) {
       if (hierarchyPairs.has(pairKey)) continue;
       if (referenceEdges.has(pairKey)) continue;
       referenceEdges.set(pairKey, {
+        key: pairKey,
         from: note.path,
         to: target.path,
-        level: target.level,
-        dimmed: isDimmed(note) || isDimmed(target)
+        level: target.level
       });
     }
   }
 
   return [...referenceEdges.values()];
+}
+
+function getRenderableReferenceEdges(notes) {
+  const renderable = new Set(notes.map((note) => note.path));
+  let edges = state.referenceEdges.filter((edge) => renderable.has(edge.from) && renderable.has(edge.to));
+
+  if (state.largeGraphMode) {
+    edges = selectLargeModeReferenceEdges(
+      edges,
+      {
+        selectedPath: state.selectedPath,
+        hoveredPath: state.hoveredPath,
+        focusedPath: state.focusedPath,
+        searchMatchedPaths: getSearchMatchedPaths()
+      },
+      {
+        maxEdgeCount: LARGE_GRAPH_REFERENCE_EDGE_LIMIT
+      }
+    );
+  }
+
+  return edges.map((edge) => {
+    const from = state.byPath.get(edge.from);
+    const to = state.byPath.get(edge.to);
+    return {
+      ...edge,
+      dimmed: Boolean((from && isDimmed(from)) || (to && isDimmed(to)))
+    };
+  });
 }
 
 function undirectedPairKey(a, b) {
@@ -1275,44 +1466,68 @@ function appendNodeLabel(group, title, className) {
 }
 
 function buildPositions(notes, viewportWidth, viewportHeight) {
-  const levels = new Map();
-  for (const note of notes) {
-    if (!levels.has(note.level)) levels.set(note.level, []);
-    levels.get(note.level).push(note);
+  if (!state.graphHasHierarchy) {
+    return buildSquareGridPositions(notes, viewportWidth, viewportHeight);
   }
 
-  const levelNumbers = [...levels.keys()].sort((a, b) => a - b);
-  let maxLevelCount = 1;
-  for (const items of levels.values()) {
-    if (items.length > maxLevelCount) maxLevelCount = items.length;
-  }
+  const wrapped = computeWrappedLevelMetadata(notes, {
+    maxNodesPerSubrow: MAX_LEVEL_NODES_PER_SUBROW
+  });
+  const maxRowCount = wrapped.rows.reduce((max, row) => Math.max(max, row.count), 1);
   const contentWidth = Math.max(
     viewportWidth,
-    GRAPH_PAD * 2 + Math.max(0, maxLevelCount - 1) * NODE_GAP
+    GRAPH_PAD * 2 + Math.max(0, maxRowCount - 1) * NODE_GAP
   );
   const contentHeight = Math.max(
     viewportHeight,
-    GRAPH_PAD * 2 + Math.max(0, levelNumbers.length - 1) * LEVEL_GAP
+    GRAPH_PAD * 2 + Math.max(0, wrapped.totalRows - 1) * LEVEL_GAP
   );
   const positions = new Map();
 
-  levelNumbers.forEach((level, rowIndex) => {
-    const row = levels.get(level);
-    const rowWidth = Math.max(0, row.length - 1) * NODE_GAP;
+  for (const row of wrapped.rows) {
+    const rowWidth = Math.max(0, row.count - 1) * NODE_GAP;
     const startX = (contentWidth - rowWidth) / 2;
-    const y = GRAPH_PAD + rowIndex * LEVEL_GAP;
+    const y = GRAPH_PAD + row.rowIndex * LEVEL_GAP;
 
-    row.forEach((note, colIndex) => {
+    row.notes.forEach((note, colIndex) => {
       positions.set(note.path, {
         x: startX + colIndex * NODE_GAP,
         y
       });
     });
-  });
+  }
 
   for (const [path, position] of Object.entries(state.manualPositions)) {
     if (!state.notePaths.has(path)) continue;
     positions.set(path, position);
+  }
+
+  return positions;
+}
+
+function buildSquareGridPositions(notes, viewportWidth) {
+  const positions = new Map();
+
+  const count = notes.length;
+  if (!count) return positions;
+
+  const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
+  const colMax = columns;
+  const contentWidth = Math.max(viewportWidth, GRAPH_PAD * 2 + Math.max(0, colMax - 1) * NODE_GAP);
+
+  for (let index = 0; index < count; index += 1) {
+    const note = notes[index];
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+    const remainingInRow = Math.min(columns, count - row * columns);
+    const startX = (contentWidth - Math.max(0, remainingInRow - 1) * NODE_GAP) / 2;
+    const x = startX + column * NODE_GAP;
+    const y = GRAPH_PAD + row * LEVEL_GAP;
+
+    positions.set(note.path, {
+      x,
+      y
+    });
   }
 
   return positions;
@@ -1362,6 +1577,22 @@ function updateGraphGeometry() {
   }
 }
 
+function updateGraphGeometryForPath(changedPath) {
+  for (const { path, from, to, type } of state.edgeElements) {
+    if (from !== changedPath && to !== changedPath) continue;
+    const fromPosition = state.positions.get(from);
+    const toPosition = state.positions.get(to);
+    if (!fromPosition || !toPosition) continue;
+    path.setAttribute("d", type === "reference" ? referenceEdgePath(fromPosition, toPosition) : edgePath(fromPosition, toPosition));
+  }
+
+  const group = state.nodeElements.get(changedPath);
+  const position = state.positions.get(changedPath);
+  if (group && position) {
+    group.setAttribute("transform", `translate(${position.x} ${position.y})`);
+  }
+}
+
 function edgePath(from, to) {
   const midY = from.y + (to.y - from.y) / 2;
   return [
@@ -1401,6 +1632,50 @@ function endpointToward(from, to, offset) {
 function isDimmed(note) {
   if (!state.filter) return false;
   return !note.searchText.includes(state.filter);
+}
+
+function isSearchMatched(note) {
+  return Boolean(state.filter && note.searchText.includes(state.filter));
+}
+
+function getSearchMatchedPaths() {
+  const matches = new Set();
+  if (!state.filter) return matches;
+  for (const note of state.notes) {
+    if (isSearchMatched(note)) matches.add(note.path);
+  }
+  return matches;
+}
+
+function updateLabelVisibility() {
+  if (!state.nodeElements.size) return;
+
+  if (!state.largeGraphMode) {
+    for (const [path, group] of state.nodeElements.entries()) {
+      const visible = path !== PENDING_PATH || Boolean(state.pendingNode);
+      group.classList.toggle("label-hidden", !visible);
+      group.classList.toggle("label-visible", visible);
+    }
+    state.labelVisibility = null;
+    return;
+  }
+
+  const labelVisibility = decideVisibleLabels(state.sortedNotes, {
+    stats: state.labelStats,
+    zoom: state.view.scale,
+    selectedPath: state.selectedPath,
+    hoveredPath: state.hoveredPath,
+    focusedPath: state.focusedPath,
+    searchMatchedPaths: getSearchMatchedPaths(),
+    searchQuery: state.filter
+  });
+  state.labelVisibility = labelVisibility;
+
+  for (const [path, group] of state.nodeElements.entries()) {
+    const visible = path === PENDING_PATH || labelVisibility.visiblePaths.has(path);
+    group.classList.toggle("label-hidden", !visible);
+    group.classList.toggle("label-visible", visible);
+  }
 }
 
 function buildWikiLinkDecorations(doc) {
@@ -1489,6 +1764,57 @@ function applyViewTransform(animate = false) {
     "transform",
     `translate(${round(state.view.x)} ${round(state.view.y)}) scale(${round(state.view.scale)})`
   );
+  updateLabelVisibility();
+}
+
+function onGraphPointerOver(event) {
+  const path = getNodePathFromEvent(event);
+  if (!path || path === PENDING_PATH || path === state.hoveredPath) return;
+  state.hoveredPath = path;
+  updateLabelVisibility();
+  if (state.largeGraphMode) {
+    requestGraphRender({ preserveView: true });
+  }
+}
+
+function onGraphPointerOut(event) {
+  const group = event.target.closest ? event.target.closest(".node") : null;
+  if (!group || !els.graph.contains(group)) return;
+  const relatedGroup = event.relatedTarget && event.relatedTarget.closest ? event.relatedTarget.closest(".node") : null;
+  if (relatedGroup === group) return;
+  const path = group.getAttribute("data-path");
+  if (!path || path !== state.hoveredPath) return;
+  state.hoveredPath = null;
+  updateLabelVisibility();
+  if (state.largeGraphMode) {
+    requestGraphRender({ preserveView: true });
+  }
+}
+
+function onGraphFocusIn(event) {
+  const path = getNodePathFromEvent(event);
+  if (!path || path === PENDING_PATH || path === state.focusedPath) return;
+  state.focusedPath = path;
+  updateLabelVisibility();
+  if (state.largeGraphMode) {
+    requestGraphRender({ preserveView: true });
+  }
+}
+
+function onGraphFocusOut(event) {
+  const path = getNodePathFromEvent(event);
+  if (!path || path !== state.focusedPath) return;
+  state.focusedPath = null;
+  updateLabelVisibility();
+  if (state.largeGraphMode) {
+    requestGraphRender({ preserveView: true });
+  }
+}
+
+function getNodePathFromEvent(event) {
+  const group = event.target.closest ? event.target.closest(".node") : null;
+  if (!group || !els.graph.contains(group)) return null;
+  return group.getAttribute("data-path");
 }
 
 function startGraphPointerDown(event) {
@@ -1597,7 +1923,7 @@ function continueInteraction(event) {
     };
     state.positions.set(interaction.path, position);
     state.manualPositions[interaction.path] = position;
-    updateGraphGeometry();
+    updateGraphGeometryForPath(interaction.path);
     return;
   }
 
@@ -1616,7 +1942,7 @@ async function endInteraction(event) {
   if (!interaction || interaction.pointerId !== event.pointerId) return;
 
   if (interaction.type === "node") {
-    saveStoredPositions();
+    void saveStoredPositions();
     if (!interaction.moved) {
       selectNote(interaction.path);
     }
@@ -1814,7 +2140,7 @@ async function createNoteFromPending(parent) {
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
-    saveStoredPositions();
+    void saveStoredPositions();
     await updateManifestFile();
     renderSelectedNote("Saved new note");
     renderNewNoteParents();
@@ -1827,7 +2153,11 @@ async function createNoteFromPending(parent) {
   }
 }
 
-function readStoredPositions() {
+function readStoredPositions(stored) {
+  if (stored && typeof stored === "object") {
+    return pruneStoredPositions(stored);
+  }
+
   try {
     const stored = window.localStorage.getItem(state.layoutKey);
     if (!stored) return {};
@@ -1837,12 +2167,20 @@ function readStoredPositions() {
   }
 }
 
-function saveStoredPositions() {
+async function saveStoredPositions() {
   try {
     state.manualPositions = pruneStoredPositions(state.manualPositions);
+    if (hasWritableWorkspace()) {
+      await invokeNative("write_layout", {
+        notesPath: state.notesPath,
+        positions: state.manualPositions
+      });
+      return;
+    }
+
     window.localStorage.setItem(state.layoutKey, JSON.stringify(state.manualPositions));
   } catch {
-    setStatus("Could not save local layout");
+    setStatus("Could not save layout");
   }
 }
 
@@ -1873,8 +2211,14 @@ function renderValidationStatus() {
   }
 
   if (!state.validation.length) {
-    els.validationStatus.textContent = "Valid";
-    els.validationStatus.title = "No broken parents, missing levels, or duplicate titles";
+    if (state.graphHasHierarchy) {
+      els.validationStatus.textContent = "Valid";
+      els.validationStatus.title = "No broken parents, missing levels, or duplicate titles";
+      return;
+    }
+
+    els.validationStatus.textContent = "Grid mode";
+    els.validationStatus.title = "Hierarchy metadata is incomplete. Showing nodes in a square grid until level/parent links are added.";
     return;
   }
 
@@ -1891,6 +2235,9 @@ function renderValidationStatus() {
 
   els.validationStatus.textContent = `${state.validation.length} issue${state.validation.length === 1 ? "" : "s"}: ${parts.join(", ")}`;
   els.validationStatus.title = state.validation.map((issue) => issue.message).join("\n");
+  if (!state.graphHasHierarchy) {
+    els.validationStatus.title = `${els.validationStatus.title}\nGraph is shown as a square grid until hierarchy metadata is complete.`;
+  }
 }
 
 function renderNewNoteParents() {

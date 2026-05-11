@@ -107,6 +107,17 @@
       </form>
     </dialog>
 
+    <dialog id="hierarchyPromptDialog" class="newNoteDialog hierarchyPromptDialog">
+      <div class="dialogBody">
+        <h2>Paste this prompt into your agent to make this folder into a hierarchical chart</h2>
+        <p class="muted">This folder opened without valid note hierarchy data. Copy the generated prompt, paste it into your agent, then reopen the folder.</p>
+        <div class="dialogActions">
+          <button id="closeHierarchyPromptButton" type="button">Close</button>
+          <button id="copyHierarchyPromptButton" type="button">Copy prompt</button>
+        </div>
+      </div>
+    </dialog>
+
     <form id="graphCreatePopover" class="graphCreatePopover" hidden>
       <label>
         <span>Title</span>

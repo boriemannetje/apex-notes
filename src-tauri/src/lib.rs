@@ -1,5 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -18,6 +19,14 @@ struct Workspace {
     notes_path: String,
     workspace_name: String,
     notes: Vec<NoteFile>,
+    positions: HashMap<String, NotePosition>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NotePosition {
+    x: f64,
+    y: f64,
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -70,6 +79,7 @@ fn create_workspace(
     );
 
     fs::write(notes_root.join(&apex_file), raw).map_err(to_error)?;
+    write_layout_file(&notes_root, &HashMap::new()).map_err(to_error)?;
     write_manifest_file(&notes_root, &[apex_file]).map_err(to_error)?;
     workspace_from_paths(root, notes_root)
 }
@@ -104,6 +114,12 @@ fn write_manifest(notes_path: String, paths: Vec<String>) -> Result<(), String> 
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn write_layout(notes_path: String, positions: HashMap<String, NotePosition>) -> Result<(), String> {
+    let notes_root = PathBuf::from(notes_path);
+    write_layout_file(&notes_root, &positions).map_err(to_error)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn trash_note(notes_path: String, path: String) -> Result<(), String> {
     let notes_root = PathBuf::from(notes_path);
     let file_path = safe_child_path(&notes_root, &path)?;
@@ -122,6 +138,7 @@ pub fn run() {
             write_note,
             create_note,
             write_manifest,
+            write_layout,
             trash_note
         ])
         .run(tauri::generate_context!())
@@ -132,6 +149,8 @@ fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace,
     let mut notes = Vec::new();
     collect_notes(&notes_root, &notes_root, &mut notes).map_err(to_error)?;
     notes.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    ensure_workspace_metadata(&notes_root, &notes).map_err(to_error)?;
+    let positions = read_layout_file(&notes_root).map_err(to_error)?;
 
     let workspace_name = root
         .file_name()
@@ -143,6 +162,7 @@ fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace,
         root_path: root.to_string_lossy().into_owned(),
         notes_path: notes_root.to_string_lossy().into_owned(),
         workspace_name,
+        positions,
         notes,
     })
 }
@@ -226,6 +246,40 @@ fn write_manifest_file(notes_root: &Path, paths: &[String]) -> std::io::Result<(
         serde_json::to_string_pretty(paths).map_err(std::io::Error::other)?
     );
     fs::write(notes_root.join("manifest.json"), raw)
+}
+
+fn read_layout_file(notes_root: &Path) -> std::io::Result<HashMap<String, NotePosition>> {
+    let raw = fs::read_to_string(notes_root.join("layout.json"));
+    let data = match raw {
+        Ok(raw) => {
+            serde_json::from_str(&raw).unwrap_or_else(|_| HashMap::new())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(err) => return Err(err),
+    };
+    Ok(data)
+}
+
+fn ensure_workspace_metadata(notes_root: &Path, notes: &[NoteFile]) -> std::io::Result<()> {
+    if !notes_root.join("manifest.json").exists() {
+        let paths = notes.iter().map(|note| note.path.clone()).collect::<Vec<_>>();
+        write_manifest_file(notes_root, &paths)?;
+    }
+
+    if !notes_root.join("layout.json").exists() {
+        write_layout_file(notes_root, &HashMap::new())?;
+    }
+
+    Ok(())
+}
+
+fn write_layout_file(notes_root: &Path, positions: &HashMap<String, NotePosition>) -> std::io::Result<()> {
+    fs::create_dir_all(notes_root)?;
+    let raw = format!(
+        "{}\n",
+        serde_json::to_string_pretty(positions).map_err(std::io::Error::other)?
+    );
+    fs::write(notes_root.join("layout.json"), raw)
 }
 
 fn path_to_frontend(path: &Path) -> String {
