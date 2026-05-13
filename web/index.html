@@ -16,6 +16,8 @@
       <button id="createFolderButton" type="button">Create folder</button>
     </header>
 
+    <nav id="workspaceTabs" class="workspaceTabs" aria-label="Open note folders" role="tablist"></nav>
+
     <main class="layout">
       <section class="graphPane" aria-label="Graph">
         <div class="paneHeader">
@@ -28,6 +30,7 @@
             <button id="zoomOutButton" type="button" aria-label="Zoom out">-</button>
             <button id="resetViewButton" type="button">Reset</button>
             <button id="zoomInButton" type="button" aria-label="Zoom in">+</button>
+            <button id="fullscreenGraphButton" type="button">Full screen</button>
           </div>
         </div>
         <div id="graphScroller" class="graphScroller">
@@ -105,6 +108,17 @@
           <button type="submit">Create</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="hierarchyPromptDialog" class="newNoteDialog hierarchyPromptDialog">
+      <div class="dialogBody">
+        <h2>Paste this prompt into your agent to make this folder into a hierarchical chart</h2>
+        <p class="muted">This folder opened without valid note hierarchy data. Copy the generated prompt, paste it into your agent, then reopen the folder.</p>
+        <div class="dialogActions">
+          <button id="closeHierarchyPromptButton" type="button">Close</button>
+          <button id="copyHierarchyPromptButton" type="button">Copy prompt</button>
+        </div>
+      </div>
     </dialog>
 
     <form id="graphCreatePopover" class="graphCreatePopover" hidden>

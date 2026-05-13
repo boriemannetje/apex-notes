@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build:web": "esbuild web/app.js --bundle --format=iife --outfile=web/app.bundle.js",
+    "build:web": "esbuild web/app.js --bundle --format=iife --loader:.md=text --outfile=web/app.bundle.js",
     "serve": "npm run build:web && python3 -m http.server 8765 -d web",
     "dev": "tauri dev",
     "build": "npm run build:web && tauri build",
