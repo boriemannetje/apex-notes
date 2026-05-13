@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Apex Notes hierarchy graph icon">
+  <defs>
+    <linearGradient id="background" x1="168" y1="120" x2="856" y2="904" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#151515"/>
+      <stop offset="1" stop-color="#060606"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="202" y1="112" x2="798" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f2f0ea" stop-opacity=".26"/>
+      <stop offset=".48" stop-color="#f2f0ea" stop-opacity=".08"/>
+      <stop offset="1" stop-color="#f2f0ea" stop-opacity=".18"/>
+    </linearGradient>
+    <radialGradient id="apexGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(512 300) rotate(90) scale(180)">
+      <stop offset="0" stop-color="#b88cff" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#b88cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="206" fill="url(#background)"/>
+  <rect x="66" y="66" width="892" height="892" rx="204" fill="none" stroke="url(#rim)" stroke-width="4"/>
+  <circle cx="512" cy="300" r="180" fill="url(#apexGlow)"/>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 344 C492 396 420 414 368 466" stroke="#f2f0ea" stroke-opacity=".58" stroke-width="34"/>
+    <path d="M512 344 C532 396 604 414 656 466" stroke="#f2f0ea" stroke-opacity=".58" stroke-width="34"/>
+    <path d="M352 522 C315 576 276 602 244 660" stroke="#f2f0ea" stroke-opacity=".5" stroke-width="30"/>
+    <path d="M352 522 C389 574 448 604 492 660" stroke="#f2f0ea" stroke-opacity=".5" stroke-width="30"/>
+    <path d="M672 522 C709 576 748 602 780 660" stroke="#f2f0ea" stroke-opacity=".5" stroke-width="30"/>
+  </g>
+
+  <g>
+    <circle cx="512" cy="300" r="82" fill="#0b0b0b" stroke="#b88cff" stroke-width="24"/>
+    <circle cx="512" cy="300" r="32" fill="#b88cff"/>
+
+    <circle cx="352" cy="496" r="62" fill="#0b0b0b" stroke="#f2f0ea" stroke-width="18"/>
+    <circle cx="672" cy="496" r="62" fill="#0b0b0b" stroke="#f2f0ea" stroke-width="18"/>
+
+    <circle cx="244" cy="690" r="54" fill="#0b0b0b" stroke="#9fc5ff" stroke-width="17"/>
+    <circle cx="492" cy="690" r="54" fill="#0b0b0b" stroke="#f2f0ea" stroke-opacity=".82" stroke-width="17"/>
+    <circle cx="780" cy="690" r="54" fill="#0b0b0b" stroke="#9fc5ff" stroke-width="17"/>
+  </g>
+</svg>

@@ -23,6 +23,8 @@ body {
 }
 
 body {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
@@ -115,10 +117,79 @@ button:disabled:hover {
   color: var(--muted);
 }
 
+.workspaceTabs {
+  display: flex;
+  min-height: 38px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--line-1);
+  background: #101010;
+}
+
+.workspaceTabs:empty {
+  display: none;
+}
+
+.workspaceTab {
+  display: flex;
+  align-items: center;
+  min-width: 132px;
+  max-width: 260px;
+  border-right: 1px solid var(--line-1);
+  border-bottom: 2px solid transparent;
+}
+
+.workspaceTab.active {
+  border-bottom-color: var(--fg);
+  background: var(--bg);
+}
+
+.workspaceTabMain,
+.workspaceTabClose {
+  height: 36px;
+  border: 0;
+  background: transparent;
+}
+
+.workspaceTabMain {
+  min-width: 0;
+  flex: 1;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.workspaceTabTitle {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspaceTabDirty {
+  margin-left: 5px;
+  color: var(--purple);
+}
+
+.workspaceTabClose {
+  width: 32px;
+  padding: 0;
+  color: var(--muted);
+}
+
+.workspaceTabMain:disabled {
+  opacity: 1;
+  color: var(--fg);
+}
+
+.workspaceTabClose:hover,
+.workspaceTabClose:focus-visible {
+  color: var(--bg);
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 38vw);
-  height: calc(100vh - 56px);
+  min-height: 0;
 }
 
 .graphPane,
@@ -170,6 +241,11 @@ button:disabled:hover {
   padding: 0 10px;
 }
 
+.zoomControls #fullscreenGraphButton {
+  width: auto;
+  padding: 0 10px;
+}
+
 .graphScroller {
   overflow: hidden;
   min-width: 0;
@@ -186,6 +262,29 @@ button:disabled:hover {
 
 .graph:active {
   cursor: grabbing;
+}
+
+body.graphFullscreen {
+  overflow: hidden;
+}
+
+body.graphFullscreen .graphPane,
+.graphPane:fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-rows: 42px minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  border: 0;
+  background: var(--bg);
+}
+
+body.graphFullscreen .topbar,
+body.graphFullscreen .workspaceTabs,
+body.graphFullscreen .editorPane {
+  display: none;
 }
 
 .edge {
@@ -593,6 +692,13 @@ h2 {
     border-bottom: 1px solid var(--line-1);
   }
 
+  body.graphFullscreen .graphPane,
+  .graphPane:fullscreen {
+    height: 100vh;
+    min-height: 0;
+    border-bottom: 0;
+  }
+
   .editorPane {
     height: 70vh;
     min-height: 460px;
@@ -628,6 +734,11 @@ h2 {
   }
 
   .graphPane {
+    grid-template-rows: 82px minmax(0, 1fr);
+  }
+
+  body.graphFullscreen .graphPane,
+  .graphPane:fullscreen {
     grid-template-rows: 82px minmax(0, 1fr);
   }
 }

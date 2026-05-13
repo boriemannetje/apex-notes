@@ -42,6 +42,9 @@ const editorEditable = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
 
 const state = {
+  workspaces: [],
+  activeWorkspaceId: null,
+  nextWorkspaceId: 1,
   notes: [],
   byPath: new Map(),
   byKey: new Map(),
@@ -88,11 +91,14 @@ const state = {
     scale: 1
   },
   activeInteraction: null,
-  graphBounds: null
+  graphBounds: null,
+  graphFullscreenFallback: false
 };
 
 const els = {
+  workspaceTabs: document.querySelector("#workspaceTabs"),
   graph: document.querySelector("#graph"),
+  graphPane: document.querySelector(".graphPane"),
   graphScroller: document.querySelector("#graphScroller"),
   graphCanvas: null,
   searchInput: document.querySelector("#searchInput"),
@@ -113,6 +119,7 @@ const els = {
   zoomInButton: document.querySelector("#zoomInButton"),
   zoomOutButton: document.querySelector("#zoomOutButton"),
   resetViewButton: document.querySelector("#resetViewButton"),
+  fullscreenGraphButton: document.querySelector("#fullscreenGraphButton"),
   newNoteDialog: document.querySelector("#newNoteDialog"),
   newNoteForm: document.querySelector("#newNoteForm"),
   newNoteTitle: document.querySelector("#newNoteTitle"),
@@ -252,10 +259,12 @@ function initializeEditor() {
 function bindEvents() {
   els.openFolderButton.addEventListener("click", openNotesFolder);
   els.createFolderButton.addEventListener("click", openCreateFolderDialog);
+  els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
   els.newNoteButton.addEventListener("click", openNewNoteDialog);
   els.zoomInButton.addEventListener("click", () => zoomAtCenter(1.18));
   els.zoomOutButton.addEventListener("click", () => zoomAtCenter(1 / 1.18));
   els.resetViewButton.addEventListener("click", () => fitGraphView());
+  els.fullscreenGraphButton.addEventListener("click", toggleGraphFullscreen);
   els.cancelNewNoteButton.addEventListener("click", () => closeNewNoteDialog());
   els.cancelCreateFolderButton.addEventListener("click", () => closeCreateFolderDialog());
   els.closeHierarchyPromptButton.addEventListener("click", () => closeHierarchyPromptDialog());
@@ -290,6 +299,7 @@ function bindEvents() {
   els.graph.addEventListener("pointercancel", cancelInteraction);
   els.graph.addEventListener("keydown", onGraphKeydown);
   window.addEventListener("resize", () => requestGraphRender({ preserveView: true }));
+  document.addEventListener("fullscreenchange", syncGraphFullscreenState);
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closeGraphCreatePopover();
@@ -298,11 +308,89 @@ function bindEvents() {
         requestGraphRender({ preserveView: true });
         setStatus("New graph node canceled");
       }
+      if (state.graphFullscreenFallback && document.body.classList.contains("graphFullscreen") && !document.fullscreenElement) {
+        event.preventDefault();
+        exitGraphFullscreen();
+      }
     }
   });
 }
 
+function toggleGraphFullscreen() {
+  if (document.body.classList.contains("graphFullscreen")) {
+    exitGraphFullscreen();
+    return;
+  }
+
+  enterGraphFullscreen();
+}
+
+function enterGraphFullscreen() {
+  closeGraphCreatePopover();
+  document.body.classList.add("graphFullscreen");
+  state.graphFullscreenFallback = !els.graphPane.requestFullscreen;
+  syncGraphFullscreenButton();
+  requestGraphRender({ preserveView: true });
+
+  if (els.graphPane.requestFullscreen && !document.fullscreenElement) {
+    els.graphPane.requestFullscreen().catch(() => {
+      state.graphFullscreenFallback = true;
+      syncGraphFullscreenState();
+    });
+  }
+}
+
+function exitGraphFullscreen() {
+  document.body.classList.remove("graphFullscreen");
+  state.graphFullscreenFallback = false;
+  syncGraphFullscreenButton();
+  requestGraphRender({ preserveView: true });
+
+  if (document.fullscreenElement === els.graphPane && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {
+      syncGraphFullscreenState();
+    });
+  }
+}
+
+function syncGraphFullscreenState() {
+  const isFullscreen = document.fullscreenElement === els.graphPane || (
+    state.graphFullscreenFallback &&
+    document.body.classList.contains("graphFullscreen") &&
+    !document.fullscreenElement
+  );
+  if (document.fullscreenElement === els.graphPane) {
+    state.graphFullscreenFallback = false;
+  }
+  document.body.classList.toggle("graphFullscreen", isFullscreen);
+  syncGraphFullscreenButton();
+  requestGraphRender({ preserveView: true });
+}
+
+function syncGraphFullscreenButton() {
+  const isFullscreen = document.body.classList.contains("graphFullscreen");
+  els.fullscreenGraphButton.textContent = isFullscreen ? "Exit full screen" : "Full screen";
+  els.fullscreenGraphButton.setAttribute("aria-pressed", String(isFullscreen));
+}
+
+function onWorkspaceTabsClick(event) {
+  const closeButton = event.target.closest("[data-close-workspace]");
+  if (closeButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    void closeWorkspaceTab(closeButton.dataset.closeWorkspace);
+    return;
+  }
+
+  const switchButton = event.target.closest("[data-switch-workspace]");
+  if (switchButton) {
+    event.preventDefault();
+    void switchWorkspaceTab(switchButton.dataset.switchWorkspace);
+  }
+}
+
 function startEmpty() {
+  state.activeWorkspaceId = null;
   state.notes = [];
   state.byPath = new Map();
   state.byKey = new Map();
@@ -342,6 +430,7 @@ function startEmpty() {
   renderGraph({ preserveView: false });
   updateSourceStatus();
   renderValidationStatus();
+  renderWorkspaceTabs();
 }
 
 async function openNotesFolder() {
@@ -438,41 +527,214 @@ async function invokeNative(command, args = {}) {
 }
 
 function setNativeWorkspace(workspace, statusMessage) {
-  state.rootPath = workspace.rootPath;
-  state.notesPath = workspace.notesPath;
-  state.source = "folder";
-  state.workspaceName = workspace.workspaceName || workspace.rootPath || "Folder";
-  const notes = workspace.notes.map((note) => parseNote(note.path, note.raw));
-  setNotes(notes, statusMessage, workspace.positions || {});
+  saveActiveWorkspaceState();
+
+  const rootPath = workspace.rootPath || "";
+  const workspaceName = workspace.workspaceName || rootPath || "Folder";
+  const existing = state.workspaces.find((item) => item.rootPath === rootPath);
+  const target = existing || {
+    id: `workspace-${state.nextWorkspaceId++}`,
+    selectedPath: null,
+    filter: "",
+    view: { x: 0, y: 0, scale: 1 },
+    hasView: false,
+    hierarchyPromptShown: false,
+    hierarchyPromptText: ""
+  };
+
+  const layoutKey = buildLayoutKey("folder", rootPath, workspaceName);
+  target.rootPath = rootPath;
+  target.notesPath = workspace.notesPath || "";
+  target.source = "folder";
+  target.workspaceName = workspaceName;
+  target.layoutKey = layoutKey;
+  target.notes = workspace.notes.map((note) => parseNote(note.path, note.raw));
+  target.dirty = false;
+  const targetNotePaths = new Set(target.notes.map((note) => note.path));
+  target.manualPositions = existing
+    ? pruneStoredPositions(existing.manualPositions, targetNotePaths)
+    : readStoredPositions(workspace.positions || {}, layoutKey, targetNotePaths);
+
+  if (!existing) {
+    state.workspaces.push(target);
+  }
+
+  restoreWorkspaceState(target, statusMessage, { preserveView: target.hasView });
 }
 
 function hasWritableWorkspace() {
   return state.source === "folder" && Boolean(state.notesPath);
 }
 
-function setNotes(notes, statusMessage, persistedPositions = {}) {
+function buildLayoutKey(source, rootPath, workspaceName) {
+  return `${STORAGE_PREFIX}:${source}:${rootPath || workspaceName || "workspace"}`;
+}
+
+function getActiveWorkspace() {
+  return state.workspaces.find((workspace) => workspace.id === state.activeWorkspaceId) || null;
+}
+
+function saveActiveWorkspaceState() {
+  const workspace = getActiveWorkspace();
+  if (!workspace) return;
+
+  workspace.notes = state.notes;
+  workspace.selectedPath = state.selectedPath;
+  workspace.rootPath = state.rootPath;
+  workspace.notesPath = state.notesPath;
+  workspace.source = state.source;
+  workspace.workspaceName = state.workspaceName;
+  workspace.dirty = state.dirty;
+  workspace.filter = state.filter;
+  workspace.layoutKey = state.layoutKey;
+  workspace.manualPositions = pruneStoredPositions(state.manualPositions);
+  workspace.graphHasHierarchy = state.graphHasHierarchy;
+  workspace.hierarchyPromptShown = state.hierarchyPromptShown;
+  workspace.hierarchyPromptText = state.hierarchyPromptText;
+  workspace.view = { ...state.view };
+  workspace.hasView = true;
+}
+
+function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { preserveView: true }) {
+  closeGraphCreatePopover();
   cancelQueuedGraphRender();
-  state.notes = notes;
-  state.dirty = false;
+  if (state.saveTimer) {
+    window.clearTimeout(state.saveTimer);
+    state.saveTimer = null;
+  }
+
+  state.activeWorkspaceId = workspace.id;
+  state.notes = workspace.notes || [];
+  state.selectedPath = workspace.selectedPath || null;
+  state.rootPath = workspace.rootPath || "";
+  state.notesPath = workspace.notesPath || "";
+  state.source = workspace.source || "folder";
+  state.workspaceName = workspace.workspaceName || workspace.rootPath || "Folder";
+  state.dirty = Boolean(workspace.dirty);
+  state.saveToken += 1;
+  state.filter = workspace.filter || "";
+  state.layoutKey = workspace.layoutKey || buildLayoutKey(state.source, state.rootPath, state.workspaceName);
+  state.manualPositions = pruneStoredPositions(
+    workspace.manualPositions,
+    new Set(state.notes.map((note) => note.path))
+  );
+  state.graphHasHierarchy = workspace.graphHasHierarchy !== false;
+  state.hierarchyPromptShown = Boolean(workspace.hierarchyPromptShown);
+  state.hierarchyPromptText = workspace.hierarchyPromptText || "";
+  state.view = workspace.view ? { ...workspace.view } : { x: 0, y: 0, scale: 1 };
   state.pendingCreatePoint = null;
   state.pendingNode = null;
-  state.hierarchyPromptShown = false;
+  state.activeInteraction = null;
+  state.hoveredPath = null;
+  state.focusedPath = null;
+  state.referenceEdges = [];
+  state.referenceEdgeCount = 0;
+  state.largeGraphMode = false;
+  state.labelStats = new Map();
+  state.labelVisibility = null;
+
   rebuildIndex();
   state.validation = validateNotes();
-  state.layoutKey = `${STORAGE_PREFIX}:${state.source}:${state.rootPath || state.workspaceName || "workspace"}`;
-  state.manualPositions = readStoredPositions(persistedPositions);
-
   if (!state.selectedPath || !state.byPath.has(state.selectedPath)) {
     const firstRoot = state.notes.find((note) => note.level === 0) || state.notes[0];
     state.selectedPath = firstRoot ? firstRoot.path : null;
   }
 
+  els.searchInput.value = state.filter;
   renderSelectedNote(statusMessage);
   renderNewNoteParents();
-  renderGraph({ preserveView: false });
+  renderGraph({ preserveView });
   updateSourceStatus();
   maybeShowHierarchyPrompt();
   renderValidationStatus();
+  workspace.selectedPath = state.selectedPath;
+  workspace.view = { ...state.view };
+  workspace.hasView = true;
+  renderWorkspaceTabs();
+}
+
+async function switchWorkspaceTab(workspaceId) {
+  if (!workspaceId || workspaceId === state.activeWorkspaceId) return;
+
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return;
+  }
+
+  saveActiveWorkspaceState();
+  const workspace = state.workspaces.find((item) => item.id === workspaceId);
+  if (!workspace) return;
+  restoreWorkspaceState(workspace, "Loaded from tab", { preserveView: true });
+}
+
+async function closeWorkspaceTab(workspaceId) {
+  const index = state.workspaces.findIndex((workspace) => workspace.id === workspaceId);
+  if (index === -1) return;
+
+  if (workspaceId === state.activeWorkspaceId && state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return;
+  }
+
+  saveActiveWorkspaceState();
+  state.workspaces.splice(index, 1);
+
+  if (workspaceId !== state.activeWorkspaceId) {
+    renderWorkspaceTabs();
+    return;
+  }
+
+  const nextWorkspace = state.workspaces[Math.min(index, state.workspaces.length - 1)];
+  if (nextWorkspace) {
+    restoreWorkspaceState(nextWorkspace, "Closed folder tab", { preserveView: true });
+  } else {
+    startEmpty();
+  }
+}
+
+function renderWorkspaceTabs() {
+  const fragment = document.createDocumentFragment();
+  const activeWorkspace = getActiveWorkspace();
+
+  for (const workspace of state.workspaces) {
+    const isActive = workspace.id === state.activeWorkspaceId;
+    const isDirty = isActive ? state.dirty : workspace.dirty;
+    const tab = document.createElement("div");
+    tab.className = `workspaceTab${isActive ? " active" : ""}`;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(isActive));
+    tab.title = workspace.rootPath || workspace.workspaceName || "Folder";
+
+    const switchButton = document.createElement("button");
+    switchButton.className = "workspaceTabMain";
+    switchButton.type = "button";
+    switchButton.dataset.switchWorkspace = workspace.id;
+    switchButton.disabled = activeWorkspace && workspace.id === activeWorkspace.id;
+
+    const title = document.createElement("span");
+    title.className = "workspaceTabTitle";
+    title.textContent = workspace.workspaceName || "Folder";
+    switchButton.appendChild(title);
+
+    if (isDirty) {
+      const dirty = document.createElement("span");
+      dirty.className = "workspaceTabDirty";
+      dirty.textContent = "*";
+      switchButton.appendChild(dirty);
+    }
+
+    const closeButton = document.createElement("button");
+    closeButton.className = "workspaceTabClose";
+    closeButton.type = "button";
+    closeButton.dataset.closeWorkspace = workspace.id;
+    closeButton.setAttribute("aria-label", `Close ${workspace.workspaceName || "folder"}`);
+    closeButton.textContent = "x";
+
+    tab.append(switchButton, closeButton);
+    fragment.appendChild(tab);
+  }
+
+  els.workspaceTabs.replaceChildren(fragment);
 }
 
 function rebuildIndex() {
@@ -1055,10 +1317,13 @@ function scheduleAutosave() {
 }
 
 async function flushAutosave() {
-  if (!state.saveTimer) return;
-  window.clearTimeout(state.saveTimer);
-  state.saveTimer = null;
-  await autosaveSelectedNote();
+  if (state.saveTimer) {
+    window.clearTimeout(state.saveTimer);
+    state.saveTimer = null;
+  }
+  if (state.dirty) {
+    await autosaveSelectedNote();
+  }
 }
 
 async function autosaveSelectedNote() {
@@ -2153,15 +2418,15 @@ async function createNoteFromPending(parent) {
   }
 }
 
-function readStoredPositions(stored) {
+function readStoredPositions(stored, layoutKey = state.layoutKey, allowedPaths = state.notePaths) {
   if (stored && typeof stored === "object") {
-    return pruneStoredPositions(stored);
+    return pruneStoredPositions(stored, allowedPaths);
   }
 
   try {
-    const stored = window.localStorage.getItem(state.layoutKey);
+    const stored = window.localStorage.getItem(layoutKey);
     if (!stored) return {};
-    return pruneStoredPositions(JSON.parse(stored));
+    return pruneStoredPositions(JSON.parse(stored), allowedPaths);
   } catch {
     return {};
   }
@@ -2184,10 +2449,10 @@ async function saveStoredPositions() {
   }
 }
 
-function pruneStoredPositions(positions) {
+function pruneStoredPositions(positions, allowedPaths = state.notePaths) {
   const next = {};
   for (const [path, position] of Object.entries(positions || {})) {
-    if (!state.notePaths.has(path)) continue;
+    if (!allowedPaths.has(path)) continue;
     if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) continue;
     next[path] = {
       x: round(position.x),
@@ -2414,6 +2679,7 @@ function updateSourceStatus() {
   els.infoParent.disabled = !isFolder || !hasSelection;
   els.deleteNoteButton.disabled = !isFolder || !hasSelection;
   setEditorEditable(isFolder && hasSelection);
+  renderWorkspaceTabs();
 }
 
 function setEditorEditable(isEditable) {
