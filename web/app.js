@@ -8,7 +8,12 @@ import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
 } from "./graphLargeMode.js";
-import { computeNoteLinkStats, decideVisibleLabels } from "./labelVisibility.js";
+import {
+  computeNoteLinkStats,
+  decideVisibleLabels,
+  getLabelVisibilityPolicy,
+  prepareLabelVisibilityCache
+} from "./labelVisibility.js";
 import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
 const LEVEL_COLORS = ["#f2f0ea", "#9fc5ff", "#b8f0c0", "#ffe08a", "#ffb6d1", "#b88cff", "#7de3ff", "#f6a86d"];
@@ -37,6 +42,11 @@ const LARGE_GRAPH_NOTE_THRESHOLD = 500;
 const LARGE_GRAPH_REFERENCE_EDGE_THRESHOLD = 1000;
 const MAX_LEVEL_NODES_PER_SUBROW = 80;
 const LARGE_GRAPH_REFERENCE_EDGE_LIMIT = 500;
+const SPATIAL_CELL_SIZE = 240;
+const LIVE_SYNC_INTERVAL_MS = 1500;
+const PERF_ENABLED =
+  window.location.search.includes("perf=1") ||
+  window.localStorage.getItem("apex-notes-perf") === "1";
 
 const editorEditable = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
@@ -52,6 +62,7 @@ const state = {
   sortedNotes: [],
   sortedParentOptions: [],
   selectedPath: null,
+  selectedPaths: new Set(),
   rootPath: "",
   notesPath: "",
   source: "none",
@@ -59,6 +70,10 @@ const state = {
   dirty: false,
   saveTimer: null,
   saveToken: 0,
+  fileSignatures: new Map(),
+  liveSyncTimer: 0,
+  liveSyncInFlight: false,
+  liveSyncToken: 0,
   graphRenderFrame: 0,
   queuedGraphRender: null,
   filter: "",
@@ -68,11 +83,16 @@ const state = {
   positions: new Map(),
   nodeElements: new Map(),
   edgeElements: [],
+  edgeElementsByPath: new Map(),
+  spatialIndex: null,
   referenceEdges: [],
   referenceEdgeCount: 0,
   largeGraphMode: false,
   labelStats: new Map(),
+  labelVisibilityCache: null,
   labelVisibility: null,
+  labelVisibilityKey: "",
+  labelRefreshFrame: 0,
   hoveredPath: null,
   focusedPath: null,
   editorView: null,
@@ -83,14 +103,19 @@ const state = {
   hierarchyPromptText: "",
   pendingCreatePoint: null,
   pendingNode: null,
+  nodeClipboard: null,
   ropeElement: null,
   ropeTargetPath: null,
+  selectionRectElement: null,
+  lastGraphPoint: null,
   view: {
     x: 0,
     y: 0,
     scale: 1
   },
   activeInteraction: null,
+  interactionFrame: 0,
+  queuedInteractionEvent: null,
   graphBounds: null,
   graphFullscreenFallback: false
 };
@@ -134,6 +159,12 @@ const els = {
   hierarchyPromptDialog: document.querySelector("#hierarchyPromptDialog"),
   copyHierarchyPromptButton: document.querySelector("#copyHierarchyPromptButton"),
   closeHierarchyPromptButton: document.querySelector("#closeHierarchyPromptButton"),
+  deleteConfirmDialog: document.querySelector("#deleteConfirmDialog"),
+  deleteConfirmTitle: document.querySelector("#deleteConfirmTitle"),
+  deleteConfirmMessage: document.querySelector("#deleteConfirmMessage"),
+  deleteConfirmDetail: document.querySelector("#deleteConfirmDetail"),
+  cancelDeleteButton: document.querySelector("#cancelDeleteButton"),
+  confirmDeleteButton: document.querySelector("#confirmDeleteButton"),
   graphCreatePopover: document.querySelector("#graphCreatePopover"),
   graphNewTitle: document.querySelector("#graphNewTitle"),
   cancelGraphCreateButton: document.querySelector("#cancelGraphCreateButton")
@@ -144,11 +175,30 @@ const wikiLinkField = StateField.define({
     return buildWikiLinkDecorations(editorState.doc);
   },
   update(decorations, transaction) {
-    const shouldRefresh = transaction.docChanged || transaction.effects.some((effect) => effect.is(wikiLinkRefreshEffect));
-    return shouldRefresh ? buildWikiLinkDecorations(transaction.state.doc) : decorations;
+    if (transaction.effects.some((effect) => effect.is(wikiLinkRefreshEffect))) {
+      return buildWikiLinkDecorations(transaction.state.doc);
+    }
+    if (transaction.docChanged) {
+      scheduleWikiLinkRefresh();
+      return decorations.map(transaction.changes);
+    }
+    return decorations;
   },
   provide: (field) => EditorView.decorations.from(field)
 });
+
+let wikiLinkRefreshTimer = 0;
+function scheduleWikiLinkRefresh() {
+  if (wikiLinkRefreshTimer) {
+    window.clearTimeout(wikiLinkRefreshTimer);
+  }
+  wikiLinkRefreshTimer = window.setTimeout(() => {
+    wikiLinkRefreshTimer = 0;
+    refreshEditorDecorations();
+  }, 140);
+}
+
+let deleteConfirmResolver = null;
 
 class WikiLinkWidget extends WidgetType {
   constructor(ref, label, note) {
@@ -269,6 +319,9 @@ function bindEvents() {
   els.cancelCreateFolderButton.addEventListener("click", () => closeCreateFolderDialog());
   els.closeHierarchyPromptButton.addEventListener("click", () => closeHierarchyPromptDialog());
   els.copyHierarchyPromptButton.addEventListener("click", () => copyHierarchyPrompt());
+  els.cancelDeleteButton.addEventListener("click", () => settleDeleteConfirm(false));
+  els.confirmDeleteButton.addEventListener("click", () => settleDeleteConfirm(true));
+  els.deleteConfirmDialog.addEventListener("close", () => settleDeleteConfirm(false));
   els.newNoteParent.addEventListener("change", updateNewNoteHint);
   els.newNoteForm.addEventListener("submit", createNewNote);
   els.createFolderForm.addEventListener("submit", createGraphFolder);
@@ -281,10 +334,8 @@ function bindEvents() {
   els.searchInput.addEventListener("input", () => {
     state.filter = els.searchInput.value.trim().toLowerCase();
     applyGraphDimming();
-    updateLabelVisibility();
-    if (state.largeGraphMode) {
-      requestGraphRender({ preserveView: true });
-    }
+    scheduleLabelVisibilityRefresh({ force: true });
+    scheduleLargeGraphRefresh();
   });
 
   els.graph.addEventListener("wheel", onGraphWheel, { passive: false });
@@ -294,11 +345,15 @@ function bindEvents() {
   els.graph.addEventListener("pointerout", onGraphPointerOut);
   els.graph.addEventListener("focusin", onGraphFocusIn);
   els.graph.addEventListener("focusout", onGraphFocusOut);
-  els.graph.addEventListener("pointermove", continueInteraction);
+  els.graph.addEventListener("pointermove", queueInteraction);
   els.graph.addEventListener("pointerup", endInteraction);
   els.graph.addEventListener("pointercancel", cancelInteraction);
   els.graph.addEventListener("keydown", onGraphKeydown);
-  window.addEventListener("resize", () => requestGraphRender({ preserveView: true }));
+  els.graph.addEventListener("dragover", onGraphDragOver);
+  els.graph.addEventListener("dragleave", onGraphDragLeave);
+  els.graph.addEventListener("drop", onGraphDrop);
+  document.addEventListener("keydown", onDocumentKeydown);
+  window.addEventListener("resize", scheduleResizeRender);
   document.addEventListener("fullscreenchange", syncGraphFullscreenState);
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -374,6 +429,13 @@ function syncGraphFullscreenButton() {
 }
 
 function onWorkspaceTabsClick(event) {
+  const openButton = event.target.closest("[data-open-workspace]");
+  if (openButton) {
+    event.preventDefault();
+    void openNotesFolder();
+    return;
+  }
+
   const closeButton = event.target.closest("[data-close-workspace]");
   if (closeButton) {
     event.preventDefault();
@@ -390,6 +452,7 @@ function onWorkspaceTabsClick(event) {
 }
 
 function startEmpty() {
+  stopLiveSync();
   state.activeWorkspaceId = null;
   state.notes = [];
   state.byPath = new Map();
@@ -398,12 +461,14 @@ function startEmpty() {
   state.sortedNotes = [];
   state.sortedParentOptions = [];
   state.selectedPath = null;
+  state.selectedPaths = new Set();
   state.rootPath = "";
   state.notesPath = "";
   state.source = "none";
   state.workspaceName = "";
   state.dirty = false;
   state.saveToken += 1;
+  state.fileSignatures = new Map();
   cancelQueuedGraphRender();
   if (state.saveTimer) {
     window.clearTimeout(state.saveTimer);
@@ -415,15 +480,27 @@ function startEmpty() {
   state.graphHasHierarchy = true;
   state.hierarchyPromptShown = false;
   state.manualPositions = {};
+  state.positions = new Map();
+  state.nodeElements = new Map();
+  state.edgeElements = [];
+  state.edgeElementsByPath = new Map();
+  state.spatialIndex = null;
   state.referenceEdges = [];
   state.referenceEdgeCount = 0;
   state.largeGraphMode = false;
   state.labelStats = new Map();
+  state.labelVisibilityCache = null;
   state.labelVisibility = null;
+  state.labelVisibilityKey = "";
+  cancelLabelVisibilityRefresh();
   state.hoveredPath = null;
   state.focusedPath = null;
   state.pendingCreatePoint = null;
   state.pendingNode = null;
+  state.nodeClipboard = null;
+  state.lastGraphPoint = null;
+  state.activeInteraction = null;
+  cancelQueuedInteraction();
   els.searchInput.value = "";
   renderSelectedNote("Open or create a folder");
   renderNewNoteParents();
@@ -516,6 +593,7 @@ function isTauriApp() {
 async function pickNativeDirectory() {
   const selected = await window.__TAURI__.dialog.open({
     directory: true,
+    recursive: true,
     multiple: false,
     canCreateDirectories: true
   });
@@ -524,6 +602,218 @@ async function pickNativeDirectory() {
 
 async function invokeNative(command, args = {}) {
   return window.__TAURI__.core.invoke(command, args);
+}
+
+function fileSignature(file) {
+  if (file && file.signature) return String(file.signature);
+  const modified = Number(file && file.modifiedMs) || 0;
+  const bytes = Number(file && file.byteLen) || 0;
+  return `${modified}:${bytes}`;
+}
+
+function buildFileSignatureMap(files = []) {
+  const signatures = new Map();
+  for (const file of files || []) {
+    if (!file || !file.path) continue;
+    signatures.set(file.path, fileSignature(file));
+  }
+  return signatures;
+}
+
+function cloneFileSignatures(signatures) {
+  if (signatures instanceof Map) {
+    return new Map(signatures);
+  }
+  if (signatures && typeof signatures === "object") {
+    return new Map(Object.entries(signatures));
+  }
+  return new Map();
+}
+
+function canLiveSyncWorkspace() {
+  return isTauriApp() && state.source === "folder" && Boolean(state.notesPath);
+}
+
+function startLiveSync() {
+  stopLiveSync();
+  if (!canLiveSyncWorkspace()) return;
+
+  state.liveSyncToken += 1;
+  scheduleLiveSync(true);
+}
+
+function stopLiveSync() {
+  if (state.liveSyncTimer) {
+    window.clearTimeout(state.liveSyncTimer);
+    state.liveSyncTimer = 0;
+  }
+  state.liveSyncToken += 1;
+  state.liveSyncInFlight = false;
+}
+
+function scheduleLiveSync(immediate = false) {
+  if (!canLiveSyncWorkspace()) return;
+  if (state.liveSyncTimer) {
+    window.clearTimeout(state.liveSyncTimer);
+  }
+
+  state.liveSyncTimer = window.setTimeout(() => {
+    state.liveSyncTimer = 0;
+    void checkLiveFolderUpdates();
+  }, immediate ? 0 : LIVE_SYNC_INTERVAL_MS);
+}
+
+async function checkLiveFolderUpdates() {
+  if (!canLiveSyncWorkspace()) return;
+  if (state.liveSyncInFlight) {
+    scheduleLiveSync();
+    return;
+  }
+
+  const token = state.liveSyncToken;
+  state.liveSyncInFlight = true;
+
+  try {
+    if (state.dirty || state.saveTimer || state.activeInteraction) return;
+
+    const statuses = await invokeNative("list_note_files", {
+      notesPath: state.notesPath
+    });
+    if (token !== state.liveSyncToken || !canLiveSyncWorkspace()) return;
+
+    const nextSignatures = buildFileSignatureMap(statuses);
+    const pathsToRead = [];
+    const deletedPaths = [];
+
+    for (const file of statuses || []) {
+      if (!file || !file.path) continue;
+      if (state.fileSignatures.get(file.path) === nextSignatures.get(file.path)) continue;
+      pathsToRead.push(file.path);
+    }
+
+    for (const path of state.fileSignatures.keys()) {
+      if (!nextSignatures.has(path)) {
+        deletedPaths.push(path);
+      }
+    }
+
+    if (!pathsToRead.length && !deletedPaths.length) {
+      state.fileSignatures = nextSignatures;
+      saveActiveWorkspaceState();
+      return;
+    }
+
+    if (state.dirty || state.saveTimer || state.activeInteraction) return;
+
+    const files = pathsToRead.length
+      ? await invokeNative("read_notes", {
+        notesPath: state.notesPath,
+        paths: pathsToRead
+      })
+      : [];
+
+    if (
+      token !== state.liveSyncToken ||
+      !canLiveSyncWorkspace() ||
+      state.dirty ||
+      state.saveTimer ||
+      state.activeInteraction
+    ) {
+      return;
+    }
+
+    applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures });
+  } catch (error) {
+    console.warn("Live folder sync failed", error);
+  } finally {
+    if (token === state.liveSyncToken) {
+      state.liveSyncInFlight = false;
+    }
+    if (token === state.liveSyncToken && canLiveSyncWorkspace()) {
+      scheduleLiveSync();
+    }
+  }
+}
+
+function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
+  const deletedSet = new Set(deletedPaths.filter((path) => state.byPath.has(path)));
+  const incomingNotes = new Map();
+  const added = new Set();
+  const changed = new Set();
+
+  for (const file of files || []) {
+    if (!file || !file.path) continue;
+    const existing = state.byPath.get(file.path);
+    if (existing && existing.raw === file.raw) continue;
+
+    const note = parseNote(file.path, file.raw);
+    incomingNotes.set(file.path, note);
+    if (existing) {
+      changed.add(file.path);
+    } else {
+      added.add(file.path);
+    }
+  }
+
+  if (!incomingNotes.size && !deletedSet.size) {
+    state.fileSignatures = nextSignatures;
+    saveActiveWorkspaceState();
+    return;
+  }
+
+  state.notes = state.notes.filter((note) => !deletedSet.has(note.path) && !incomingNotes.has(note.path));
+  state.notes.push(...incomingNotes.values());
+  state.notes.sort((a, b) => compareText(a.path, b.path));
+
+  for (const path of deletedSet) {
+    delete state.manualPositions[path];
+  }
+
+  state.fileSignatures = nextSignatures;
+  state.dirty = false;
+  rebuildIndex();
+  state.validation = validateNotes();
+  state.manualPositions = pruneStoredPositions(state.manualPositions);
+  normalizeSelectionAfterNotesChanged();
+
+  renderCurrentSelection(liveUpdateStatus(added.size, changed.size, deletedSet.size));
+  renderNewNoteParents();
+  renderGraph({ preserveView: true });
+  updateSourceStatus();
+  maybeShowHierarchyPrompt();
+  renderValidationStatus();
+  saveActiveWorkspaceState();
+}
+
+function liveUpdateStatus(added, changed, removed) {
+  const parts = [];
+  if (added) parts.push(`${added} added`);
+  if (changed) parts.push(`${changed} changed`);
+  if (removed) parts.push(`${removed} removed`);
+  return `Live updated: ${parts.join(", ")}`;
+}
+
+function normalizeSelectionAfterNotesChanged() {
+  state.selectedPaths = new Set([...state.selectedPaths].filter((path) => state.byPath.has(path)));
+  if (state.selectedPath && !state.byPath.has(state.selectedPath)) {
+    state.selectedPath = null;
+  }
+  if (state.selectedPaths.size > 1) {
+    state.selectedPath = null;
+  }
+  if (state.selectedPath && !state.selectedPaths.size) {
+    state.selectedPaths.add(state.selectedPath);
+  }
+  if (!state.selectedPath && state.selectedPaths.size === 1) {
+    state.selectedPath = [...state.selectedPaths][0];
+  }
+  if (!state.selectedPath && !state.selectedPaths.size) {
+    const firstRoot = state.notes.find((note) => note.level === 0) || state.notes[0];
+    state.selectedPath = firstRoot ? firstRoot.path : null;
+    if (state.selectedPath) {
+      state.selectedPaths.add(state.selectedPath);
+    }
+  }
 }
 
 function setNativeWorkspace(workspace, statusMessage) {
@@ -548,7 +838,8 @@ function setNativeWorkspace(workspace, statusMessage) {
   target.source = "folder";
   target.workspaceName = workspaceName;
   target.layoutKey = layoutKey;
-  target.notes = workspace.notes.map((note) => parseNote(note.path, note.raw));
+  target.notes = (workspace.notes || []).map((note) => parseNote(note.path, note.raw));
+  target.fileSignatures = buildFileSignatureMap(workspace.notes || []);
   target.dirty = false;
   const targetNotePaths = new Set(target.notes.map((note) => note.path));
   target.manualPositions = existing
@@ -580,11 +871,13 @@ function saveActiveWorkspaceState() {
 
   workspace.notes = state.notes;
   workspace.selectedPath = state.selectedPath;
+  workspace.selectedPaths = [...state.selectedPaths].filter((path) => state.notePaths.has(path));
   workspace.rootPath = state.rootPath;
   workspace.notesPath = state.notesPath;
   workspace.source = state.source;
   workspace.workspaceName = state.workspaceName;
   workspace.dirty = state.dirty;
+  workspace.fileSignatures = cloneFileSignatures(state.fileSignatures);
   workspace.filter = state.filter;
   workspace.layoutKey = state.layoutKey;
   workspace.manualPositions = pruneStoredPositions(state.manualPositions);
@@ -596,8 +889,11 @@ function saveActiveWorkspaceState() {
 }
 
 function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { preserveView: true }) {
+  stopLiveSync();
   closeGraphCreatePopover();
   cancelQueuedGraphRender();
+  cancelLabelVisibilityRefresh();
+  cancelQueuedInteraction();
   if (state.saveTimer) {
     window.clearTimeout(state.saveTimer);
     state.saveTimer = null;
@@ -606,12 +902,14 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.activeWorkspaceId = workspace.id;
   state.notes = workspace.notes || [];
   state.selectedPath = workspace.selectedPath || null;
+  state.selectedPaths = new Set(workspace.selectedPaths || []);
   state.rootPath = workspace.rootPath || "";
   state.notesPath = workspace.notesPath || "";
   state.source = workspace.source || "folder";
   state.workspaceName = workspace.workspaceName || workspace.rootPath || "Folder";
   state.dirty = Boolean(workspace.dirty);
   state.saveToken += 1;
+  state.fileSignatures = cloneFileSignatures(workspace.fileSignatures);
   state.filter = workspace.filter || "";
   state.layoutKey = workspace.layoutKey || buildLayoutKey(state.source, state.rootPath, state.workspaceName);
   state.manualPositions = pruneStoredPositions(
@@ -627,30 +925,37 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.activeInteraction = null;
   state.hoveredPath = null;
   state.focusedPath = null;
+  state.positions = new Map();
+  state.nodeElements = new Map();
+  state.edgeElements = [];
+  state.edgeElementsByPath = new Map();
+  state.spatialIndex = null;
   state.referenceEdges = [];
   state.referenceEdgeCount = 0;
   state.largeGraphMode = false;
   state.labelStats = new Map();
+  state.labelVisibilityCache = null;
   state.labelVisibility = null;
+  state.labelVisibilityKey = "";
 
   rebuildIndex();
   state.validation = validateNotes();
-  if (!state.selectedPath || !state.byPath.has(state.selectedPath)) {
-    const firstRoot = state.notes.find((note) => note.level === 0) || state.notes[0];
-    state.selectedPath = firstRoot ? firstRoot.path : null;
-  }
+  normalizeSelectionAfterNotesChanged();
 
   els.searchInput.value = state.filter;
-  renderSelectedNote(statusMessage);
+  renderCurrentSelection(statusMessage);
   renderNewNoteParents();
   renderGraph({ preserveView });
   updateSourceStatus();
   maybeShowHierarchyPrompt();
   renderValidationStatus();
   workspace.selectedPath = state.selectedPath;
+  workspace.selectedPaths = [...state.selectedPaths];
   workspace.view = { ...state.view };
   workspace.hasView = true;
+  workspace.fileSignatures = cloneFileSignatures(state.fileSignatures);
   renderWorkspaceTabs();
+  startLiveSync();
 }
 
 async function switchWorkspaceTab(workspaceId) {
@@ -694,7 +999,6 @@ async function closeWorkspaceTab(workspaceId) {
 
 function renderWorkspaceTabs() {
   const fragment = document.createDocumentFragment();
-  const activeWorkspace = getActiveWorkspace();
 
   for (const workspace of state.workspaces) {
     const isActive = workspace.id === state.activeWorkspaceId;
@@ -709,7 +1013,6 @@ function renderWorkspaceTabs() {
     switchButton.className = "workspaceTabMain";
     switchButton.type = "button";
     switchButton.dataset.switchWorkspace = workspace.id;
-    switchButton.disabled = activeWorkspace && workspace.id === activeWorkspace.id;
 
     const title = document.createElement("span");
     title.className = "workspaceTabTitle";
@@ -728,10 +1031,21 @@ function renderWorkspaceTabs() {
     closeButton.type = "button";
     closeButton.dataset.closeWorkspace = workspace.id;
     closeButton.setAttribute("aria-label", `Close ${workspace.workspaceName || "folder"}`);
-    closeButton.textContent = "x";
+    closeButton.title = `Close ${workspace.workspaceName || "folder"}`;
 
     tab.append(switchButton, closeButton);
     fragment.appendChild(tab);
+  }
+
+  if (state.workspaces.length) {
+    const addButton = document.createElement("button");
+    addButton.className = "workspaceTabAdd";
+    addButton.type = "button";
+    addButton.dataset.openWorkspace = "true";
+    addButton.setAttribute("aria-label", "Open another notes folder");
+    addButton.title = "Open another notes folder";
+    addButton.textContent = "+";
+    fragment.appendChild(addButton);
   }
 
   els.workspaceTabs.replaceChildren(fragment);
@@ -789,7 +1103,9 @@ function rebuildIndex() {
     }
   );
   state.labelStats = computeNoteLinkStats(state.sortedNotes);
+  state.labelVisibilityCache = prepareLabelVisibilityCache(state.sortedNotes, state.labelStats);
   state.labelVisibility = null;
+  state.labelVisibilityKey = "";
 
   refreshEditorDecorations();
 }
@@ -1115,16 +1431,85 @@ async function selectNote(path, force = false) {
   note = state.byPath.get(path);
   if (!note) return;
 
-  const previousPath = state.selectedPath;
+  const previousSelection = new Set(state.selectedPaths);
   state.selectedPath = path;
+  state.selectedPaths = new Set([path]);
   state.dirty = false;
   renderSelectedNote(state.source === "folder" ? "Loaded" : "Read-only");
-  updateGraphSelection(previousPath, path);
-  updateLabelVisibility();
+  updateGraphSelection(previousSelection, state.selectedPaths);
+  scheduleLabelVisibilityRefresh({ force: true });
   if (state.largeGraphMode) {
     requestGraphRender({ preserveView: true });
   }
   updateSourceStatus();
+}
+
+async function setGraphSelection(paths, { openSingle = false, statusMessage = "" } = {}) {
+  const nextSelection = new Set(
+    [...paths]
+      .filter((path) => path !== PENDING_PATH)
+      .filter((path) => state.byPath.has(path))
+  );
+
+  if (openSingle && nextSelection.size === 1) {
+    await selectNote([...nextSelection][0]);
+    return true;
+  }
+
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+  }
+
+  const previousSelection = new Set(state.selectedPaths);
+  state.selectedPaths = nextSelection;
+  state.selectedPath = null;
+  updateGraphSelection(previousSelection, nextSelection);
+  renderCurrentSelection(statusMessage || selectionStatus(nextSelection.size));
+  scheduleLabelVisibilityRefresh({ force: true });
+  scheduleLargeGraphRefresh();
+  updateSourceStatus();
+  return true;
+}
+
+function renderCurrentSelection(statusMessage) {
+  if (state.selectedPath) {
+    renderSelectedNote(statusMessage);
+    return;
+  }
+
+  if (state.selectedPaths.size) {
+    renderGraphSelectionSummary(statusMessage);
+    return;
+  }
+
+  renderSelectedNote(statusMessage);
+}
+
+function renderGraphSelectionSummary(statusMessage) {
+  const count = state.selectedPaths.size;
+  els.noteTitle.textContent = `${count} note${count === 1 ? "" : "s"} selected`;
+  const onlyPath = count === 1 ? [...state.selectedPaths][0] : "";
+  els.notePath.textContent = onlyPath || "";
+  setEditorBody("");
+  renderInfoPanel(null);
+  setStatus(statusMessage || selectionStatus(count));
+}
+
+function selectionStatus(count) {
+  if (!count) return "No graph selection";
+  return `${count} note${count === 1 ? "" : "s"} selected`;
+}
+
+function getGraphSelectedNotes() {
+  return [...state.selectedPaths]
+    .map((path) => state.byPath.get(path))
+    .filter(Boolean);
+}
+
+function getOnlyGraphSelectedNote() {
+  const notes = getGraphSelectedNotes();
+  return notes.length === 1 ? notes[0] : null;
 }
 
 function renderSelectedNote(statusMessage) {
@@ -1180,14 +1565,14 @@ function renderInfoPanel(note) {
     els.infoTitle.value = "";
     els.infoParent.innerHTML = "";
     els.infoLevel.value = "";
-    els.deleteNoteButton.disabled = true;
+    els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
     els.noteInfo.open = false;
     state.infoHydrating = false;
     return;
   }
 
   els.infoTitle.value = note.title;
-  els.deleteNoteButton.disabled = !hasWritableWorkspace();
+  els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
   renderInfoParents(note);
   updateInfoDerivedFields();
   state.infoHydrating = false;
@@ -1256,53 +1641,107 @@ function markSelectedDirty() {
 }
 
 async function deleteSelectedNote() {
-  const note = getSelectedNote();
-  if (!note || !hasWritableWorkspace()) {
-    setStatus("Open notes folder to delete notes");
-    return;
+  await deleteGraphSelection();
+}
+
+function confirmDeleteNotes(notes, childCount) {
+  if (deleteConfirmResolver) {
+    settleDeleteConfirm(false);
   }
 
-  const childCount = note.children.length;
-  const childWarning = childCount
-    ? `\n\n${childCount} child note${childCount === 1 ? "" : "s"} will keep their Markdown and show broken parents until reconnected.`
+  const count = notes.length;
+  const isSingle = count === 1;
+  const title = isSingle ? notes[0].title : `${count} selected notes`;
+  els.deleteConfirmTitle.textContent = isSingle
+    ? `Move "${title}" to Trash?`
+    : `Move ${title} to Trash?`;
+  els.deleteConfirmMessage.textContent = isSingle
+    ? "This note will leave the current graph and move to the system Trash."
+    : "These notes will leave the current graph and move to the system Trash.";
+  els.deleteConfirmDetail.textContent = childCount
+    ? `${childCount} child note${childCount === 1 ? "" : "s"} will keep their Markdown and show broken parents until reconnected.`
     : "";
-  const message = `Move "${note.title}" to Trash?${childWarning}`;
+  els.deleteConfirmDetail.hidden = childCount === 0;
+  els.confirmDeleteButton.textContent = isSingle ? "Move to Trash" : `Move ${count} notes`;
 
-  if (!window.confirm(message)) return;
+  return new Promise((resolve) => {
+    deleteConfirmResolver = resolve;
+    els.deleteConfirmDialog.removeAttribute("hidden");
+    if (typeof els.deleteConfirmDialog.showModal === "function") {
+      els.deleteConfirmDialog.showModal();
+    } else {
+      els.deleteConfirmDialog.removeAttribute("hidden");
+    }
+    els.confirmDeleteButton.focus({ preventScroll: true });
+  });
+}
+
+function settleDeleteConfirm(confirmed) {
+  const resolve = deleteConfirmResolver;
+  if (!resolve) return;
+
+  deleteConfirmResolver = null;
+  if (typeof els.deleteConfirmDialog.showModal === "function") {
+    if (els.deleteConfirmDialog.open) {
+      els.deleteConfirmDialog.close();
+    }
+  } else {
+    els.deleteConfirmDialog.setAttribute("hidden", "");
+  }
+  resolve(Boolean(confirmed));
+}
+
+async function deleteGraphSelection() {
+  const selectedNotes = getGraphSelectedNotes();
+  const notes = selectedNotes.length ? selectedNotes : [getSelectedNote()].filter(Boolean);
+
+  if (!notes.length || !hasWritableWorkspace()) {
+    setStatus("Open notes folder to delete notes");
+    return false;
+  }
+
+  const deleting = new Set(notes.map((note) => note.path));
+  const childCount = state.notes.filter((note) => note.parentNote && deleting.has(note.parentNote.path) && !deleting.has(note.path)).length;
+  if (!(await confirmDeleteNotes(notes, childCount))) return false;
 
   if (state.dirty) {
     await flushAutosave();
-    if (state.dirty) return;
+    if (state.dirty) return false;
   }
 
   try {
-    await invokeNative("trash_note", {
+    await invokeNative("trash_notes", {
       notesPath: state.notesPath,
-      path: note.path
+      paths: notes.map((note) => note.path)
     });
 
-    const deletedPath = note.path;
-    const deletedParent = note.parentNote;
-    state.notes = state.notes.filter((item) => item.path !== deletedPath);
-    delete state.manualPositions[deletedPath];
+    const deletedPaths = new Set(notes.map((note) => note.path));
+    const deletedParent = notes.length === 1 ? notes[0].parentNote : null;
+    state.notes = state.notes.filter((item) => !deletedPaths.has(item.path));
+    for (const path of deletedPaths) {
+      delete state.manualPositions[path];
+    }
     const parentStillExists = deletedParent && state.notes.some((item) => item.path === deletedParent.path);
-    state.selectedPath =
-      (parentStillExists && deletedParent.path) ||
-      (state.notes[0] && state.notes[0].path) ||
-      null;
+    const nextPath = notes.length === 1
+      ? ((parentStillExists && deletedParent.path) || (state.notes[0] && state.notes[0].path) || null)
+      : null;
+    state.selectedPath = nextPath;
+    state.selectedPaths = nextPath ? new Set([nextPath]) : new Set();
     state.dirty = false;
     rebuildIndex();
     state.validation = validateNotes();
-    void saveStoredPositions();
+    void savePositionPatch(positionRemovalPatch(deletedPaths));
     await updateManifestFile();
-    renderSelectedNote("Moved note to Trash");
+    renderCurrentSelection(`Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
     updateSourceStatus();
     renderValidationStatus();
+    return true;
   } catch (error) {
     setStatus("Could not delete note");
     console.error(error);
+    return false;
   }
 }
 
@@ -1360,8 +1799,6 @@ async function autosaveSelectedNote() {
 
       rebuildIndex();
       state.validation = validateNotes();
-      state.manualPositions = pruneStoredPositions(state.manualPositions);
-      void saveStoredPositions();
       state.selectedPath = updated.path;
 
       els.noteTitle.textContent = updated.title;
@@ -1374,6 +1811,7 @@ async function autosaveSelectedNote() {
       patchBodyOnlyNote(note, updated);
       if (state.filter) {
         applyGraphDimming();
+        scheduleLabelVisibilityRefresh({ force: true });
       }
     }
 
@@ -1450,6 +1888,7 @@ function createNoteRaw({ title, level, parent, body }) {
 }
 
 function renderGraph({ preserveView } = { preserveView: true }) {
+  const perf = startPerfMeasure("renderGraph");
   cancelQueuedGraphRender();
   const viewportWidth = Math.max(320, els.graphScroller.clientWidth || 0);
   const viewportHeight = Math.max(320, els.graphScroller.clientHeight || 0);
@@ -1464,8 +1903,10 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   els.graphCanvas = canvas;
   state.nodeElements = new Map();
   state.edgeElements = [];
+  state.edgeElementsByPath = new Map();
   state.ropeElement = null;
   state.ropeTargetPath = null;
+  state.selectionRectElement = null;
 
   const notes = getRenderableNotes();
   state.positions = buildPositions(notes, viewportWidth, viewportHeight);
@@ -1473,6 +1914,8 @@ function renderGraph({ preserveView } = { preserveView: true }) {
     state.positions.set(PENDING_PATH, state.pendingNode.position);
   }
   state.graphBounds = getGraphBounds(state.positions);
+  state.spatialIndex = buildSpatialIndex(notes);
+  state.labelVisibilityKey = "";
 
   if (!notes.length && !state.pendingNode) {
     els.graph.appendChild(canvas);
@@ -1483,6 +1926,8 @@ function renderGraph({ preserveView } = { preserveView: true }) {
     empty.textContent = "Open folder or create folder";
     els.graph.appendChild(empty);
     applyViewTransform();
+    updateLabelVisibility({ force: true });
+    finishPerfMeasure(perf);
     return;
   }
 
@@ -1500,7 +1945,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
       edge.setAttribute("aria-hidden", "true");
       edge.style.setProperty("--level-color", getLevelColor(note.level));
       fragment.appendChild(edge);
-      state.edgeElements.push({ path: edge, from: note.parentNote.path, to: note.path, type: "hierarchy" });
+      registerGraphEdge({ path: edge, from: note.parentNote.path, to: note.path, type: "hierarchy" });
     }
 
     for (const referenceEdge of getRenderableReferenceEdges(notes)) {
@@ -1509,9 +1954,11 @@ function renderGraph({ preserveView } = { preserveView: true }) {
       edge.setAttribute("aria-hidden", "true");
       edge.style.setProperty("--level-color", getLevelColor(referenceEdge.level));
       fragment.appendChild(edge);
-      state.edgeElements.push({ path: edge, from: referenceEdge.from, to: referenceEdge.to, type: "reference" });
+      registerGraphEdge({ path: edge, from: referenceEdge.from, to: referenceEdge.to, type: "reference" });
     }
   }
+
+  state.labelVisibility = state.largeGraphMode ? computeLargeGraphLabelVisibility() : null;
 
   for (const note of notes) {
     renderGraphNode(fragment, note);
@@ -1525,7 +1972,8 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   els.graph.appendChild(canvas);
   applyViewTransform();
   updateGraphGeometry();
-  updateLabelVisibility();
+  updateLabelVisibility({ force: true });
+  finishPerfMeasure(perf);
 }
 
 function requestGraphRender(options = { preserveView: true }) {
@@ -1550,12 +1998,54 @@ function cancelQueuedGraphRender() {
   state.queuedGraphRender = null;
 }
 
-function updateGraphSelection(previousPath, nextPath) {
-  for (const path of new Set([previousPath, nextPath].filter(Boolean))) {
+let resizeDebounceTimer = 0;
+function scheduleResizeRender() {
+  if (resizeDebounceTimer) {
+    window.clearTimeout(resizeDebounceTimer);
+  }
+  resizeDebounceTimer = window.setTimeout(() => {
+    resizeDebounceTimer = 0;
+    requestGraphRender({ preserveView: true });
+  }, 120);
+}
+
+let largeGraphRefreshTimer = 0;
+function scheduleLargeGraphRefresh() {
+  if (!state.largeGraphMode) return;
+  if (largeGraphRefreshTimer) {
+    window.clearTimeout(largeGraphRefreshTimer);
+  }
+  largeGraphRefreshTimer = window.setTimeout(() => {
+    largeGraphRefreshTimer = 0;
+    if (state.largeGraphMode) {
+      requestGraphRender({ preserveView: true });
+    }
+  }, 90);
+}
+
+function registerGraphEdge(edge) {
+  state.edgeElements.push(edge);
+  addIncidentGraphEdge(edge.from, edge);
+  addIncidentGraphEdge(edge.to, edge);
+}
+
+function addIncidentGraphEdge(path, edge) {
+  if (!path) return;
+  if (!state.edgeElementsByPath.has(path)) {
+    state.edgeElementsByPath.set(path, []);
+  }
+  state.edgeElementsByPath.get(path).push(edge);
+}
+
+function updateGraphSelection(previousPaths, nextPaths) {
+  const previous = previousPaths instanceof Set ? previousPaths : new Set([previousPaths].filter(Boolean));
+  const next = nextPaths instanceof Set ? nextPaths : new Set([nextPaths].filter(Boolean));
+  for (const path of new Set([...previous, ...next])) {
     const group = state.nodeElements.get(path);
     if (!group) continue;
-    const isSelected = path === nextPath;
+    const isSelected = next.has(path);
     group.classList.toggle("selected", isSelected);
+    group.setAttribute("aria-pressed", String(isSelected));
     const dot = group.querySelector(".nodeDot");
     if (dot) {
       dot.setAttribute("r", String(isSelected ? SELECTED_DOT_RADIUS : DOT_RADIUS));
@@ -1578,7 +2068,6 @@ function applyGraphDimming() {
     const to = state.byPath.get(edge.to);
     edge.path.classList.toggle("dimmed", Boolean((from && isDimmed(from)) || (to && isDimmed(to))));
   }
-  updateLabelVisibility();
 }
 
 function getRenderableNotes() {
@@ -1639,6 +2128,7 @@ function getRenderableReferenceEdges(notes) {
       edges,
       {
         selectedPath: state.selectedPath,
+        selectedPaths: state.selectedPaths,
         hoveredPath: state.hoveredPath,
         focusedPath: state.focusedPath,
         searchMatchedPaths: getSearchMatchedPaths()
@@ -1666,12 +2156,13 @@ function undirectedPairKey(a, b) {
 function renderGraphNode(canvas, note) {
   const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
   const classes = ["node"];
-  if (note.path === state.selectedPath) classes.push("selected");
+  if (state.selectedPaths.has(note.path)) classes.push("selected");
   if (isDimmed(note)) classes.push("dimmed");
   group.setAttribute("class", classes.join(" "));
   group.style.setProperty("--level-color", getLevelColor(note.level));
   group.setAttribute("tabindex", "0");
   group.setAttribute("role", "button");
+  group.setAttribute("aria-pressed", String(state.selectedPaths.has(note.path)));
   group.setAttribute("aria-label", note.title);
   group.setAttribute("data-path", note.path);
 
@@ -1682,10 +2173,12 @@ function renderGraphNode(canvas, note) {
 
   const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
   dot.setAttribute("class", "nodeDot");
-  dot.setAttribute("r", String(note.path === state.selectedPath ? SELECTED_DOT_RADIUS : DOT_RADIUS));
+  dot.setAttribute("r", String(state.selectedPaths.has(note.path) ? SELECTED_DOT_RADIUS : DOT_RADIUS));
   group.appendChild(dot);
 
-  appendNodeLabel(group, note.title, "nodeLabel");
+  if (shouldRenderInitialNodeLabel(note)) {
+    appendNodeLabel(group, note.title, "nodeLabel");
+  }
   canvas.appendChild(group);
   state.nodeElements.set(note.path, group);
 }
@@ -1728,6 +2221,23 @@ function appendNodeLabel(group, title, className) {
     label.appendChild(tspan);
   });
   group.appendChild(label);
+}
+
+function shouldRenderInitialNodeLabel(note) {
+  if (!state.largeGraphMode) return true;
+  return Boolean(state.labelVisibility && state.labelVisibility.visiblePaths.has(note.path));
+}
+
+function ensureGraphNodeLabel(group, path) {
+  if (group.querySelector(".nodeLabel")) return;
+  const note = path === PENDING_PATH ? state.pendingNode : state.byPath.get(path);
+  if (!note) return;
+  appendNodeLabel(group, note.title, path === PENDING_PATH ? "nodeLabel pendingLabel" : "nodeLabel");
+}
+
+function removeGraphNodeLabel(group) {
+  const label = group.querySelector(".nodeLabel");
+  if (label) label.remove();
 }
 
 function buildPositions(notes, viewportWidth, viewportHeight) {
@@ -1827,12 +2337,126 @@ function getGraphBounds(positions) {
   };
 }
 
+function buildSpatialIndex(notes) {
+  const index = {
+    cellSize: SPATIAL_CELL_SIZE,
+    cells: new Map(),
+    pathCells: new Map()
+  };
+
+  for (const note of notes) {
+    addPathToSpatialIndex(index, note.path);
+  }
+
+  return index;
+}
+
+function addPathToSpatialIndex(index, path) {
+  const position = state.positions.get(path);
+  if (!index || !path || !position) return;
+
+  const cellKey = getSpatialCellKey(position.x, position.y, index.cellSize);
+  if (!index.cells.has(cellKey)) index.cells.set(cellKey, new Set());
+  index.cells.get(cellKey).add(path);
+  index.pathCells.set(path, cellKey);
+}
+
+function removePathFromSpatialIndex(index, path) {
+  if (!index || !path) return;
+
+  const cellKey = index.pathCells.get(path);
+  if (!cellKey) return;
+
+  const cell = index.cells.get(cellKey);
+  if (cell) {
+    cell.delete(path);
+    if (!cell.size) index.cells.delete(cellKey);
+  }
+  index.pathCells.delete(path);
+}
+
+function updateSpatialIndexForPaths(paths) {
+  if (!state.spatialIndex || !paths || !paths.size) return;
+
+  for (const path of paths) {
+    removePathFromSpatialIndex(state.spatialIndex, path);
+    if (state.byPath.has(path)) addPathToSpatialIndex(state.spatialIndex, path);
+  }
+}
+
+function getSpatialCellKey(x, y, cellSize = SPATIAL_CELL_SIZE) {
+  return `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}`;
+}
+
+function querySpatialRect(rect, pad = 0) {
+  const index = state.spatialIndex;
+  if (!index) return null;
+
+  const paths = new Set();
+  const cellSize = index.cellSize;
+  const minCellX = Math.floor((rect.minX - pad) / cellSize);
+  const maxCellX = Math.floor((rect.maxX + pad) / cellSize);
+  const minCellY = Math.floor((rect.minY - pad) / cellSize);
+  const maxCellY = Math.floor((rect.maxY + pad) / cellSize);
+
+  for (let cellX = minCellX; cellX <= maxCellX; cellX += 1) {
+    for (let cellY = minCellY; cellY <= maxCellY; cellY += 1) {
+      const cell = index.cells.get(`${cellX}:${cellY}`);
+      if (!cell) continue;
+      for (const path of cell) {
+        const position = state.positions.get(path);
+        if (!position) continue;
+        if (
+          position.x >= rect.minX - pad &&
+          position.x <= rect.maxX + pad &&
+          position.y >= rect.minY - pad &&
+          position.y <= rect.maxY + pad
+        ) {
+          paths.add(path);
+        }
+      }
+    }
+  }
+
+  return paths;
+}
+
+function queryNearestSpatialNote(point, radius) {
+  const index = state.spatialIndex;
+  if (!index) return null;
+
+  const cellSize = index.cellSize;
+  const cellRadius = Math.max(1, Math.ceil(radius / cellSize));
+  const centerX = Math.floor(point.x / cellSize);
+  const centerY = Math.floor(point.y / cellSize);
+  const maxDistanceSq = radius * radius;
+  let bestPath = null;
+  let bestDistanceSq = maxDistanceSq;
+
+  for (let cellX = centerX - cellRadius; cellX <= centerX + cellRadius; cellX += 1) {
+    for (let cellY = centerY - cellRadius; cellY <= centerY + cellRadius; cellY += 1) {
+      const cell = index.cells.get(`${cellX}:${cellY}`);
+      if (!cell) continue;
+      for (const path of cell) {
+        const position = state.positions.get(path);
+        if (!position) continue;
+        const dx = point.x - position.x;
+        const dy = point.y - position.y;
+        const distanceSq = dx * dx + dy * dy;
+        if (distanceSq <= bestDistanceSq) {
+          bestPath = path;
+          bestDistanceSq = distanceSq;
+        }
+      }
+    }
+  }
+
+  return bestPath ? state.byPath.get(bestPath) || null : null;
+}
+
 function updateGraphGeometry() {
-  for (const { path, from, to, type } of state.edgeElements) {
-    const fromPosition = state.positions.get(from);
-    const toPosition = state.positions.get(to);
-    if (!fromPosition || !toPosition) continue;
-    path.setAttribute("d", type === "reference" ? referenceEdgePath(fromPosition, toPosition) : edgePath(fromPosition, toPosition));
+  for (const edge of state.edgeElements) {
+    updateGraphEdgeGeometry(edge);
   }
 
   for (const [path, group] of state.nodeElements.entries()) {
@@ -1843,19 +2467,41 @@ function updateGraphGeometry() {
 }
 
 function updateGraphGeometryForPath(changedPath) {
-  for (const { path, from, to, type } of state.edgeElements) {
-    if (from !== changedPath && to !== changedPath) continue;
-    const fromPosition = state.positions.get(from);
-    const toPosition = state.positions.get(to);
-    if (!fromPosition || !toPosition) continue;
-    path.setAttribute("d", type === "reference" ? referenceEdgePath(fromPosition, toPosition) : edgePath(fromPosition, toPosition));
+  updateGraphGeometryForPaths(new Set([changedPath]));
+}
+
+function updateGraphGeometryForPaths(changedPaths) {
+  if (!changedPaths || !changedPaths.size) return;
+  const perf = startPerfMeasure("updateGraphGeometryForPaths");
+
+  const changedEdges = new Set();
+  for (const changedPath of changedPaths) {
+    for (const edge of state.edgeElementsByPath.get(changedPath) || []) {
+      changedEdges.add(edge);
+    }
   }
 
-  const group = state.nodeElements.get(changedPath);
-  const position = state.positions.get(changedPath);
-  if (group && position) {
-    group.setAttribute("transform", `translate(${position.x} ${position.y})`);
+  for (const edge of changedEdges) {
+    updateGraphEdgeGeometry(edge);
   }
+
+  for (const changedPath of changedPaths) {
+    const group = state.nodeElements.get(changedPath);
+    const position = state.positions.get(changedPath);
+    if (group && position) {
+      group.setAttribute("transform", `translate(${position.x} ${position.y})`);
+    }
+  }
+
+  updateSpatialIndexForPaths(changedPaths);
+  finishPerfMeasure(perf);
+}
+
+function updateGraphEdgeGeometry({ path, from, to, type }) {
+  const fromPosition = state.positions.get(from);
+  const toPosition = state.positions.get(to);
+  if (!fromPosition || !toPosition) return;
+  path.setAttribute("d", type === "reference" ? referenceEdgePath(fromPosition, toPosition) : edgePath(fromPosition, toPosition));
 }
 
 function edgePath(from, to) {
@@ -1912,34 +2558,102 @@ function getSearchMatchedPaths() {
   return matches;
 }
 
-function updateLabelVisibility() {
-  if (!state.nodeElements.size) return;
+function scheduleLabelVisibilityRefresh({ force = false } = {}) {
+  if (force) state.labelVisibilityKey = "";
+  if (!state.nodeElements.size || state.labelRefreshFrame) return;
+
+  state.labelRefreshFrame = window.requestAnimationFrame(() => {
+    state.labelRefreshFrame = 0;
+    updateLabelVisibility();
+  });
+}
+
+function cancelLabelVisibilityRefresh() {
+  if (!state.labelRefreshFrame) return;
+  window.cancelAnimationFrame(state.labelRefreshFrame);
+  state.labelRefreshFrame = 0;
+}
+
+function updateLabelVisibility({ force = false } = {}) {
+  if (!state.nodeElements.size) {
+    state.labelVisibility = null;
+    state.labelVisibilityKey = "";
+    return;
+  }
+
+  const cacheKey = getLabelVisibilityKey();
+  if (!force && cacheKey === state.labelVisibilityKey) return;
+
+  const perf = startPerfMeasure("updateLabelVisibility");
 
   if (!state.largeGraphMode) {
     for (const [path, group] of state.nodeElements.entries()) {
       const visible = path !== PENDING_PATH || Boolean(state.pendingNode);
+      if (visible) ensureGraphNodeLabel(group, path);
       group.classList.toggle("label-hidden", !visible);
       group.classList.toggle("label-visible", visible);
     }
     state.labelVisibility = null;
+    state.labelVisibilityKey = cacheKey;
+    finishPerfMeasure(perf);
     return;
   }
 
-  const labelVisibility = decideVisibleLabels(state.sortedNotes, {
-    stats: state.labelStats,
-    zoom: state.view.scale,
-    selectedPath: state.selectedPath,
-    hoveredPath: state.hoveredPath,
-    focusedPath: state.focusedPath,
-    searchMatchedPaths: getSearchMatchedPaths(),
-    searchQuery: state.filter
-  });
+  const labelVisibility = computeLargeGraphLabelVisibility();
   state.labelVisibility = labelVisibility;
+  state.labelVisibilityKey = cacheKey;
 
   for (const [path, group] of state.nodeElements.entries()) {
     const visible = path === PENDING_PATH || labelVisibility.visiblePaths.has(path);
+    if (visible) {
+      ensureGraphNodeLabel(group, path);
+    } else {
+      removeGraphNodeLabel(group);
+    }
     group.classList.toggle("label-hidden", !visible);
     group.classList.toggle("label-visible", visible);
+  }
+
+  finishPerfMeasure(perf);
+}
+
+function computeLargeGraphLabelVisibility() {
+  return decideVisibleLabels(state.sortedNotes, {
+    cache: state.labelVisibilityCache,
+    stats: state.labelStats,
+    zoom: state.view.scale,
+    selectedPath: state.selectedPath,
+    selectedPaths: state.selectedPaths,
+    hoveredPath: state.hoveredPath,
+    focusedPath: state.focusedPath,
+    searchMatchedPaths: getSearchMatchedPaths()
+  });
+}
+
+function getLabelVisibilityKey() {
+  const pendingKey = state.pendingNode ? "pending" : "settled";
+  const sizeKey = `${state.nodeElements.size}:${state.sortedNotes.length}:${pendingKey}`;
+  if (!state.largeGraphMode) return `small:${sizeKey}`;
+
+  const policy = getLabelVisibilityPolicy(state.view.scale);
+  return [
+    "large",
+    sizeKey,
+    policy.name,
+    state.selectedPath || "",
+    [...state.selectedPaths].sort(compareText).join("\u001f"),
+    state.hoveredPath || "",
+    state.focusedPath || "",
+    state.filter
+  ].join("|");
+}
+
+function refreshLabelsAfterZoom(previousScale) {
+  if (!state.largeGraphMode) return;
+  const previousPolicy = getLabelVisibilityPolicy(previousScale).name;
+  const nextPolicy = getLabelVisibilityPolicy(state.view.scale).name;
+  if (previousPolicy !== nextPolicy) {
+    scheduleLabelVisibilityRefresh({ force: true });
   }
 }
 
@@ -1996,6 +2710,7 @@ function zoomAtCenter(factor) {
 }
 
 function zoomAtPoint(clientX, clientY, factor) {
+  const previousScale = state.view.scale;
   const point = clientToSvgPoint(clientX, clientY);
   const nextScale = clamp(state.view.scale * factor, MIN_ZOOM, MAX_ZOOM);
   const graphX = (point.x - state.view.x) / state.view.scale;
@@ -2004,10 +2719,12 @@ function zoomAtPoint(clientX, clientY, factor) {
   state.view.y = point.y - graphY * nextScale;
   state.view.scale = nextScale;
   applyViewTransform();
+  refreshLabelsAfterZoom(previousScale);
 }
 
 function fitGraphView(animate = true) {
   if (!state.graphBounds || !els.graphCanvas) return;
+  const previousScale = state.view.scale;
   const viewportWidth = Math.max(320, els.graphScroller.clientWidth || 0);
   const viewportHeight = Math.max(320, els.graphScroller.clientHeight || 0);
   const scale = clamp(
@@ -2020,26 +2737,26 @@ function fitGraphView(animate = true) {
   state.view.x = viewportWidth / 2 - (state.graphBounds.minX + state.graphBounds.width / 2) * scale;
   state.view.y = viewportHeight / 2 - (state.graphBounds.minY + state.graphBounds.height / 2) * scale;
   applyViewTransform(animate);
+  refreshLabelsAfterZoom(previousScale);
 }
 
 function applyViewTransform(animate = false) {
   if (!els.graphCanvas) return;
+  const perf = startPerfMeasure("applyViewTransform");
   els.graphCanvas.style.transition = animate ? "transform 120ms ease" : "";
   els.graphCanvas.setAttribute(
     "transform",
     `translate(${round(state.view.x)} ${round(state.view.y)}) scale(${round(state.view.scale)})`
   );
-  updateLabelVisibility();
+  finishPerfMeasure(perf);
 }
 
 function onGraphPointerOver(event) {
   const path = getNodePathFromEvent(event);
   if (!path || path === PENDING_PATH || path === state.hoveredPath) return;
   state.hoveredPath = path;
-  updateLabelVisibility();
-  if (state.largeGraphMode) {
-    requestGraphRender({ preserveView: true });
-  }
+  scheduleLabelVisibilityRefresh({ force: true });
+  scheduleLargeGraphRefresh();
 }
 
 function onGraphPointerOut(event) {
@@ -2050,30 +2767,24 @@ function onGraphPointerOut(event) {
   const path = group.getAttribute("data-path");
   if (!path || path !== state.hoveredPath) return;
   state.hoveredPath = null;
-  updateLabelVisibility();
-  if (state.largeGraphMode) {
-    requestGraphRender({ preserveView: true });
-  }
+  scheduleLabelVisibilityRefresh({ force: true });
+  scheduleLargeGraphRefresh();
 }
 
 function onGraphFocusIn(event) {
   const path = getNodePathFromEvent(event);
   if (!path || path === PENDING_PATH || path === state.focusedPath) return;
   state.focusedPath = path;
-  updateLabelVisibility();
-  if (state.largeGraphMode) {
-    requestGraphRender({ preserveView: true });
-  }
+  scheduleLabelVisibilityRefresh({ force: true });
+  scheduleLargeGraphRefresh();
 }
 
 function onGraphFocusOut(event) {
   const path = getNodePathFromEvent(event);
   if (!path || path !== state.focusedPath) return;
   state.focusedPath = null;
-  updateLabelVisibility();
-  if (state.largeGraphMode) {
-    requestGraphRender({ preserveView: true });
-  }
+  scheduleLabelVisibilityRefresh({ force: true });
+  scheduleLargeGraphRefresh();
 }
 
 function getNodePathFromEvent(event) {
@@ -2082,8 +2793,21 @@ function getNodePathFromEvent(event) {
   return group.getAttribute("data-path");
 }
 
+function focusGraph() {
+  if (document.activeElement === els.graph) return;
+  els.graph.focus({ preventScroll: true });
+}
+
 function startGraphPointerDown(event) {
-  if (event.button !== 0) return;
+  if (event.button !== 0 && event.button !== 1) return;
+  focusGraph();
+  state.lastGraphPoint = eventToGraphPoint(event);
+
+  if (wantsGraphPan(event)) {
+    startPan(event);
+    return;
+  }
+
   const group = event.target.closest ? event.target.closest(".node") : null;
   if (group && els.graph.contains(group)) {
     const path = group.getAttribute("data-path");
@@ -2097,6 +2821,11 @@ function startGraphPointerDown(event) {
       startNodeDrag(event, note, group);
       return;
     }
+  }
+
+  if (shouldStartMarqueeSelection(event)) {
+    startMarqueeSelection(event);
+    return;
   }
 
   startPan(event);
@@ -2113,7 +2842,8 @@ function onGraphKeydown(event) {
 }
 
 function startPan(event) {
-  if (event.button !== 0 || state.pendingNode) return;
+  if (event.button !== 0 && event.button !== 1) return;
+  event.preventDefault();
   closeGraphCreatePopover();
   state.activeInteraction = {
     type: "pan",
@@ -2121,9 +2851,19 @@ function startPan(event) {
     startX: event.clientX,
     startY: event.clientY,
     viewX: state.view.x,
-    viewY: state.view.y
+    viewY: state.view.y,
+    moved: false
   };
+  els.graph.classList.add("isPanning");
   els.graph.setPointerCapture(event.pointerId);
+}
+
+function shouldStartMarqueeSelection(event) {
+  return event.button === 0 && (event.shiftKey || event.metaKey || event.ctrlKey);
+}
+
+function wantsGraphPan(event) {
+  return event.button === 1 || (event.button === 0 && event.altKey);
 }
 
 function startNodeDrag(event, note, group) {
@@ -2133,17 +2873,51 @@ function startNodeDrag(event, note, group) {
   closeGraphCreatePopover();
 
   const point = eventToGraphPoint(event);
-  const position = state.positions.get(note.path);
+  const dragPaths = state.selectedPaths.has(note.path) ? [...state.selectedPaths] : [note.path];
+  const initialPositions = new Map();
+  for (const path of dragPaths) {
+    const position = state.positions.get(path);
+    if (position) {
+      initialPositions.set(path, { ...position });
+    }
+  }
+  if (!initialPositions.size) return;
+
   state.activeInteraction = {
     type: "node",
     pointerId: event.pointerId,
-    path: note.path,
+    primaryPath: note.path,
+    paths: [...initialPositions.keys()],
     startX: event.clientX,
     startY: event.clientY,
-    offsetX: point.x - position.x,
-    offsetY: point.y - position.y,
+    startPoint: point,
+    initialPositions,
     moved: false
   };
+  group.classList.add("dragging");
+  els.graph.classList.add("isDraggingNodes");
+  els.graph.setPointerCapture(event.pointerId);
+}
+
+function startMarqueeSelection(event) {
+  if (event.button !== 0 || state.pendingNode) return;
+  event.preventDefault();
+  closeGraphCreatePopover();
+
+  const start = eventToGraphPoint(event);
+  state.activeInteraction = {
+    type: "marquee",
+    pointerId: event.pointerId,
+    start,
+    current: start,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false,
+    additive: event.metaKey || event.ctrlKey,
+    baseSelection: new Set(state.selectedPaths),
+    previewSelection: new Set(state.selectedPaths)
+  };
+  els.graph.classList.add("isSelecting");
   els.graph.setPointerCapture(event.pointerId);
 }
 
@@ -2166,11 +2940,56 @@ function startPendingRope(event, group) {
   els.graph.setPointerCapture(event.pointerId);
 }
 
+function queueInteraction(event) {
+  if (!state.activeInteraction || state.activeInteraction.pointerId !== event.pointerId) return;
+
+  state.queuedInteractionEvent = {
+    pointerId: event.pointerId,
+    clientX: event.clientX,
+    clientY: event.clientY,
+    graphPoint: eventToGraphPoint(event)
+  };
+
+  if (state.interactionFrame) return;
+  state.interactionFrame = window.requestAnimationFrame(() => {
+    const queued = state.queuedInteractionEvent;
+    state.interactionFrame = 0;
+    state.queuedInteractionEvent = null;
+    if (queued) continueInteraction(queued);
+  });
+}
+
+function flushQueuedInteraction(pointerId) {
+  const queued = state.queuedInteractionEvent;
+  if (!queued || (pointerId !== undefined && queued.pointerId !== pointerId)) return;
+  if (state.interactionFrame) {
+    window.cancelAnimationFrame(state.interactionFrame);
+  }
+  state.interactionFrame = 0;
+  state.queuedInteractionEvent = null;
+  continueInteraction(queued);
+}
+
+function cancelQueuedInteraction() {
+  if (state.interactionFrame) {
+    window.cancelAnimationFrame(state.interactionFrame);
+  }
+  state.interactionFrame = 0;
+  state.queuedInteractionEvent = null;
+}
+
+function getInteractionGraphPoint(event) {
+  return event.graphPoint || eventToGraphPoint(event);
+}
+
 function continueInteraction(event) {
+  state.lastGraphPoint = getInteractionGraphPoint(event);
   const interaction = state.activeInteraction;
   if (!interaction || interaction.pointerId !== event.pointerId) return;
 
   if (interaction.type === "pan") {
+    const distance = Math.hypot(event.clientX - interaction.startX, event.clientY - interaction.startY);
+    if (distance > 3) interaction.moved = true;
     state.view.x = interaction.viewX + event.clientX - interaction.startX;
     state.view.y = interaction.viewY + event.clientY - interaction.startY;
     applyViewTransform();
@@ -2178,22 +2997,51 @@ function continueInteraction(event) {
   }
 
   if (interaction.type === "node") {
-    const point = eventToGraphPoint(event);
+    const point = getInteractionGraphPoint(event);
     const distance = Math.hypot(event.clientX - interaction.startX, event.clientY - interaction.startY);
     if (distance > 3) interaction.moved = true;
 
-    const position = {
-      x: round(point.x - interaction.offsetX),
-      y: round(point.y - interaction.offsetY)
-    };
-    state.positions.set(interaction.path, position);
-    state.manualPositions[interaction.path] = position;
-    updateGraphGeometryForPath(interaction.path);
+    const deltaX = point.x - interaction.startPoint.x;
+    const deltaY = point.y - interaction.startPoint.y;
+    const changedPaths = new Set();
+    for (const path of interaction.paths) {
+      const startPosition = interaction.initialPositions.get(path);
+      if (!startPosition) continue;
+      const position = {
+        x: round(startPosition.x + deltaX),
+        y: round(startPosition.y + deltaY)
+      };
+      state.positions.set(path, position);
+      state.manualPositions[path] = position;
+      changedPaths.add(path);
+    }
+    updateGraphGeometryForPaths(changedPaths);
+    return;
+  }
+
+  if (interaction.type === "marquee") {
+    const point = getInteractionGraphPoint(event);
+    const distance = Math.hypot(event.clientX - interaction.startX, event.clientY - interaction.startY);
+    if (distance <= 3) return;
+    if (!interaction.moved) {
+      interaction.moved = true;
+      ensureSelectionRectElement();
+    }
+    interaction.current = point;
+    updateSelectionRect(interaction.start, point);
+
+    const rect = normalizedRect(interaction.start, point);
+    const paths = pathsInRect(rect);
+    const nextSelection = interaction.additive
+      ? new Set([...interaction.baseSelection, ...paths])
+      : paths;
+    updateGraphSelection(interaction.previewSelection, nextSelection);
+    interaction.previewSelection = nextSelection;
     return;
   }
 
   if (interaction.type === "rope") {
-    const point = eventToGraphPoint(event);
+    const point = getInteractionGraphPoint(event);
     interaction.current = point;
     const target = findRopeTarget(point);
     interaction.targetPath = target ? target.path : null;
@@ -2203,14 +3051,40 @@ function continueInteraction(event) {
 }
 
 async function endInteraction(event) {
+  flushQueuedInteraction(event.pointerId);
   const interaction = state.activeInteraction;
   if (!interaction || interaction.pointerId !== event.pointerId) return;
+  releaseGraphPointer(interaction.pointerId);
 
   if (interaction.type === "node") {
-    void saveStoredPositions();
-    if (!interaction.moved) {
-      selectNote(interaction.path);
+    clearNodeDragClasses(interaction);
+    if (interaction.moved) {
+      void savePositionPatch(positionPatchForPaths(interaction.paths));
     }
+    if (!interaction.moved) {
+      if (state.selectedPaths.size > 1 && state.selectedPaths.has(interaction.primaryPath)) {
+        renderCurrentSelection(selectionStatus(state.selectedPaths.size));
+      } else {
+        await selectNote(interaction.primaryPath);
+      }
+    } else {
+      await setGraphSelection(interaction.paths, {
+        openSingle: false,
+        statusMessage: `Moved ${interaction.paths.length} note${interaction.paths.length === 1 ? "" : "s"}`
+      });
+    }
+    state.activeInteraction = null;
+    return;
+  }
+
+  if (interaction.type === "marquee") {
+    removeSelectionRectElement();
+    els.graph.classList.remove("isSelecting");
+    const nextSelection = interaction.moved ? interaction.previewSelection : new Set();
+    await setGraphSelection(nextSelection, {
+      openSingle: nextSelection.size === 1,
+      statusMessage: selectionStatus(nextSelection.size)
+    });
     state.activeInteraction = null;
     return;
   }
@@ -2231,15 +3105,125 @@ async function endInteraction(event) {
     return;
   }
 
+  if (interaction.type === "pan") {
+    if (!interaction.moved) {
+      await setGraphSelection(new Set(), {
+        openSingle: false,
+        statusMessage: selectionStatus(0)
+      });
+    }
+    state.activeInteraction = null;
+    els.graph.classList.remove("isPanning");
+    return;
+  }
+
   state.activeInteraction = null;
+  els.graph.classList.remove("isPanning");
 }
 
 function cancelInteraction() {
+  cancelQueuedInteraction();
+  const interaction = state.activeInteraction;
+  if (interaction) {
+    releaseGraphPointer(interaction.pointerId);
+  }
   if (state.activeInteraction && state.activeInteraction.type === "rope") {
     animateRopeBack(state.activeInteraction);
   }
+  if (state.activeInteraction && state.activeInteraction.type === "marquee") {
+    updateGraphSelection(state.activeInteraction.previewSelection, state.selectedPaths);
+    removeSelectionRectElement();
+  }
+  if (state.activeInteraction && state.activeInteraction.type === "node") {
+    clearNodeDragClasses(state.activeInteraction);
+  }
   state.activeInteraction = null;
+  els.graph.classList.remove("isPanning", "isSelecting", "isDraggingNodes");
   clearRopeTarget();
+}
+
+function releaseGraphPointer(pointerId) {
+  if (pointerId === undefined || pointerId === null) return;
+  try {
+    if (els.graph.hasPointerCapture(pointerId)) {
+      els.graph.releasePointerCapture(pointerId);
+    }
+  } catch {
+    // Pointer capture may already be gone after a canceled browser gesture.
+  }
+}
+
+function clearNodeDragClasses(interaction) {
+  els.graph.classList.remove("isDraggingNodes");
+  for (const path of interaction.paths || []) {
+    const group = state.nodeElements.get(path);
+    if (group) group.classList.remove("dragging");
+  }
+  const primary = interaction.primaryPath && state.nodeElements.get(interaction.primaryPath);
+  if (primary) primary.classList.remove("dragging");
+}
+
+function ensureSelectionRectElement() {
+  if (state.selectionRectElement) return state.selectionRectElement;
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("class", "selectionRect");
+  rect.setAttribute("aria-hidden", "true");
+  els.graphCanvas.appendChild(rect);
+  state.selectionRectElement = rect;
+  return rect;
+}
+
+function updateSelectionRect(from, to) {
+  const rect = ensureSelectionRectElement();
+  const bounds = normalizedRect(from, to);
+  rect.setAttribute("x", String(bounds.minX));
+  rect.setAttribute("y", String(bounds.minY));
+  rect.setAttribute("width", String(bounds.width));
+  rect.setAttribute("height", String(bounds.height));
+}
+
+function removeSelectionRectElement() {
+  const rect = state.selectionRectElement;
+  if (rect && rect.parentNode) {
+    rect.parentNode.removeChild(rect);
+  }
+  state.selectionRectElement = null;
+}
+
+function normalizedRect(from, to) {
+  const minX = Math.min(from.x, to.x);
+  const maxX = Math.max(from.x, to.x);
+  const minY = Math.min(from.y, to.y);
+  const maxY = Math.max(from.y, to.y);
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    width: maxX - minX,
+    height: maxY - minY
+  };
+}
+
+function pathsInRect(rect) {
+  const indexedPaths = querySpatialRect(rect, HIT_RADIUS / 2);
+  if (indexedPaths) return indexedPaths;
+
+  const paths = new Set();
+  const pad = HIT_RADIUS / 2;
+  for (const note of state.notes) {
+    const position = state.positions.get(note.path);
+    if (!position) continue;
+    if (
+      position.x >= rect.minX - pad &&
+      position.x <= rect.maxX + pad &&
+      position.y >= rect.minY - pad &&
+      position.y <= rect.maxY + pad
+    ) {
+      paths.add(note.path);
+    }
+  }
+  return paths;
 }
 
 function ensureRopeElement() {
@@ -2284,6 +3268,10 @@ function animateRopeBack(interaction) {
 }
 
 function findRopeTarget(point) {
+  if (state.spatialIndex) {
+    return queryNearestSpatialNote(point, HIT_RADIUS + 14);
+  }
+
   let best = null;
   let bestDistance = Infinity;
   for (const note of state.notes) {
@@ -2399,13 +3387,14 @@ async function createNoteFromPending(parent) {
     state.notes.push(note);
     state.notes.sort((a, b) => compareText(a.path, b.path));
     state.selectedPath = note.path;
+    state.selectedPaths = new Set([note.path]);
     state.dirty = false;
     state.manualPositions[path] = state.pendingNode.position;
     state.pendingNode = null;
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
-    void saveStoredPositions();
+    void savePositionPatch(positionPatchForPaths([path]));
     await updateManifestFile();
     renderSelectedNote("Saved new note");
     renderNewNoteParents();
@@ -2416,6 +3405,436 @@ async function createNoteFromPending(parent) {
     setStatus("Could not create note");
     console.error(error);
   }
+}
+
+async function onDocumentKeydown(event) {
+  if (isTextEntryTarget(event.target)) return;
+
+  const hasGraphFocus = document.activeElement === els.graph || els.graph.contains(document.activeElement);
+  const hasSelection = state.selectedPaths.size > 0;
+  if (!hasGraphFocus) return;
+
+  if ((event.key === "Backspace" || event.key === "Delete") && hasSelection) {
+    event.preventDefault();
+    await deleteGraphSelection();
+    return;
+  }
+
+  const isShortcut = (event.metaKey || event.ctrlKey) && !event.altKey;
+  if (!isShortcut) return;
+
+  const key = event.key.toLowerCase();
+  if (key === "c" && hasSelection) {
+    event.preventDefault();
+    await copySelectedNodes("copy");
+    return;
+  }
+
+  if (key === "x" && hasSelection) {
+    event.preventDefault();
+    await cutSelectedNodes();
+    return;
+  }
+
+  if (key === "v" && hasGraphFocus) {
+    event.preventDefault();
+    await pasteClipboardIntoGraph();
+  }
+}
+
+function isTextEntryTarget(target) {
+  if (!(target instanceof Element)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    target.isContentEditable ||
+    Boolean(target.closest(".cm-editor"))
+  );
+}
+
+async function copySelectedNodes(mode = "copy") {
+  const notes = getGraphSelectedNotes();
+  if (!notes.length) return false;
+
+  const clipboardNotes = notes.map((note) => ({
+    path: note.path,
+    title: note.title,
+    level: note.level,
+    parentPath: note.parentNote ? note.parentNote.path : null,
+    body: note.body,
+    raw: note.raw,
+    position: state.positions.get(note.path) || null
+  }));
+  const text = notes.map((note) => note.raw.trim()).join("\n\n");
+  state.nodeClipboard = {
+    mode,
+    notes: clipboardNotes,
+    text
+  };
+
+  await writeClipboardText(text);
+  setStatus(`${notes.length} note${notes.length === 1 ? "" : "s"} copied`);
+  return true;
+}
+
+async function cutSelectedNodes() {
+  const notes = getGraphSelectedNotes();
+  if (!notes.length) return false;
+
+  await copySelectedNodes("copy");
+  const deleted = await deleteGraphSelection();
+  if (deleted && state.nodeClipboard) {
+    state.nodeClipboard.mode = "cut";
+  }
+  return deleted;
+}
+
+async function writeClipboardText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+    focusGraph();
+  }
+}
+
+async function pasteClipboardIntoGraph(point = state.lastGraphPoint || getViewportCenterGraphPoint()) {
+  if (!hasWritableWorkspace()) {
+    setStatus("Open notes folder to paste notes");
+    return false;
+  }
+
+  let text = "";
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    setStatus("Could not read clipboard");
+    return false;
+  }
+
+  return pasteTextIntoGraph(text, point);
+}
+
+async function pasteTextIntoGraph(text, point = getViewportCenterGraphPoint()) {
+  const clipboard = state.nodeClipboard;
+  const normalizedText = String(text || "").trim();
+  if (!normalizedText) return false;
+
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+  }
+
+  if (clipboard && clipboard.text.trim() === normalizedText && clipboard.notes.length) {
+    return pasteCopiedNodes(clipboard, point);
+  }
+
+  return createNoteFromPastedText(normalizedText, point);
+}
+
+async function pasteCopiedNodes(clipboard, point) {
+  const parent = getPasteParent();
+  if (!parent) {
+    setStatus("Select a parent note before pasting nodes");
+    return false;
+  }
+
+  const ordered = [...clipboard.notes].sort((a, b) => a.level - b.level || compareText(a.path, b.path));
+  const positions = positionsAroundPoint(point, ordered.length);
+  const reservedPaths = new Set(state.notePaths);
+  const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
+  const createdBySource = new Map();
+  const specs = [];
+
+  for (let index = 0; index < ordered.length; index += 1) {
+    const source = ordered[index];
+    const copiedParent = source.parentPath ? createdBySource.get(source.parentPath) : null;
+    const nextParent = copiedParent || parent;
+    const requestedTitle = clipboard.mode === "copy" ? `${source.title} copy` : source.title;
+    const title = getAvailableDisplayTitle(requestedTitle, reservedTitles);
+    const level = nextParent.level + 1;
+    const path = getAvailableNewNotePath(title, level, nextParent, reservedPaths);
+    const raw = createNoteRaw({
+      title,
+      level,
+      parent: nextParent,
+      body: source.body || `# ${title}\n`
+    });
+
+    reservedPaths.add(path);
+    reservedTitles.add(normalizeKey(title));
+    const created = {
+      path,
+      basename: basenameFromPath(path),
+      title,
+      level
+    };
+    createdBySource.set(source.path, created);
+    specs.push({
+      path,
+      raw,
+      position: positions[index]
+    });
+  }
+
+  return createNotesBatch(specs, `Pasted ${specs.length} note${specs.length === 1 ? "" : "s"}`);
+}
+
+async function createNoteFromPastedText(text, point) {
+  const parent = getPasteParent();
+  if (!parent) {
+    setStatus("Select a parent note before pasting text");
+    return false;
+  }
+
+  const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
+  const title = getAvailableDisplayTitle(titleFromText(text), reservedTitles);
+  const level = parent.level + 1;
+  const path = getAvailableNewNotePath(title, level, parent);
+  const raw = createNoteRaw({
+    title,
+    level,
+    parent,
+    body: bodyFromText(text, title)
+  });
+
+  return createNotesBatch([
+    {
+      path,
+      raw,
+      position: point
+    }
+  ], "Pasted text as note");
+}
+
+async function createNotesBatch(specs, statusMessage) {
+  if (!specs.length) return false;
+  if (!hasWritableWorkspace()) {
+    setStatus("Open notes folder to create notes");
+    return false;
+  }
+
+  try {
+    await invokeNative("create_notes", {
+      notesPath: state.notesPath,
+      notes: specs.map((spec) => ({
+        path: spec.path,
+        raw: spec.raw
+      }))
+    });
+
+    for (const spec of specs) {
+      const note = parseNote(spec.path, spec.raw);
+      state.notes.push(note);
+      if (spec.position) {
+        state.manualPositions[spec.path] = {
+          x: round(spec.position.x),
+          y: round(spec.position.y)
+        };
+      }
+    }
+
+    state.notes.sort((a, b) => compareText(a.path, b.path));
+    state.selectedPaths = new Set(specs.map((spec) => spec.path));
+    state.selectedPath = specs.length === 1 ? specs[0].path : null;
+    state.dirty = false;
+    rebuildIndex();
+    state.validation = validateNotes();
+    state.manualPositions = pruneStoredPositions(state.manualPositions);
+    void savePositionPatch(positionPatchForPaths(specs.map((spec) => spec.path)));
+    await updateManifestFile();
+    renderCurrentSelection(statusMessage);
+    renderNewNoteParents();
+    renderGraph({ preserveView: true });
+    updateSourceStatus();
+    renderValidationStatus();
+    return true;
+  } catch (error) {
+    setStatus("Could not create note");
+    console.error(error);
+    return false;
+  }
+}
+
+function getPasteParent() {
+  return (
+    getOnlyGraphSelectedNote() ||
+    getSelectedNote() ||
+    state.notes.find((note) => note.level === 0) ||
+    state.notes[0] ||
+    null
+  );
+}
+
+function getViewportCenterGraphPoint() {
+  const viewportWidth = Math.max(320, els.graphScroller.clientWidth || 0);
+  const viewportHeight = Math.max(320, els.graphScroller.clientHeight || 0);
+  return {
+    x: round((viewportWidth / 2 - state.view.x) / state.view.scale),
+    y: round((viewportHeight / 2 - state.view.y) / state.view.scale)
+  };
+}
+
+function positionsAroundPoint(point, count) {
+  const origin = point || getViewportCenterGraphPoint();
+  const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
+  const gapX = 132;
+  const gapY = 86;
+  return Array.from({ length: count }, (_, index) => {
+    const row = Math.floor(index / columns);
+    const col = index % columns;
+    const rowCount = Math.min(columns, count - row * columns);
+    return {
+      x: round(origin.x + (col - (rowCount - 1) / 2) * gapX),
+      y: round(origin.y + row * gapY)
+    };
+  });
+}
+
+function getAvailableDisplayTitle(title, reservedTitles) {
+  const base = String(title || "").trim() || "Untitled note";
+  let candidate = base;
+  let suffix = 2;
+  while (reservedTitles.has(normalizeKey(candidate))) {
+    candidate = `${base} ${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+function titleFromText(text, fallback = "Pasted note") {
+  const parsed = splitMarkdown(text);
+  const frontmatter = parseFrontmatter(parsed.frontmatterRaw);
+  if (frontmatter.values.title) return frontmatter.values.title;
+
+  const body = parsed.body || text;
+  const heading = body.match(/^#\s+(.+)$/m);
+  if (heading) return cleanTitleText(heading[1], fallback);
+
+  return cleanTitleText(body, fallback);
+}
+
+function cleanTitleText(text, fallback) {
+  const words = String(text || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/[#>*_`~\[\]().,!?:;"']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 6);
+  const title = words.join(" ").slice(0, 56).trim();
+  return title || fallback;
+}
+
+function bodyFromText(text, title) {
+  const parsed = splitMarkdown(text);
+  const body = (parsed.hasFrontmatter ? parsed.body : text).trim();
+  return body ? `${body}\n` : `# ${title}\n`;
+}
+
+function basenameFromPath(path) {
+  return path.replace(/\.md$/i, "").split("/").pop();
+}
+
+function onGraphDragOver(event) {
+  if (!hasMarkdownDrop(event)) return;
+  event.preventDefault();
+  focusGraph();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
+  els.graph.classList.add("isDropTarget");
+  state.lastGraphPoint = eventToGraphPoint(event);
+}
+
+function onGraphDragLeave(event) {
+  if (event.relatedTarget && els.graph.contains(event.relatedTarget)) return;
+  els.graph.classList.remove("isDropTarget");
+}
+
+async function onGraphDrop(event) {
+  if (!hasMarkdownDrop(event)) return;
+  event.preventDefault();
+  els.graph.classList.remove("isDropTarget");
+  focusGraph();
+
+  const files = [...(event.dataTransfer ? event.dataTransfer.files : [])]
+    .filter((file) => file.name.toLowerCase().endsWith(".md"));
+  if (!files.length) return;
+
+  const point = eventToGraphPoint(event);
+  await importMarkdownFiles(files, point);
+}
+
+function hasMarkdownDrop(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return false;
+  if ([...transfer.types].includes("Files")) return true;
+  return [...transfer.items].some((item) => {
+    const file = item.kind === "file" ? item.getAsFile() : null;
+    return file ? file.name.toLowerCase().endsWith(".md") : item.type === "text/markdown";
+  });
+}
+
+async function importMarkdownFiles(files, point) {
+  if (!hasWritableWorkspace()) {
+    setStatus("Open notes folder to drop Markdown files");
+    return false;
+  }
+
+  const parent = getPasteParent();
+  if (!parent) {
+    setStatus("Select a parent note before dropping Markdown files");
+    return false;
+  }
+
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+  }
+
+  const reservedPaths = new Set(state.notePaths);
+  const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
+  const positions = positionsAroundPoint(point, files.length);
+  const specs = [];
+
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const text = await file.text();
+    const fallbackTitle = file.name.replace(/\.md$/i, "").replace(/[-_]+/g, " ");
+    const title = getAvailableDisplayTitle(titleFromText(text, fallbackTitle), reservedTitles);
+    const level = parent.level + 1;
+    const path = getAvailableNewNotePath(title, level, parent, reservedPaths);
+    const raw = createNoteRaw({
+      title,
+      level,
+      parent,
+      body: bodyFromText(text, title)
+    });
+
+    reservedPaths.add(path);
+    reservedTitles.add(normalizeKey(title));
+    specs.push({
+      path,
+      raw,
+      position: positions[index]
+    });
+  }
+
+  return createNotesBatch(specs, `Imported ${specs.length} Markdown file${specs.length === 1 ? "" : "s"}`);
 }
 
 function readStoredPositions(stored, layoutKey = state.layoutKey, allowedPaths = state.notePaths) {
@@ -2447,6 +3866,47 @@ async function saveStoredPositions() {
   } catch {
     setStatus("Could not save layout");
   }
+}
+
+async function savePositionPatch(patch) {
+  const entries = Object.entries(patch || {});
+  if (!entries.length) return;
+
+  try {
+    state.manualPositions = pruneStoredPositions(state.manualPositions);
+    if (hasWritableWorkspace()) {
+      await invokeNative("write_layout_patch", {
+        notesPath: state.notesPath,
+        updates: patch
+      });
+      return;
+    }
+
+    window.localStorage.setItem(state.layoutKey, JSON.stringify(state.manualPositions));
+  } catch {
+    setStatus("Could not save layout");
+  }
+}
+
+function positionPatchForPaths(paths) {
+  const patch = {};
+  for (const path of paths || []) {
+    const position = state.manualPositions[path] || state.positions.get(path);
+    if (!position) continue;
+    patch[path] = {
+      x: round(position.x),
+      y: round(position.y)
+    };
+  }
+  return patch;
+}
+
+function positionRemovalPatch(paths) {
+  const patch = {};
+  for (const path of paths || []) {
+    patch[path] = null;
+  }
+  return patch;
 }
 
 function pruneStoredPositions(positions, allowedPaths = state.notePaths) {
@@ -2596,6 +4056,7 @@ async function createNewNote(event) {
     state.notes.push(note);
     state.notes.sort((a, b) => compareText(a.path, b.path));
     state.selectedPath = note.path;
+    state.selectedPaths = new Set([note.path]);
     state.dirty = false;
     rebuildIndex();
     state.validation = validateNotes();
@@ -2612,10 +4073,10 @@ async function createNewNote(event) {
   }
 }
 
-function getAvailableNewNotePath(title, level, parent) {
+function getAvailableNewNotePath(title, level, parent, reservedPaths = state.notePaths) {
   const base = slugify(title) || "untitled";
   const directory = getRecommendedDirectory();
-  const existing = new Set([...state.notePaths].map((path) => path.toLowerCase()));
+  const existing = new Set([...reservedPaths].map((path) => path.toLowerCase()));
   let suffix = 0;
 
   while (true) {
@@ -2677,9 +4138,13 @@ function updateSourceStatus() {
   els.newNoteButton.disabled = !isFolder || !canCreateChild;
   els.infoTitle.disabled = !isFolder || !hasSelection;
   els.infoParent.disabled = !isFolder || !hasSelection;
-  els.deleteNoteButton.disabled = !isFolder || !hasSelection;
+  els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
   setEditorEditable(isFolder && hasSelection);
   renderWorkspaceTabs();
+}
+
+function canDeleteCurrentSelection() {
+  return hasWritableWorkspace() && (Boolean(getSelectedNote()) || state.selectedPaths.size > 0);
 }
 
 function setEditorEditable(isEditable) {
@@ -2687,6 +4152,37 @@ function setEditorEditable(isEditable) {
   state.editorView.dispatch({
     effects: editorEditable.reconfigure(EditorView.editable.of(isEditable))
   });
+}
+
+function startPerfMeasure(name) {
+  if (
+    !PERF_ENABLED ||
+    typeof window.performance === "undefined" ||
+    typeof window.performance.mark !== "function"
+  ) {
+    return null;
+  }
+
+  const id = `${name}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const start = `${id}:start`;
+  window.performance.mark(start);
+  return { name, start, end: `${id}:end` };
+}
+
+function finishPerfMeasure(measure) {
+  if (
+    !measure ||
+    typeof window.performance === "undefined" ||
+    typeof window.performance.mark !== "function" ||
+    typeof window.performance.measure !== "function"
+  ) {
+    return;
+  }
+
+  window.performance.mark(measure.end);
+  window.performance.measure(measure.name, measure.start, measure.end);
+  window.performance.clearMarks(measure.start);
+  window.performance.clearMarks(measure.end);
 }
 
 function clamp(value, min, max) {

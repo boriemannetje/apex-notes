@@ -3,6 +3,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Component, Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 #[derive(Serialize)]
@@ -10,6 +11,18 @@ use std::{
 struct NoteFile {
     path: String,
     raw: String,
+    signature: String,
+    modified_ms: u64,
+    byte_len: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteFileStatus {
+    path: String,
+    signature: String,
+    modified_ms: u64,
+    byte_len: u64,
 }
 
 #[derive(Serialize)]
@@ -23,6 +36,13 @@ struct Workspace {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteWrite {
+    path: String,
+    raw: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct NotePosition {
     x: f64,
@@ -48,7 +68,70 @@ fn read_workspace_blocking(root_path: String) -> Result<Workspace, String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn create_workspace(
+async fn list_note_files(notes_path: String) -> Result<Vec<NoteFileStatus>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_note_files_blocking(notes_path))
+        .await
+        .map_err(to_error)?
+}
+
+fn list_note_files_blocking(notes_path: String) -> Result<Vec<NoteFileStatus>, String> {
+    let notes_root = PathBuf::from(notes_path);
+    if !notes_root.is_dir() {
+        return Err("Notes path is not a folder".into());
+    }
+
+    let mut statuses = Vec::new();
+    collect_note_statuses(&notes_root, &notes_root, &mut statuses).map_err(to_error)?;
+    statuses.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    Ok(statuses)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn read_notes(notes_path: String, paths: Vec<String>) -> Result<Vec<NoteFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_notes_blocking(notes_path, paths))
+        .await
+        .map_err(to_error)?
+}
+
+fn read_notes_blocking(notes_path: String, paths: Vec<String>) -> Result<Vec<NoteFile>, String> {
+    let notes_root = PathBuf::from(notes_path);
+    if !notes_root.is_dir() {
+        return Err("Notes path is not a folder".into());
+    }
+
+    let mut notes = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !is_markdown_path(Path::new(&path)) {
+            return Err(format!("Only Markdown notes can be read: {}", path));
+        }
+
+        let file_path = safe_child_path(&notes_root, &path)?;
+        let metadata = fs::metadata(&file_path).map_err(to_error)?;
+        if !metadata.is_file() {
+            return Err(format!("Note does not exist: {}", path));
+        }
+
+        notes.push(read_note_file(path, &file_path, &metadata).map_err(to_error)?);
+    }
+
+    notes.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    Ok(notes)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn create_workspace(
+    parent_path: String,
+    folder_name: String,
+    apex_title: String,
+) -> Result<Workspace, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        create_workspace_blocking(parent_path, folder_name, apex_title)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+fn create_workspace_blocking(
     parent_path: String,
     folder_name: String,
     apex_title: String,
@@ -85,17 +168,29 @@ fn create_workspace(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn write_note(notes_path: String, path: String, raw: String) -> Result<(), String> {
+async fn write_note(notes_path: String, path: String, raw: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_note_blocking(notes_path, path, raw))
+        .await
+        .map_err(to_error)?
+}
+
+fn write_note_blocking(notes_path: String, path: String, raw: String) -> Result<(), String> {
     let notes_root = PathBuf::from(notes_path);
     let file_path = safe_child_path(&notes_root, &path)?;
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent).map_err(to_error)?;
     }
-    fs::write(file_path, raw).map_err(to_error)
+    write_if_changed(&file_path, &raw).map_err(to_error)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn create_note(notes_path: String, path: String, raw: String) -> Result<(), String> {
+async fn create_note(notes_path: String, path: String, raw: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || create_note_blocking(notes_path, path, raw))
+        .await
+        .map_err(to_error)?
+}
+
+fn create_note_blocking(notes_path: String, path: String, raw: String) -> Result<(), String> {
     let notes_root = PathBuf::from(notes_path);
     let file_path = safe_child_path(&notes_root, &path)?;
     if file_path.exists() {
@@ -108,19 +203,100 @@ fn create_note(notes_path: String, path: String, raw: String) -> Result<(), Stri
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn write_manifest(notes_path: String, paths: Vec<String>) -> Result<(), String> {
+async fn create_notes(notes_path: String, notes: Vec<NoteWrite>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || create_notes_blocking(notes_path, notes))
+        .await
+        .map_err(to_error)?
+}
+
+fn create_notes_blocking(notes_path: String, notes: Vec<NoteWrite>) -> Result<(), String> {
+    let notes_root = PathBuf::from(notes_path);
+    let mut targets = Vec::with_capacity(notes.len());
+
+    for note in notes {
+        let file_path = safe_child_path(&notes_root, &note.path)?;
+        if file_path.exists() {
+            return Err(format!("Note already exists: {}", note.path));
+        }
+        targets.push((file_path, note.raw));
+    }
+
+    for (file_path, raw) in targets {
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).map_err(to_error)?;
+        }
+        fs::write(file_path, raw).map_err(to_error)?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn write_manifest(notes_path: String, paths: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_manifest_blocking(notes_path, paths))
+        .await
+        .map_err(to_error)?
+}
+
+fn write_manifest_blocking(notes_path: String, paths: Vec<String>) -> Result<(), String> {
     let notes_root = PathBuf::from(notes_path);
     write_manifest_file(&notes_root, &paths).map_err(to_error)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn write_layout(notes_path: String, positions: HashMap<String, NotePosition>) -> Result<(), String> {
+async fn write_layout(
+    notes_path: String,
+    positions: HashMap<String, NotePosition>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_layout_blocking(notes_path, positions))
+        .await
+        .map_err(to_error)?
+}
+
+fn write_layout_blocking(
+    notes_path: String,
+    positions: HashMap<String, NotePosition>,
+) -> Result<(), String> {
     let notes_root = PathBuf::from(notes_path);
     write_layout_file(&notes_root, &positions).map_err(to_error)
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn trash_note(notes_path: String, path: String) -> Result<(), String> {
+async fn write_layout_patch(
+    notes_path: String,
+    updates: HashMap<String, Option<NotePosition>>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_layout_patch_blocking(notes_path, updates))
+        .await
+        .map_err(to_error)?
+}
+
+fn write_layout_patch_blocking(
+    notes_path: String,
+    updates: HashMap<String, Option<NotePosition>>,
+) -> Result<(), String> {
+    let notes_root = PathBuf::from(notes_path);
+    let mut positions = read_layout_file(&notes_root).map_err(to_error)?;
+
+    for (path, position) in updates {
+        if let Some(position) = position {
+            positions.insert(path, position);
+        } else {
+            positions.remove(&path);
+        }
+    }
+
+    write_layout_file(&notes_root, &positions).map_err(to_error)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn trash_note(notes_path: String, path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || trash_note_blocking(notes_path, path))
+        .await
+        .map_err(to_error)?
+}
+
+fn trash_note_blocking(notes_path: String, path: String) -> Result<(), String> {
     let notes_root = PathBuf::from(notes_path);
     let file_path = safe_child_path(&notes_root, &path)?;
     if !file_path.is_file() {
@@ -129,17 +305,48 @@ fn trash_note(notes_path: String, path: String) -> Result<(), String> {
     trash::delete(file_path).map_err(to_error)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn trash_notes(notes_path: String, paths: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || trash_notes_blocking(notes_path, paths))
+        .await
+        .map_err(to_error)?
+}
+
+fn trash_notes_blocking(notes_path: String, paths: Vec<String>) -> Result<(), String> {
+    let notes_root = PathBuf::from(notes_path);
+    let mut files = Vec::with_capacity(paths.len());
+
+    for path in paths {
+        let file_path = safe_child_path(&notes_root, &path)?;
+        if !file_path.is_file() {
+            return Err(format!("Note does not exist: {}", path));
+        }
+        files.push(file_path);
+    }
+
+    for file_path in files {
+        trash::delete(file_path).map_err(to_error)?;
+    }
+
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             read_workspace,
+            list_note_files,
+            read_notes,
             create_workspace,
             write_note,
             create_note,
+            create_notes,
             write_manifest,
             write_layout,
-            trash_note
+            write_layout_patch,
+            trash_note,
+            trash_notes
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
@@ -195,18 +402,105 @@ fn collect_notes(base: &Path, current: &Path, notes: &mut Vec<NoteFile>) -> std:
             continue;
         }
 
-        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        if !is_markdown_path(&path) {
             continue;
         }
 
         let relative = path.strip_prefix(base).unwrap_or(&path);
-        notes.push(NoteFile {
+        let metadata = entry.metadata()?;
+        notes.push(read_note_file(
+            path_to_frontend(relative),
+            &path,
+            &metadata,
+        )?);
+    }
+
+    Ok(())
+}
+
+fn collect_note_statuses(
+    base: &Path,
+    current: &Path,
+    statuses: &mut Vec<NoteFileStatus>,
+) -> std::io::Result<()> {
+    if !current.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            collect_note_statuses(base, &path, statuses)?;
+            continue;
+        }
+
+        if !file_type.is_file() || !is_markdown_path(&path) {
+            continue;
+        }
+
+        let metadata = entry.metadata()?;
+        let relative = path.strip_prefix(base).unwrap_or(&path);
+        statuses.push(NoteFileStatus {
             path: path_to_frontend(relative),
-            raw: fs::read_to_string(path)?,
+            signature: file_signature(&metadata),
+            modified_ms: file_modified_ms(&metadata),
+            byte_len: metadata.len(),
         });
     }
 
     Ok(())
+}
+
+fn read_note_file(
+    path: String,
+    file_path: &Path,
+    metadata: &fs::Metadata,
+) -> std::io::Result<NoteFile> {
+    Ok(NoteFile {
+        path,
+        raw: fs::read_to_string(file_path)?,
+        signature: file_signature(metadata),
+        modified_ms: file_modified_ms(metadata),
+        byte_len: metadata.len(),
+    })
+}
+
+fn file_signature(metadata: &fs::Metadata) -> String {
+    let (seconds, nanos) = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs(), duration.subsec_nanos()))
+        .unwrap_or((0, 0));
+    format!("{}:{}:{}", seconds, nanos, metadata.len())
+}
+
+fn file_modified_ms(metadata: &fs::Metadata) -> u64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("md"))
+        .unwrap_or(false)
 }
 
 fn unique_directory(parent: &Path, requested_name: &str) -> Result<PathBuf, String> {
@@ -245,15 +539,13 @@ fn write_manifest_file(notes_root: &Path, paths: &[String]) -> std::io::Result<(
         "{}\n",
         serde_json::to_string_pretty(paths).map_err(std::io::Error::other)?
     );
-    fs::write(notes_root.join("manifest.json"), raw)
+    write_if_changed(&notes_root.join("manifest.json"), &raw)
 }
 
 fn read_layout_file(notes_root: &Path) -> std::io::Result<HashMap<String, NotePosition>> {
     let raw = fs::read_to_string(notes_root.join("layout.json"));
     let data = match raw {
-        Ok(raw) => {
-            serde_json::from_str(&raw).unwrap_or_else(|_| HashMap::new())
-        }
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| HashMap::new()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
         Err(err) => return Err(err),
     };
@@ -262,7 +554,10 @@ fn read_layout_file(notes_root: &Path) -> std::io::Result<HashMap<String, NotePo
 
 fn ensure_workspace_metadata(notes_root: &Path, notes: &[NoteFile]) -> std::io::Result<()> {
     if !notes_root.join("manifest.json").exists() {
-        let paths = notes.iter().map(|note| note.path.clone()).collect::<Vec<_>>();
+        let paths = notes
+            .iter()
+            .map(|note| note.path.clone())
+            .collect::<Vec<_>>();
         write_manifest_file(notes_root, &paths)?;
     }
 
@@ -273,13 +568,25 @@ fn ensure_workspace_metadata(notes_root: &Path, notes: &[NoteFile]) -> std::io::
     Ok(())
 }
 
-fn write_layout_file(notes_root: &Path, positions: &HashMap<String, NotePosition>) -> std::io::Result<()> {
+fn write_layout_file(
+    notes_root: &Path,
+    positions: &HashMap<String, NotePosition>,
+) -> std::io::Result<()> {
     fs::create_dir_all(notes_root)?;
     let raw = format!(
         "{}\n",
         serde_json::to_string_pretty(positions).map_err(std::io::Error::other)?
     );
-    fs::write(notes_root.join("layout.json"), raw)
+    write_if_changed(&notes_root.join("layout.json"), &raw)
+}
+
+fn write_if_changed(path: &Path, raw: &str) -> std::io::Result<()> {
+    match fs::read_to_string(path) {
+        Ok(existing) if existing == raw => Ok(()),
+        Ok(_) => fs::write(path, raw),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => fs::write(path, raw),
+        Err(err) => Err(err),
+    }
 }
 
 fn path_to_frontend(path: &Path) -> String {
