@@ -130,3 +130,13 @@ Before finishing, confirm:
 - Each non-apex note has one immediate parent.
 - No body link is being used as the hierarchy edge.
 - `notes/manifest.json` changed only if note files were added or deleted.
+and verify:
+
+Build the hierarchy from frontmatter only, then verify and repair manifest connectivity.  
+Requirements:
+1) One and only one apex: exactly one note with `level: 0` and `parent: null`.  
+2) Every other note: single `parent` in format `[[file-stem]]`, and its parent must be an existing note with `level = child.level - 1`.  
+3) Make all parent/level relationships valid and canonical; use body wiki links only as contextual references, never hierarchy.  
+4) If any `manifest.json` entry references a missing file, remove it (or add the file if creating new notes).  
+5) Before finishing, report a validation check with counts: total notes, #roots, #notes with valid parent chain, #manifest missing entries, and explicit list of fixes made.  
+

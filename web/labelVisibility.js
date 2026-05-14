@@ -1,3 +1,10 @@
+import {
+  cleanWikiRef,
+  getNoteAliasKeys,
+  normalizeKey,
+  parseWikiRefs
+} from "./noteRefs.js";
+
 const FAR_ZOOM_MAX = 0.6;
 const MID_ZOOM_MAX = 0.95;
 const NEAR_ZOOM_MAX = 1.45;
@@ -113,6 +120,26 @@ export function rankNoteHubs(notes = [], stats = null) {
   }));
 }
 
+export function prepareLabelVisibilityCache(notes = [], stats = null) {
+  const noteList = normalizeNotes(notes);
+  const allPaths = noteList.map((item) => item.path);
+  const statsMap = stats instanceof Map ? stats : computeNoteLinkStats(noteList.map((item) => item.note));
+  const { resolvePath } = buildPathIndex(noteList);
+  const ranked = rankNoteHubs(noteList.map((item) => item.note), statsMap);
+  const rankedByPath = new Map(ranked.map((entry) => [entry.path, entry]));
+  const levelCandidates = [...noteList].sort((a, b) => compareLevelCandidate(a, b, rankedByPath));
+
+  return {
+    noteList,
+    allPaths,
+    stats: statsMap,
+    resolvePath,
+    ranked,
+    rankedByPath,
+    levelCandidates
+  };
+}
+
 export function getLabelVisibilityPolicy(zoom = 1) {
   const scale = Number.isFinite(Number(zoom)) ? Number(zoom) : 1;
 
@@ -164,15 +191,18 @@ export function getLabelVisibilityPolicy(zoom = 1) {
 }
 
 export function decideVisibleLabels(notes = [], options = {}) {
-  const noteList = normalizeNotes(notes);
-  const allPaths = noteList.map((item) => item.path);
-  const stats = options.stats instanceof Map ? options.stats : computeNoteLinkStats(noteList.map((item) => item.note));
+  const cache = options.cache || null;
+  const noteList = cache ? cache.noteList : normalizeNotes(notes);
+  const allPaths = cache ? cache.allPaths : noteList.map((item) => item.path);
+  const stats = cache
+    ? cache.stats
+    : (options.stats instanceof Map ? options.stats : computeNoteLinkStats(noteList.map((item) => item.note)));
   const policy = options.policy || getLabelVisibilityPolicy(options.zoom);
-  const { resolvePath } = buildPathIndex(noteList);
+  const resolvePath = cache ? cache.resolvePath : buildPathIndex(noteList).resolvePath;
   const forcedVisiblePaths = getForcedVisiblePaths(noteList, resolvePath, options);
   const automaticVisiblePaths = policy.showAll
     ? new Set(allPaths)
-    : getAutomaticVisiblePaths(noteList, stats, policy);
+    : getAutomaticVisiblePaths(noteList, stats, policy, cache);
   const visiblePaths = new Set([...automaticVisiblePaths, ...forcedVisiblePaths]);
   const hiddenPathList = allPaths.filter((path) => !visiblePaths.has(path));
 
@@ -235,21 +265,7 @@ function buildPathIndex(noteList) {
 }
 
 function getAliases(item) {
-  const pathNoExt = item.path.replace(/\.md$/i, "");
-  const basename = pathNoExt.split("/").pop() || pathNoExt;
-  const title = item.title;
-
-  return [
-    item.path,
-    pathNoExt,
-    basename,
-    title,
-    slugify(pathNoExt),
-    slugify(basename),
-    slugify(title)
-  ]
-    .filter(Boolean)
-    .map(normalizeKey);
+  return getNoteAliasKeys(item.path, item.title);
 }
 
 function getPath(value) {
@@ -291,11 +307,7 @@ function getReferencePaths(note, resolvePath) {
   }
 
   if (typeof note.body === "string") {
-    const regex = /\[\[([^\]]+)\]\]/g;
-    let match;
-    while ((match = regex.exec(note.body)) !== null) {
-      values.push(match[1]);
-    }
+    values.push(...parseWikiRefs(note.body).map((ref) => ref.ref));
   }
 
   return uniquePaths(values.map((value) => resolvePath(value)));
@@ -343,14 +355,16 @@ function connectReference(stats, edgeKeys, fromPath, toPath) {
   to.bodyNeighborPaths.add(fromPath);
 }
 
-function getAutomaticVisiblePaths(noteList, stats, policy) {
+function getAutomaticVisiblePaths(noteList, stats, policy, cache = null) {
   const visible = new Set();
   const labelCap = Number.isFinite(policy.labelCap) ? policy.labelCap : Infinity;
-  const ranked = rankNoteHubs(noteList.map((item) => item.note), stats);
-  const rankedByPath = new Map(ranked.map((entry) => [entry.path, entry]));
-  const levelCandidates = noteList
-    .filter((item) => item.level <= policy.maxLevel)
-    .sort((a, b) => compareLevelCandidate(a, b, rankedByPath));
+  const ranked = cache ? cache.ranked : rankNoteHubs(noteList.map((item) => item.note), stats);
+  const rankedByPath = cache ? cache.rankedByPath : new Map(ranked.map((entry) => [entry.path, entry]));
+  const levelCandidates = cache
+    ? cache.levelCandidates.filter((item) => item.level <= policy.maxLevel)
+    : noteList
+      .filter((item) => item.level <= policy.maxLevel)
+      .sort((a, b) => compareLevelCandidate(a, b, rankedByPath));
 
   for (const item of levelCandidates) {
     if (visible.size >= labelCap) break;
@@ -450,28 +464,7 @@ function compareLevel(a, b) {
 }
 
 function cleanRef(value) {
-  if (!value || value === "null") return null;
-  const raw = typeof value === "string" ? value : getPath(value);
-  if (!raw || raw === "null") return null;
-  const wiki = String(raw).match(/\[\[([^\]]+)\]\]/);
-  const ref = wiki ? wiki[1] : raw;
-  return String(ref).split("|")[0].replace(/^notes\//i, "").replace(/\.md$/i, "").trim() || null;
-}
-
-function normalizeKey(value) {
-  return String(value || "")
-    .replace(/^notes\//i, "")
-    .replace(/\.md$/i, "")
-    .trim()
-    .toLowerCase();
-}
-
-function slugify(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return cleanWikiRef(value);
 }
 
 function compareText(a, b) {

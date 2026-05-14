@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #0b0b0b;
   --fg: #f2f0ea;
   --line-1: rgba(242, 240, 234, 0.14);
@@ -9,6 +10,12 @@
   --tag-missing: #ffb6d1;
   --purple: #b88cff;
   --purple-soft: rgba(184, 140, 255, 0.2);
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --ease-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --transition-fast: 100ms ease;
+  --transition-mid: 140ms var(--ease-soft);
+  --focus-ring: 0 0 0 2px rgba(242, 240, 234, 0.22);
 }
 
 * {
@@ -43,9 +50,14 @@ input,
 select {
   height: 36px;
   border: 1px solid var(--line-2);
-  border-radius: 0;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   color: var(--fg);
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 button {
@@ -61,21 +73,18 @@ select:focus-visible {
   outline: none;
 }
 
+input:focus-visible,
+select:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+button:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
 button:hover,
 button:focus-visible {
   background: var(--fg);
-  color: var(--bg);
-}
-
-.dangerButton {
-  border-color: rgba(255, 120, 150, 0.72);
-  color: #ff7896;
-}
-
-.dangerButton:hover,
-.dangerButton:focus-visible {
-  border-color: #ff7896;
-  background: #ff7896;
   color: var(--bg);
 }
 
@@ -88,6 +97,44 @@ button:disabled:hover {
   border-color: var(--line-2);
   background: var(--bg);
   color: var(--fg);
+  box-shadow: none;
+}
+
+.iconButton {
+  display: inline-grid;
+  width: 36px;
+  min-width: 36px;
+  place-items: center;
+  padding: 0;
+}
+
+.iconButton svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dangerIconButton {
+  border-color: rgba(255, 120, 150, 0.72);
+  color: #ff7896;
+}
+
+.dangerIconButton:hover,
+.dangerIconButton:focus-visible {
+  border-color: #ff7896;
+  background: #ff7896;
+  color: var(--bg);
+}
+
+.dangerIconButton:disabled:hover {
+  border-color: var(--line-2);
+  background: var(--bg);
+  color: var(--fg);
+  box-shadow: none;
 }
 
 .topbar {
@@ -106,6 +153,7 @@ button:disabled:hover {
   white-space: nowrap;
   text-overflow: ellipsis;
   font-weight: 640;
+  letter-spacing: -0.01em;
 }
 
 .search {
@@ -119,11 +167,15 @@ button:disabled:hover {
 
 .workspaceTabs {
   display: flex;
+  align-items: stretch;
   min-height: 38px;
   overflow-x: auto;
   overflow-y: hidden;
+  padding-right: 6px;
   border-bottom: 1px solid var(--line-1);
   background: #101010;
+  scrollbar-color: var(--line-2) transparent;
+  scrollbar-width: thin;
 }
 
 .workspaceTabs:empty {
@@ -131,12 +183,16 @@ button:disabled:hover {
 }
 
 .workspaceTab {
+  position: relative;
   display: flex;
   align-items: center;
   min-width: 132px;
   max-width: 260px;
   border-right: 1px solid var(--line-1);
   border-bottom: 2px solid transparent;
+  transition:
+    border-bottom-color var(--transition-mid),
+    background var(--transition-mid);
 }
 
 .workspaceTab.active {
@@ -144,46 +200,124 @@ button:disabled:hover {
   background: var(--bg);
 }
 
-.workspaceTabMain,
-.workspaceTabClose {
+.workspaceTab:not(.active):hover {
+  background: rgba(242, 240, 234, 0.04);
+}
+
+.workspaceTabMain {
   height: 36px;
   border: 0;
   background: transparent;
 }
 
 .workspaceTabMain {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   min-width: 0;
   flex: 1;
-  padding: 0 10px;
+  width: 100%;
+  padding: 0 34px 0 12px;
+  color: var(--muted);
   text-align: left;
+}
+
+.workspaceTab.active .workspaceTabMain {
+  color: var(--fg);
+}
+
+.workspaceTabMain:hover,
+.workspaceTabMain:focus-visible {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
 }
 
 .workspaceTabTitle {
   display: block;
+  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
 .workspaceTabDirty {
-  margin-left: 5px;
+  flex: 0 0 auto;
   color: var(--purple);
 }
 
 .workspaceTabClose {
-  width: 32px;
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
   padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: transparent;
+  opacity: 0.72;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+.workspaceTab:hover .workspaceTabClose,
+.workspaceTab.active .workspaceTabClose,
+.workspaceTabClose:focus-visible {
   color: var(--muted);
 }
 
-.workspaceTabMain:disabled {
-  opacity: 1;
-  color: var(--fg);
+.workspaceTabClose::before,
+.workspaceTabClose::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 1.4px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.workspaceTabClose::before {
+  transform: rotate(45deg);
+}
+
+.workspaceTabClose::after {
+  transform: rotate(-45deg);
 }
 
 .workspaceTabClose:hover,
 .workspaceTabClose:focus-visible {
-  color: var(--bg);
+  background: rgba(242, 240, 234, 0.1);
+  color: var(--fg);
+  opacity: 1;
+  box-shadow: none;
+}
+
+.workspaceTabAdd {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 36px;
+  place-items: center;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 21px;
+  line-height: 1;
+}
+
+.workspaceTabAdd:hover,
+.workspaceTabAdd:focus-visible {
+  background: rgba(242, 240, 234, 0.07);
+  color: var(--fg);
+  box-shadow: none;
 }
 
 .layout {
@@ -202,6 +336,8 @@ button:disabled:hover {
   display: grid;
   grid-template-rows: 42px minmax(0, 1fr);
   border-right: 1px solid var(--line-1);
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .paneHeader,
@@ -250,6 +386,8 @@ button:disabled:hover {
   overflow: hidden;
   min-width: 0;
   min-height: 0;
+  scrollbar-color: var(--line-2) transparent;
+  scrollbar-width: thin;
 }
 
 .graph {
@@ -258,10 +396,26 @@ button:disabled:hover {
   height: 100%;
   touch-action: none;
   cursor: grab;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
-.graph:active {
+.graph:focus-visible {
+  outline: 2px solid rgba(242, 240, 234, 0.34);
+  outline-offset: -3px;
+}
+
+.graph.isPanning,
+.graph.isDraggingNodes {
   cursor: grabbing;
+}
+
+.graph.isSelecting {
+  cursor: crosshair;
+}
+
+.graph.isDropTarget {
+  background: rgba(184, 140, 255, 0.08);
 }
 
 body.graphFullscreen {
@@ -292,16 +446,19 @@ body.graphFullscreen .editorPane {
   stroke: var(--level-color, var(--line-3));
   pointer-events: none;
   vector-effect: non-scaling-stroke;
+  transition: opacity 150ms ease;
 }
 
 .hierarchyEdge {
   stroke-width: 1;
+  stroke-linecap: round;
 }
 
 .referenceEdge {
   opacity: 0.66;
   stroke-width: 0.85;
-  stroke-dasharray: 5 8;
+  stroke-dasharray: 5 6;
+  stroke-linecap: round;
 }
 
 .pendingRope {
@@ -316,6 +473,15 @@ body.graphFullscreen .editorPane {
   animation: ropeFlow 760ms linear infinite;
 }
 
+.selectionRect {
+  fill: rgba(159, 197, 255, 0.12);
+  stroke: #9fc5ff;
+  stroke-width: 1.25;
+  stroke-dasharray: 7 5;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
 .pendingRope.returning {
   transition: d 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -327,7 +493,13 @@ body.graphFullscreen .editorPane {
 }
 
 .node {
-  cursor: pointer;
+  cursor: grab;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.node.dragging {
+  cursor: grabbing;
 }
 
 .nodeHit {
@@ -341,12 +513,16 @@ body.graphFullscreen .editorPane {
   stroke: var(--level-color, var(--fg));
   stroke-width: 1.5;
   vector-effect: non-scaling-stroke;
+  transition:
+    stroke-width 110ms ease,
+    fill 140ms ease,
+    filter 160ms ease;
 }
 
 .nodeLabel {
   fill: var(--level-color, var(--fg));
-  font-size: 12px;
-  font-weight: 560;
+  font-size: 12.5px;
+  font-weight: 540;
   pointer-events: none;
   transition: opacity 120ms ease;
   user-select: none;
@@ -376,6 +552,7 @@ body.graphFullscreen .editorPane {
   fill: var(--level-color, var(--fg));
   stroke: var(--level-color, var(--fg));
   stroke-width: 2.5;
+  filter: drop-shadow(0 0 5px var(--level-color, var(--fg)));
 }
 
 .node.selected .nodeLabel {
@@ -414,6 +591,10 @@ body.graphFullscreen .editorPane {
   stroke-width: 3;
 }
 
+.node {
+  transition: opacity 150ms ease;
+}
+
 .node.dimmed {
   opacity: 0.22;
 }
@@ -437,6 +618,13 @@ body.graphFullscreen .editorPane {
 
 .noteMeta {
   min-width: 0;
+}
+
+.editorControls {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
 }
 
 h1,
@@ -466,6 +654,7 @@ h2 {
 
 .noteInfo {
   min-width: 0;
+  flex: 1;
 }
 
 .noteInfo summary {
@@ -473,12 +662,17 @@ h2 {
   min-height: 30px;
   padding: 5px 10px;
   border: 1px solid rgba(184, 140, 255, 0.7);
+  border-radius: var(--radius-sm);
   background: var(--purple-soft);
   color: var(--purple);
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
   list-style: none;
+  transition:
+    background var(--transition-mid),
+    color var(--transition-mid),
+    border-color var(--transition-mid);
 }
 
 .noteInfo summary::-webkit-details-marker {
@@ -516,12 +710,6 @@ h2 {
   color: var(--muted);
 }
 
-.infoActions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 10px;
-}
-
 .editorWrap {
   position: relative;
   min-width: 0;
@@ -539,11 +727,12 @@ h2 {
 }
 
 .cm-editor {
-  font-size: 14px;
+  font-size: 14.5px;
 }
 
 .cm-scroller {
   scrollbar-color: var(--line-2) transparent;
+  scrollbar-width: thin;
 }
 
 .cm-placeholder {
@@ -581,16 +770,24 @@ h2 {
   width: min(420px, calc(100vw - 28px));
   padding: 0;
   border: 1px solid var(--line-2);
+  border-radius: var(--radius-md);
   background: var(--bg);
   color: var(--fg);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
 
 .hierarchyPromptDialog {
   width: min(560px, calc(100vw - 28px));
 }
 
+.deleteConfirmDialog {
+  width: min(460px, calc(100vw - 28px));
+}
+
 .newNoteDialog::backdrop {
-  background: rgba(11, 11, 11, 0.82);
+  background: rgba(11, 11, 11, 0.78);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 
 .newNoteDialog form {
@@ -629,6 +826,18 @@ h2 {
   gap: 8px;
 }
 
+.dangerActionButton {
+  border-color: rgba(255, 120, 150, 0.72);
+  color: #ff7896;
+}
+
+.dangerActionButton:hover,
+.dangerActionButton:focus-visible {
+  border-color: #ff7896;
+  background: #ff7896;
+  color: var(--bg);
+}
+
 .graphCreatePopover {
   position: fixed;
   z-index: 20;
@@ -637,8 +846,11 @@ h2 {
   gap: 10px;
   padding: 12px;
   border: 1px solid rgba(184, 140, 255, 0.62);
-  background: rgba(11, 11, 11, 0.96);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  border-radius: var(--radius-md);
+  background: rgba(11, 11, 11, 0.82);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
   color: var(--fg);
   transform: translate(10px, 10px);
 }
