@@ -1,6 +1,4 @@
-const DEFAULT_NOTE_COUNT_THRESHOLD = 500;
-const DEFAULT_REFERENCE_EDGE_COUNT_THRESHOLD = 1000;
-const DEFAULT_MAX_NODES_PER_SUBROW = 80;
+import { LARGE_GRAPH_CONFIG } from "./graphConfig.js";
 
 export function detectLargeGraphMode(metrics = {}, options = {}) {
   metrics = metrics || {};
@@ -10,11 +8,11 @@ export function detectLargeGraphMode(metrics = {}, options = {}) {
   const referenceEdgeCount = toCount(metrics.referenceEdgeCount);
   const noteCountThreshold = toPositiveCount(
     options.noteCountThreshold ?? options.noteThreshold,
-    DEFAULT_NOTE_COUNT_THRESHOLD
+    LARGE_GRAPH_CONFIG.noteCountThreshold
   );
   const referenceEdgeCountThreshold = toPositiveCount(
     options.referenceEdgeCountThreshold ?? options.referenceEdgeThreshold,
-    DEFAULT_REFERENCE_EDGE_COUNT_THRESHOLD
+    LARGE_GRAPH_CONFIG.referenceEdgeCountThreshold
   );
 
   return noteCount > noteCountThreshold || referenceEdgeCount > referenceEdgeCountThreshold;
@@ -51,7 +49,7 @@ export function selectLargeModeReferenceEdges(referenceEdges = [], context = {},
 export function computeWrappedLevelMetadata(notes = [], options = {}) {
   options = options || {};
 
-  const maxNodesPerSubrow = toPositiveCount(options.maxNodesPerSubrow, DEFAULT_MAX_NODES_PER_SUBROW);
+  const maxNodesPerSubrow = toPositiveCount(options.maxNodesPerSubrow, LARGE_GRAPH_CONFIG.maxNodesPerSubrow);
   const levelsByNumber = new Map();
 
   for (const note of notes || []) {

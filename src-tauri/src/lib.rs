@@ -375,47 +375,10 @@ fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace,
 }
 
 fn collect_notes(base: &Path, current: &Path, notes: &mut Vec<NoteFile>) -> std::io::Result<()> {
-    if !current.is_dir() {
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') {
-            continue;
-        }
-
-        if file_type.is_symlink() {
-            continue;
-        }
-
-        if file_type.is_dir() {
-            collect_notes(base, &path, notes)?;
-            continue;
-        }
-
-        if !file_type.is_file() {
-            continue;
-        }
-
-        if !is_markdown_path(&path) {
-            continue;
-        }
-
-        let relative = path.strip_prefix(base).unwrap_or(&path);
-        let metadata = entry.metadata()?;
-        notes.push(read_note_file(
-            path_to_frontend(relative),
-            &path,
-            &metadata,
-        )?);
-    }
-
-    Ok(())
+    walk_markdown_files(base, current, &mut |relative, path, metadata| {
+        notes.push(read_note_file(path_to_frontend(relative), path, metadata)?);
+        Ok(())
+    })
 }
 
 fn collect_note_statuses(
@@ -423,6 +386,21 @@ fn collect_note_statuses(
     current: &Path,
     statuses: &mut Vec<NoteFileStatus>,
 ) -> std::io::Result<()> {
+    walk_markdown_files(base, current, &mut |relative, _path, metadata| {
+        statuses.push(NoteFileStatus {
+            path: path_to_frontend(relative),
+            signature: file_signature(metadata),
+            modified_ms: file_modified_ms(metadata),
+            byte_len: metadata.len(),
+        });
+        Ok(())
+    })
+}
+
+fn walk_markdown_files<F>(base: &Path, current: &Path, visit: &mut F) -> std::io::Result<()>
+where
+    F: FnMut(&Path, &Path, &fs::Metadata) -> std::io::Result<()>,
+{
     if !current.is_dir() {
         return Ok(());
     }
@@ -442,7 +420,7 @@ fn collect_note_statuses(
         }
 
         if file_type.is_dir() {
-            collect_note_statuses(base, &path, statuses)?;
+            walk_markdown_files(base, &path, visit)?;
             continue;
         }
 
@@ -452,12 +430,7 @@ fn collect_note_statuses(
 
         let metadata = entry.metadata()?;
         let relative = path.strip_prefix(base).unwrap_or(&path);
-        statuses.push(NoteFileStatus {
-            path: path_to_frontend(relative),
-            signature: file_signature(&metadata),
-            modified_ms: file_modified_ms(&metadata),
-            byte_len: metadata.len(),
-        });
+        visit(relative, &path, &metadata)?;
     }
 
     Ok(())

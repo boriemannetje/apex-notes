@@ -8,12 +8,21 @@ import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
 } from "./graphLargeMode.js";
+import { LARGE_GRAPH_CONFIG } from "./graphConfig.js";
 import {
   computeNoteLinkStats,
   decideVisibleLabels,
   getLabelVisibilityPolicy,
   prepareLabelVisibilityCache
 } from "./labelVisibility.js";
+import {
+  cleanWikiRef,
+  getNoteAliasKeys,
+  normalizeKey,
+  parseWikiRefs,
+  parseWikiTarget,
+  slugify
+} from "./noteRefs.js";
 import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
 const LEVEL_COLORS = ["#f2f0ea", "#9fc5ff", "#b8f0c0", "#ffe08a", "#ffb6d1", "#b88cff", "#7de3ff", "#f6a86d"];
@@ -38,10 +47,6 @@ const LEVEL_GAP = 138;
 const NODE_GAP = 168;
 const GRAPH_PAD = 96;
 const PENDING_PATH = "__pending_node__";
-const LARGE_GRAPH_NOTE_THRESHOLD = 500;
-const LARGE_GRAPH_REFERENCE_EDGE_THRESHOLD = 1000;
-const MAX_LEVEL_NODES_PER_SUBROW = 80;
-const LARGE_GRAPH_REFERENCE_EDGE_LIMIT = 500;
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
 const PERF_ENABLED =
@@ -77,6 +82,7 @@ const state = {
   graphRenderFrame: 0,
   queuedGraphRender: null,
   filter: "",
+  searchMatchedPaths: new Set(),
   validation: [],
   layoutKey: "",
   manualPositions: {},
@@ -332,7 +338,7 @@ function bindEvents() {
   els.cancelGraphCreateButton.addEventListener("click", closeGraphCreatePopover);
 
   els.searchInput.addEventListener("input", () => {
-    state.filter = els.searchInput.value.trim().toLowerCase();
+    setSearchFilter(els.searchInput.value);
     applyGraphDimming();
     scheduleLabelVisibilityRefresh({ force: true });
     scheduleLargeGraphRefresh();
@@ -475,6 +481,7 @@ function startEmpty() {
     state.saveTimer = null;
   }
   state.filter = "";
+  state.searchMatchedPaths = new Set();
   state.validation = [];
   state.layoutKey = "";
   state.graphHasHierarchy = true;
@@ -1096,12 +1103,9 @@ function rebuildIndex() {
     {
       noteCount: state.sortedNotes.length,
       referenceEdgeCount: state.referenceEdgeCount
-    },
-    {
-      noteCountThreshold: LARGE_GRAPH_NOTE_THRESHOLD,
-      referenceEdgeCountThreshold: LARGE_GRAPH_REFERENCE_EDGE_THRESHOLD
     }
   );
+  updateSearchMatchedPaths();
   state.labelStats = computeNoteLinkStats(state.sortedNotes);
   state.labelVisibilityCache = prepareLabelVisibilityCache(state.sortedNotes, state.labelStats);
   state.labelVisibility = null;
@@ -1204,14 +1208,7 @@ function parseNote(path, raw) {
   const bodyRefs = parseWikiRefs(body);
   const searchText = `${title} ${path} ${raw}`.toLowerCase();
 
-  const keys = new Set([
-    normalizeKey(pathNoExt),
-    normalizeKey(basename),
-    normalizeKey(title),
-    normalizeKey(slugify(pathNoExt)),
-    normalizeKey(slugify(basename)),
-    normalizeKey(slugify(title))
-  ]);
+  const keys = new Set(getNoteAliasKeys(path, title));
 
   return {
     path,
@@ -1288,42 +1285,10 @@ function parseFrontmatter(raw) {
       index += 1;
     }
     entries.push({ key, lines: entryLines });
-    if (entryLines.length === 1) {
-      values[key] = stripQuotes(match[2].trim());
-    } else {
-      values[key] = stripQuotes(match[2].trim());
-    }
+    values[key] = stripQuotes(match[2].trim());
   }
 
   return { entries, values };
-}
-
-function parseWikiRefs(body) {
-  const refs = [];
-  const seen = new Set();
-  const regex = /\[\[([^\]]+)\]\]/g;
-  let match;
-
-  while ((match = regex.exec(body)) !== null) {
-    const parsed = parseWikiTarget(match[1]);
-    if (!parsed.ref) continue;
-    const key = normalizeKey(parsed.ref);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    refs.push(parsed);
-  }
-
-  return refs;
-}
-
-function parseWikiTarget(value) {
-  const parts = String(value || "").split("|");
-  const ref = parts[0].replace(/\.md$/i, "").trim();
-  const alias = parts.slice(1).join("|").trim();
-  return {
-    ref,
-    label: alias || ref.split("/").pop() || ref
-  };
 }
 
 function resolveParent(note) {
@@ -1392,21 +1357,6 @@ function validateNotes() {
   }
 
   return issues;
-}
-
-function cleanWikiRef(value) {
-  if (!value || value === "null") return null;
-  const wiki = String(value).match(/\[\[([^\]]+)\]\]/);
-  const ref = wiki ? wiki[1] : value;
-  return parseWikiTarget(ref).ref;
-}
-
-function normalizeKey(value) {
-  return String(value || "")
-    .replace(/^notes\//i, "")
-    .replace(/\.md$/i, "")
-    .trim()
-    .toLowerCase();
 }
 
 function stripQuotes(value) {
@@ -1810,8 +1760,10 @@ async function autosaveSelectedNote() {
     } else {
       patchBodyOnlyNote(note, updated);
       if (state.filter) {
+        updateSearchMatchedPaths();
         applyGraphDimming();
         scheduleLabelVisibilityRefresh({ force: true });
+        scheduleLargeGraphRefresh();
       }
     }
 
@@ -2134,7 +2086,7 @@ function getRenderableReferenceEdges(notes) {
         searchMatchedPaths: getSearchMatchedPaths()
       },
       {
-        maxEdgeCount: LARGE_GRAPH_REFERENCE_EDGE_LIMIT
+        maxEdgeCount: LARGE_GRAPH_CONFIG.referenceEdgeLimit
       }
     );
   }
@@ -2246,7 +2198,7 @@ function buildPositions(notes, viewportWidth, viewportHeight) {
   }
 
   const wrapped = computeWrappedLevelMetadata(notes, {
-    maxNodesPerSubrow: MAX_LEVEL_NODES_PER_SUBROW
+    maxNodesPerSubrow: LARGE_GRAPH_CONFIG.maxNodesPerSubrow
   });
   const maxRowCount = wrapped.rows.reduce((max, row) => Math.max(max, row.count), 1);
   const contentWidth = Math.max(
@@ -2466,10 +2418,6 @@ function updateGraphGeometry() {
   }
 }
 
-function updateGraphGeometryForPath(changedPath) {
-  updateGraphGeometryForPaths(new Set([changedPath]));
-}
-
 function updateGraphGeometryForPaths(changedPaths) {
   if (!changedPaths || !changedPaths.size) return;
   const perf = startPerfMeasure("updateGraphGeometryForPaths");
@@ -2542,20 +2490,33 @@ function endpointToward(from, to, offset) {
 
 function isDimmed(note) {
   if (!state.filter) return false;
-  return !note.searchText.includes(state.filter);
+  return !state.searchMatchedPaths.has(note.path);
 }
 
 function isSearchMatched(note) {
-  return Boolean(state.filter && note.searchText.includes(state.filter));
+  return Boolean(state.filter && state.searchMatchedPaths.has(note.path));
 }
 
 function getSearchMatchedPaths() {
-  const matches = new Set();
-  if (!state.filter) return matches;
-  for (const note of state.notes) {
-    if (isSearchMatched(note)) matches.add(note.path);
+  return state.searchMatchedPaths;
+}
+
+function setSearchFilter(value) {
+  state.filter = String(value || "").trim().toLowerCase();
+  updateSearchMatchedPaths();
+}
+
+function updateSearchMatchedPaths() {
+  if (!state.filter) {
+    state.searchMatchedPaths = new Set();
+    return;
   }
-  return matches;
+
+  const matches = new Set();
+  for (const note of state.notes) {
+    if (note.searchText.includes(state.filter)) matches.add(note.path);
+  }
+  state.searchMatchedPaths = matches;
 }
 
 function scheduleLabelVisibilityRefresh({ force = false } = {}) {
@@ -3368,7 +3329,7 @@ async function createNoteFromPending(parent) {
 
   const title = state.pendingNode.title;
   const level = parent.level + 1;
-  const path = getAvailableNewNotePath(title, level, parent);
+  const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
     level,
@@ -3565,7 +3526,7 @@ async function pasteCopiedNodes(clipboard, point) {
     const requestedTitle = clipboard.mode === "copy" ? `${source.title} copy` : source.title;
     const title = getAvailableDisplayTitle(requestedTitle, reservedTitles);
     const level = nextParent.level + 1;
-    const path = getAvailableNewNotePath(title, level, nextParent, reservedPaths);
+    const path = getAvailableNewNotePath(title, reservedPaths);
     const raw = createNoteRaw({
       title,
       level,
@@ -3602,7 +3563,7 @@ async function createNoteFromPastedText(text, point) {
   const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
   const title = getAvailableDisplayTitle(titleFromText(text), reservedTitles);
   const level = parent.level + 1;
-  const path = getAvailableNewNotePath(title, level, parent);
+  const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
     level,
@@ -3817,7 +3778,7 @@ async function importMarkdownFiles(files, point) {
     const fallbackTitle = file.name.replace(/\.md$/i, "").replace(/[-_]+/g, " ");
     const title = getAvailableDisplayTitle(titleFromText(text, fallbackTitle), reservedTitles);
     const level = parent.level + 1;
-    const path = getAvailableNewNotePath(title, level, parent, reservedPaths);
+    const path = getAvailableNewNotePath(title, reservedPaths);
     const raw = createNoteRaw({
       title,
       level,
@@ -3848,23 +3809,6 @@ function readStoredPositions(stored, layoutKey = state.layoutKey, allowedPaths =
     return pruneStoredPositions(JSON.parse(stored), allowedPaths);
   } catch {
     return {};
-  }
-}
-
-async function saveStoredPositions() {
-  try {
-    state.manualPositions = pruneStoredPositions(state.manualPositions);
-    if (hasWritableWorkspace()) {
-      await invokeNative("write_layout", {
-        notesPath: state.notesPath,
-        positions: state.manualPositions
-      });
-      return;
-    }
-
-    window.localStorage.setItem(state.layoutKey, JSON.stringify(state.manualPositions));
-  } catch {
-    setStatus("Could not save layout");
   }
 }
 
@@ -4038,7 +3982,7 @@ async function createNewNote(event) {
   if (!title || !parent || !hasWritableWorkspace()) return;
 
   const level = parent.level + 1;
-  const path = getAvailableNewNotePath(title, level, parent);
+  const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
     level,
@@ -4073,22 +4017,16 @@ async function createNewNote(event) {
   }
 }
 
-function getAvailableNewNotePath(title, level, parent, reservedPaths = state.notePaths) {
+function getAvailableNewNotePath(title, reservedPaths = state.notePaths) {
   const base = slugify(title) || "untitled";
-  const directory = getRecommendedDirectory();
   const existing = new Set([...reservedPaths].map((path) => path.toLowerCase()));
   let suffix = 0;
 
   while (true) {
     const filename = `${base}${suffix ? `-${suffix + 1}` : ""}.md`;
-    const path = directory ? `${directory}/${filename}` : filename;
-    if (!existing.has(path.toLowerCase())) return path;
+    if (!existing.has(filename.toLowerCase())) return filename;
     suffix += 1;
   }
-}
-
-function getRecommendedDirectory() {
-  return "";
 }
 
 async function updateManifestFile() {
@@ -4098,16 +4036,6 @@ async function updateManifestFile() {
     notesPath: state.notesPath,
     paths
   });
-}
-
-function slugify(value) {
-  return String(value)
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
 }
 
 function escapeYaml(value) {

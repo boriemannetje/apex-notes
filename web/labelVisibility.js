@@ -1,3 +1,10 @@
+import {
+  cleanWikiRef,
+  getNoteAliasKeys,
+  normalizeKey,
+  parseWikiRefs
+} from "./noteRefs.js";
+
 const FAR_ZOOM_MAX = 0.6;
 const MID_ZOOM_MAX = 0.95;
 const NEAR_ZOOM_MAX = 1.45;
@@ -258,21 +265,7 @@ function buildPathIndex(noteList) {
 }
 
 function getAliases(item) {
-  const pathNoExt = item.path.replace(/\.md$/i, "");
-  const basename = pathNoExt.split("/").pop() || pathNoExt;
-  const title = item.title;
-
-  return [
-    item.path,
-    pathNoExt,
-    basename,
-    title,
-    slugify(pathNoExt),
-    slugify(basename),
-    slugify(title)
-  ]
-    .filter(Boolean)
-    .map(normalizeKey);
+  return getNoteAliasKeys(item.path, item.title);
 }
 
 function getPath(value) {
@@ -314,11 +307,7 @@ function getReferencePaths(note, resolvePath) {
   }
 
   if (typeof note.body === "string") {
-    const regex = /\[\[([^\]]+)\]\]/g;
-    let match;
-    while ((match = regex.exec(note.body)) !== null) {
-      values.push(match[1]);
-    }
+    values.push(...parseWikiRefs(note.body).map((ref) => ref.ref));
   }
 
   return uniquePaths(values.map((value) => resolvePath(value)));
@@ -475,28 +464,7 @@ function compareLevel(a, b) {
 }
 
 function cleanRef(value) {
-  if (!value || value === "null") return null;
-  const raw = typeof value === "string" ? value : getPath(value);
-  if (!raw || raw === "null") return null;
-  const wiki = String(raw).match(/\[\[([^\]]+)\]\]/);
-  const ref = wiki ? wiki[1] : raw;
-  return String(ref).split("|")[0].replace(/^notes\//i, "").replace(/\.md$/i, "").trim() || null;
-}
-
-function normalizeKey(value) {
-  return String(value || "")
-    .replace(/^notes\//i, "")
-    .replace(/\.md$/i, "")
-    .trim()
-    .toLowerCase();
-}
-
-function slugify(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return cleanWikiRef(value);
 }
 
 function compareText(a, b) {
