@@ -1,12 +1,14 @@
 {
   "name": "apex-notes",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "build:web": "esbuild web/app.js --bundle --format=iife --loader:.md=text --outfile=web/app.bundle.js",
+    "build:web:prod": "esbuild web/app.js --bundle --format=iife --loader:.md=text --minify --outfile=web/app.bundle.js",
+    "build:site": "npm run build:web:prod",
     "serve": "npm run build:web && python3 -m http.server 8765 -d web",
     "dev": "tauri dev",
-    "build": "npm run build:web && tauri build",
+    "build": "npm run build:web:prod && tauri build",
     "tauri": "tauri"
   },
   "dependencies": {

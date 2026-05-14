@@ -33,6 +33,27 @@ Click `Open notes folder` to edit an existing graph, or `Create folder` to start
 npm run build
 ```
 
+This creates the production web bundle first, then runs the Tauri desktop build.
+
+To verify the Netlify/static web build without creating a desktop bundle:
+
+```sh
+npm run build:site
+```
+
+## Contributing
+
+This repository is ready for forks, issues, and pull requests. Start with:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, review expectations, and note schema rules
+- [SECURITY.md](SECURITY.md) for private vulnerability reporting
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for collaboration expectations
+- [docs/release-checklist.md](docs/release-checklist.md) for release steps
+
+Small, focused pull requests are easiest to review. For larger changes, open an issue first with the workflow, affected files, and testing plan.
+
+This public repository contains the app source, neutral sample notes, and the bundled writing skill. It should not contain private notes, user-specific vaults, separate marketing-site source, or generated release bundles.
+
 ## Data
 
 Markdown files live in `notes/`. The bundled folder contains only neutral starter data.
@@ -53,7 +74,15 @@ Put that skill in your note-taking folder or agent skill folder so a writing age
 
 ## Website
 
-The public download site is deployed separately. This repository contains the open-source app and writing skill, not the website source.
+The public download site is deployed separately. This repository contains the open-source app, neutral sample notes, and writing skill, not the website source.
+
+To verify the static web shell in this repo:
+
+```sh
+npm run build:site
+```
+
+Native folder access and Trash support still require the packaged Tauri desktop app. For a desktop release, run `npm run build`, then publish the generated artifacts from `src-tauri/target/release/bundle/` to GitHub Releases. Keep download links pointed at the latest release artifacts rather than committing binaries to the repository.
 
 ## License
 

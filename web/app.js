@@ -123,6 +123,7 @@ const state = {
   interactionFrame: 0,
   queuedInteractionEvent: null,
   graphBounds: null,
+  graphViewport: null,
   graphFullscreenFallback: false
 };
 
@@ -508,6 +509,7 @@ function startEmpty() {
   state.lastGraphPoint = null;
   state.activeInteraction = null;
   cancelQueuedInteraction();
+  state.graphViewport = null;
   els.searchInput.value = "";
   renderSelectedNote("Open or create a folder");
   renderNewNoteParents();
@@ -1844,6 +1846,11 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   cancelQueuedGraphRender();
   const viewportWidth = Math.max(320, els.graphScroller.clientWidth || 0);
   const viewportHeight = Math.max(320, els.graphScroller.clientHeight || 0);
+  const previousViewport = state.graphViewport;
+  state.graphViewport = {
+    width: viewportWidth,
+    height: viewportHeight
+  };
 
   els.graph.setAttribute("width", String(viewportWidth));
   els.graph.setAttribute("height", String(viewportHeight));
@@ -1861,7 +1868,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   state.selectionRectElement = null;
 
   const notes = getRenderableNotes();
-  state.positions = buildPositions(notes, viewportWidth, viewportHeight);
+  state.positions = buildPositions(notes);
   if (state.pendingNode) {
     state.positions.set(PENDING_PATH, state.pendingNode.position);
   }
@@ -1885,6 +1892,8 @@ function renderGraph({ preserveView } = { preserveView: true }) {
 
   if (!preserveView) {
     fitGraphView(false);
+  } else {
+    preserveGraphViewportCenter(previousViewport, state.graphViewport);
   }
 
   const fragment = document.createDocumentFragment();
@@ -1959,6 +1968,17 @@ function scheduleResizeRender() {
     resizeDebounceTimer = 0;
     requestGraphRender({ preserveView: true });
   }, 120);
+}
+
+function preserveGraphViewportCenter(previousViewport, nextViewport) {
+  if (!previousViewport || !nextViewport) return;
+  if (previousViewport.width === nextViewport.width && previousViewport.height === nextViewport.height) return;
+  if (!Number.isFinite(state.view.scale) || state.view.scale === 0) return;
+
+  const centerGraphX = (previousViewport.width / 2 - state.view.x) / state.view.scale;
+  const centerGraphY = (previousViewport.height / 2 - state.view.y) / state.view.scale;
+  state.view.x = nextViewport.width / 2 - centerGraphX * state.view.scale;
+  state.view.y = nextViewport.height / 2 - centerGraphY * state.view.scale;
 }
 
 let largeGraphRefreshTimer = 0;
@@ -2192,23 +2212,16 @@ function removeGraphNodeLabel(group) {
   if (label) label.remove();
 }
 
-function buildPositions(notes, viewportWidth, viewportHeight) {
+function buildPositions(notes) {
   if (!state.graphHasHierarchy) {
-    return buildSquareGridPositions(notes, viewportWidth, viewportHeight);
+    return buildSquareGridPositions(notes);
   }
 
   const wrapped = computeWrappedLevelMetadata(notes, {
     maxNodesPerSubrow: LARGE_GRAPH_CONFIG.maxNodesPerSubrow
   });
   const maxRowCount = wrapped.rows.reduce((max, row) => Math.max(max, row.count), 1);
-  const contentWidth = Math.max(
-    viewportWidth,
-    GRAPH_PAD * 2 + Math.max(0, maxRowCount - 1) * NODE_GAP
-  );
-  const contentHeight = Math.max(
-    viewportHeight,
-    GRAPH_PAD * 2 + Math.max(0, wrapped.totalRows - 1) * LEVEL_GAP
-  );
+  const contentWidth = GRAPH_PAD * 2 + Math.max(0, maxRowCount - 1) * NODE_GAP;
   const positions = new Map();
 
   for (const row of wrapped.rows) {
@@ -2232,7 +2245,7 @@ function buildPositions(notes, viewportWidth, viewportHeight) {
   return positions;
 }
 
-function buildSquareGridPositions(notes, viewportWidth) {
+function buildSquareGridPositions(notes) {
   const positions = new Map();
 
   const count = notes.length;
@@ -2240,7 +2253,7 @@ function buildSquareGridPositions(notes, viewportWidth) {
 
   const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
   const colMax = columns;
-  const contentWidth = Math.max(viewportWidth, GRAPH_PAD * 2 + Math.max(0, colMax - 1) * NODE_GAP);
+  const contentWidth = GRAPH_PAD * 2 + Math.max(0, colMax - 1) * NODE_GAP;
 
   for (let index = 0; index < count; index += 1) {
     const note = notes[index];
