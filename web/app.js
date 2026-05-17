@@ -4,17 +4,19 @@ import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language"
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap } from "@codemirror/view";
 import {
-  computeWrappedLevelMetadata,
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
 } from "./graphLargeMode.js";
 import { LARGE_GRAPH_CONFIG } from "./graphConfig.js";
+import { createGraphIndex, ISSUE_TYPES } from "./graphModel.js";
+import { buildGraphLayout } from "./graphLayout.js";
 import {
   computeNoteLinkStats,
   decideVisibleLabels,
   getLabelVisibilityPolicy,
   prepareLabelVisibilityCache
 } from "./labelVisibility.js";
+import { createSearchIndex } from "./searchIndex.js";
 import {
   cleanWikiRef,
   getNoteAliasKeys,
@@ -29,10 +31,10 @@ const LEVEL_COLORS = ["#f2f0ea", "#9fc5ff", "#b8f0c0", "#ffe08a", "#ffb6d1", "#b
 const STORAGE_PREFIX = "hamkg-layout-v2";
 const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
 - check for pre existing hyrachy, sometimes only a few files don't have the correct formatting
-- Build one sensible hierarchy from the notes in this folder following the note writing skill. 
-- The level 0 apex should be the guiding belief principle: the most abstract, central idea that explains why the rest of the graph exists.
-- Moving down the graph should become progressively less abstract and more concrete: principles -> themes -> projects/areas -> concrete notes, examples, tasks, or observations.
-- Every non-apex note must have exactly one immediate parent that is one level above it.
+- Build sensible hierarchy edges from the notes in this folder following the note writing skill.
+- Parentless level 0 notes are allowed as loose notes or roots of independent hierarchies.
+- When a note is connected to a parent, the parent must be one level above it.
+- Moving down a connected hierarchy should become progressively less abstract and more concrete: principles -> themes -> projects/areas -> concrete notes, examples, tasks, or observations.
 - Use body wiki links only for contextual references between related notes, not as hierarchy.
 
 Full Apex Notes writing skill, copied from skills/apex-notes-writing/SKILL.md:
@@ -61,6 +63,8 @@ const state = {
   activeWorkspaceId: null,
   nextWorkspaceId: 1,
   notes: [],
+  graphIndex: null,
+  searchIndex: null,
   byPath: new Map(),
   byKey: new Map(),
   notePaths: new Set(),
@@ -86,6 +90,7 @@ const state = {
   validation: [],
   layoutKey: "",
   manualPositions: {},
+  autoPositions: new Map(),
   positions: new Map(),
   nodeElements: new Map(),
   edgeElements: [],
@@ -129,10 +134,14 @@ const state = {
 
 const els = {
   workspaceTabs: document.querySelector("#workspaceTabs"),
+  graphWorkspaceName: document.querySelector("#graphWorkspaceName"),
   graph: document.querySelector("#graph"),
   graphPane: document.querySelector(".graphPane"),
   graphScroller: document.querySelector("#graphScroller"),
   graphCanvas: null,
+  graphHelpButton: document.querySelector("#graphHelpButton"),
+  graphHelpDialog: document.querySelector("#graphHelpDialog"),
+  closeGraphHelpButton: document.querySelector("#closeGraphHelpButton"),
   searchInput: document.querySelector("#searchInput"),
   openFolderButton: document.querySelector("#openFolderButton"),
   createFolderButton: document.querySelector("#createFolderButton"),
@@ -314,9 +323,16 @@ function initializeEditor() {
 }
 
 function bindEvents() {
+  els.graphHelpButton.addEventListener("click", openGraphHelpDialog);
+  els.closeGraphHelpButton.addEventListener("click", closeGraphHelpDialog);
   els.openFolderButton.addEventListener("click", openNotesFolder);
   els.createFolderButton.addEventListener("click", openCreateFolderDialog);
   els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
+  els.graphWorkspaceName.addEventListener("input", syncGraphWorkspaceNameSize);
+  els.graphWorkspaceName.addEventListener("blur", () => {
+    void renameActiveWorkspace();
+  });
+  els.graphWorkspaceName.addEventListener("keydown", onGraphWorkspaceNameKeydown);
   els.newNoteButton.addEventListener("click", openNewNoteDialog);
   els.zoomInButton.addEventListener("click", () => zoomAtCenter(1.18));
   els.zoomOutButton.addEventListener("click", () => zoomAtCenter(1 / 1.18));
@@ -378,6 +394,22 @@ function bindEvents() {
   });
 }
 
+function openGraphHelpDialog() {
+  if (typeof els.graphHelpDialog.showModal === "function") {
+    els.graphHelpDialog.showModal();
+  } else {
+    els.graphHelpDialog.removeAttribute("hidden");
+  }
+}
+
+function closeGraphHelpDialog() {
+  if (typeof els.graphHelpDialog.close === "function") {
+    els.graphHelpDialog.close();
+  } else {
+    els.graphHelpDialog.setAttribute("hidden", "");
+  }
+}
+
 function toggleGraphFullscreen() {
   if (document.body.classList.contains("graphFullscreen")) {
     exitGraphFullscreen();
@@ -435,6 +467,70 @@ function syncGraphFullscreenButton() {
   els.fullscreenGraphButton.setAttribute("aria-pressed", String(isFullscreen));
 }
 
+function updateGraphTitle() {
+  const isEditingName = document.activeElement === els.graphWorkspaceName;
+  const workspaceName = state.workspaceName || "Folder";
+  els.graphWorkspaceName.disabled = !hasWritableWorkspace();
+  els.graphWorkspaceName.placeholder = workspaceName;
+  if (!isEditingName) {
+    els.graphWorkspaceName.value = workspaceName;
+  }
+  syncGraphWorkspaceNameSize();
+}
+
+function syncGraphWorkspaceNameSize() {
+  const value = els.graphWorkspaceName.value || els.graphWorkspaceName.placeholder || "Folder";
+  els.graphWorkspaceName.size = Math.max(4, Math.min(value.length, 34));
+}
+
+function onGraphWorkspaceNameKeydown(event) {
+  event.stopPropagation();
+  if (event.key === "Enter") {
+    event.preventDefault();
+    els.graphWorkspaceName.blur();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    updateGraphTitle();
+    els.graphWorkspaceName.blur();
+  }
+}
+
+async function renameActiveWorkspace() {
+  if (!hasWritableWorkspace()) {
+    updateGraphTitle();
+    return;
+  }
+
+  const requestedName = els.graphWorkspaceName.value.trim();
+  if (!requestedName || requestedName === state.workspaceName) {
+    updateGraphTitle();
+    return;
+  }
+
+  const previousRootPath = state.rootPath;
+  els.graphWorkspaceName.disabled = true;
+  stopLiveSync();
+
+  try {
+    if (state.dirty) {
+      await flushAutosave();
+      if (state.dirty) {
+        throw new Error("Save the current note before renaming the folder.");
+      }
+    }
+
+    const workspace = await invokeNative("rename_workspace", {
+      rootPath: previousRootPath,
+      folderName: requestedName
+    });
+    setNativeWorkspace(workspace, "Renamed folder", { previousRootPath });
+  } catch (error) {
+    setStatus(`Could not rename folder: ${String(error)}`);
+    updateGraphTitle();
+    startLiveSync();
+  }
+}
+
 function onWorkspaceTabsClick(event) {
   const openButton = event.target.closest("[data-open-workspace]");
   if (openButton) {
@@ -462,6 +558,8 @@ function startEmpty() {
   stopLiveSync();
   state.activeWorkspaceId = null;
   state.notes = [];
+  state.graphIndex = null;
+  state.searchIndex = null;
   state.byPath = new Map();
   state.byKey = new Map();
   state.notePaths = new Set();
@@ -488,6 +586,7 @@ function startEmpty() {
   state.graphHasHierarchy = true;
   state.hierarchyPromptShown = false;
   state.manualPositions = {};
+  state.autoPositions = new Map();
   state.positions = new Map();
   state.nodeElements = new Map();
   state.edgeElements = [];
@@ -825,12 +924,15 @@ function normalizeSelectionAfterNotesChanged() {
   }
 }
 
-function setNativeWorkspace(workspace, statusMessage) {
+function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {}) {
   saveActiveWorkspaceState();
 
   const rootPath = workspace.rootPath || "";
   const workspaceName = workspace.workspaceName || rootPath || "Folder";
-  const existing = state.workspaces.find((item) => item.rootPath === rootPath);
+  const existing = state.workspaces.find((item) => item.rootPath === rootPath || (
+    previousRootPath &&
+    item.rootPath === previousRootPath
+  ));
   const target = existing || {
     id: `workspace-${state.nextWorkspaceId++}`,
     selectedPath: null,
@@ -864,6 +966,10 @@ function setNativeWorkspace(workspace, statusMessage) {
 
 function hasWritableWorkspace() {
   return state.source === "folder" && Boolean(state.notesPath);
+}
+
+function hasEmptyWritableWorkspace() {
+  return hasWritableWorkspace() && state.notes.length === 0;
 }
 
 function buildLayoutKey(source, rootPath, workspaceName) {
@@ -910,6 +1016,8 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
 
   state.activeWorkspaceId = workspace.id;
   state.notes = workspace.notes || [];
+  state.graphIndex = null;
+  state.searchIndex = null;
   state.selectedPath = workspace.selectedPath || null;
   state.selectedPaths = new Set(workspace.selectedPaths || []);
   state.rootPath = workspace.rootPath || "";
@@ -934,6 +1042,7 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.activeInteraction = null;
   state.hoveredPath = null;
   state.focusedPath = null;
+  state.autoPositions = new Map();
   state.positions = new Map();
   state.nodeElements = new Map();
   state.edgeElements = [];
@@ -1070,24 +1179,11 @@ function rebuildIndex() {
     state.notePaths.add(note.path);
   }
 
-  for (const note of state.notes) {
-    for (const key of note.keys) {
-      if (!state.byKey.has(key)) {
-        state.byKey.set(key, note);
-      }
-    }
-  }
+  state.graphIndex = createGraphIndex(state.notes);
+  applyGraphIndexToNotes(state.graphIndex);
+  rebuildAliasLookup(state.graphIndex);
 
   for (const note of state.notes) {
-    note.parentNote = resolveParent(note);
-    note.children = [];
-    note.bodyRefNotes = [];
-  }
-
-  for (const note of state.notes) {
-    if (note.parentNote) {
-      note.parentNote.children.push(note);
-    }
     note.bodyRefNotes = note.bodyRefs
       .map((ref) => ({
         ...ref,
@@ -1107,6 +1203,7 @@ function rebuildIndex() {
       referenceEdgeCount: state.referenceEdgeCount
     }
   );
+  state.searchIndex = createSearchIndex(state.notes);
   updateSearchMatchedPaths();
   state.labelStats = computeNoteLinkStats(state.sortedNotes);
   state.labelVisibilityCache = prepareLabelVisibilityCache(state.sortedNotes, state.labelStats);
@@ -1114,6 +1211,57 @@ function rebuildIndex() {
   state.labelVisibilityKey = "";
 
   refreshEditorDecorations();
+}
+
+function applyGraphIndexToNotes(graphIndex) {
+  for (const note of state.notes) {
+    const vertex = graphIndex && graphIndex.V.get(note.path);
+    note.children = [];
+    note.parentNote = null;
+    note.bodyRefNotes = [];
+    note.declaredLevel = vertex ? vertex.declaredLevel : (note.hasLevel ? note.level : null);
+    note.derivedLevel = vertex ? vertex.derivedLevel : null;
+    const inferredRootWithoutLevel =
+      vertex &&
+      vertex.derivedLevel === 0 &&
+      !note.hasLevel &&
+      !cleanWikiRef(note.parentRef);
+    if (vertex && Number.isFinite(vertex.derivedLevel) && !inferredRootWithoutLevel) {
+      note.level = vertex.derivedLevel;
+    } else if (Number.isFinite(note.declaredLevel)) {
+      note.level = note.declaredLevel;
+    } else {
+      note.level = 4;
+    }
+  }
+
+  if (!graphIndex) return;
+
+  for (const [path, parentPath] of graphIndex.parents.entries()) {
+    if (!parentPath) continue;
+    const note = state.byPath.get(path);
+    const parent = state.byPath.get(parentPath);
+    if (!note || !parent) continue;
+    note.parentNote = parent;
+    parent.children.push(note);
+  }
+}
+
+function rebuildAliasLookup(graphIndex) {
+  state.byKey = new Map();
+  if (graphIndex && graphIndex.aliases) {
+    for (const [key, path] of graphIndex.aliases.entries()) {
+      const note = state.byPath.get(path);
+      if (note) state.byKey.set(key, note);
+    }
+    return;
+  }
+
+  for (const note of state.notes) {
+    for (const key of note.keys) {
+      if (!state.byKey.has(key)) state.byKey.set(key, note);
+    }
+  }
 }
 
 function isHierarchyComplete(notes) {
@@ -1125,15 +1273,47 @@ function isHierarchyComplete(notes) {
     }
   }
 
-  for (const note of notes) {
-    if (note.level === 0) continue;
-    if (!note.parentNote) return false;
-    if (!Number.isFinite(note.parentNote.level) || note.parentNote.level !== note.level - 1) {
-      return false;
-    }
+  if (state.graphIndex && state.graphIndex.validation.length) {
+    return false;
   }
 
   return true;
+}
+
+function isValidApex(note) {
+  if (!note || cleanWikiRef(note.parentRef) || !note.hasLevel) return false;
+  if (state.graphIndex && state.graphIndex.derivedLevels.has(note.path)) {
+    return state.graphIndex.derivedLevels.get(note.path) === 0;
+  }
+  return Boolean(note.hasLevel && note.level === 0);
+}
+
+function hasValidHierarchyEdge(note) {
+  const parent = note && note.parentNote;
+  if (state.graphIndex && note && parent) {
+    const childLevel = state.graphIndex.derivedLevels.get(note.path);
+    const parentLevel = state.graphIndex.derivedLevels.get(parent.path);
+    return Number.isFinite(childLevel) && Number.isFinite(parentLevel) && parentLevel === childLevel - 1;
+  }
+  return Boolean(
+    note &&
+    parent &&
+    note.hasLevel &&
+    parent.hasLevel &&
+    Number.isFinite(note.level) &&
+    Number.isFinite(parent.level) &&
+    parent.level === note.level - 1
+  );
+}
+
+function hasUsableHierarchySlot(note) {
+  if (!note || !Number.isFinite(note.level)) return false;
+  if (isValidApex(note)) return true;
+  return hasValidHierarchyEdge(note);
+}
+
+function isLooseHierarchyNote(note) {
+  return Boolean(note && (!note.hasFrontmatter || !note.hasTitle || !hasUsableHierarchySlot(note)));
 }
 
 function maybeShowHierarchyPrompt() {
@@ -1218,6 +1398,8 @@ function parseNote(path, raw) {
     basename,
     title,
     level: Number.isFinite(level) ? level : 4,
+    declaredLevel: Number.isFinite(level) ? level : null,
+    derivedLevel: null,
     rawLevel: frontmatter.values.level,
     hasFrontmatter: parsed.hasFrontmatter,
     hasLevel: Object.prototype.hasOwnProperty.call(frontmatter.values, "level") && Number.isFinite(level),
@@ -1300,6 +1482,10 @@ function resolveParent(note) {
 }
 
 function resolveWikiNote(ref) {
+  if (state.graphIndex) {
+    const path = state.graphIndex.resolvePath(ref);
+    if (path) return state.byPath.get(path) || null;
+  }
   return state.byKey.get(normalizeKey(ref)) || state.byKey.get(normalizeKey(slugify(ref))) || null;
 }
 
@@ -1323,32 +1509,6 @@ function validateNotes() {
     if (!note.hasLevel) {
       issues.push({ type: "level", note, message: `${note.title} is missing a valid level` });
     }
-
-    const parentRef = cleanWikiRef(note.parentRef);
-    if (note.level === 0) {
-      if (parentRef) {
-        issues.push({ type: "parent", note, message: `${note.title} is level 0 but has a parent` });
-      }
-      continue;
-    }
-
-    if (!parentRef) {
-      issues.push({ type: "parent", note, message: `${note.title} is missing a parent` });
-      continue;
-    }
-
-    if (!note.parentNote) {
-      issues.push({ type: "parent", note, message: `${note.title} has a broken parent` });
-      continue;
-    }
-
-    if (note.parentNote.level !== note.level - 1) {
-      issues.push({
-        type: "level",
-        note,
-        message: `${note.title} parent should be level ${note.level - 1}`
-      });
-    }
   }
 
   for (const matches of titleCounts.values()) {
@@ -1358,7 +1518,32 @@ function validateNotes() {
     }
   }
 
+  if (state.graphIndex) {
+    for (const issue of state.graphIndex.validation) {
+      issues.push(graphIssueToValidation(issue));
+    }
+  }
+
   return issues;
+}
+
+function graphIssueToValidation(issue) {
+  const path = issue.path || (Array.isArray(issue.paths) ? issue.paths[0] : null);
+  const note = path ? state.byPath.get(path) || null : null;
+  let type = "parent";
+
+  if (issue.type === ISSUE_TYPES.LEVEL_MISMATCH) {
+    type = "level";
+  } else if (issue.type === ISSUE_TYPES.DUPLICATE_ALIAS) {
+    type = "duplicate";
+  }
+
+  return {
+    type,
+    note,
+    graphIssue: issue,
+    message: issue.message || "Hierarchy issue"
+  };
 }
 
 function stripQuotes(value) {
@@ -1532,10 +1717,10 @@ function renderInfoPanel(note) {
 
 function renderInfoParents(note) {
   const fragment = document.createDocumentFragment();
-  const apexOption = document.createElement("option");
-  apexOption.value = "";
-  apexOption.textContent = "No parent (Apex)";
-  fragment.appendChild(apexOption);
+  const rootOption = document.createElement("option");
+  rootOption.value = "";
+  rootOption.textContent = "No parent (root / loose)";
+  fragment.appendChild(rootOption);
 
   for (const parent of state.sortedParentOptions) {
     if (parent.path === note.path || isDescendant(parent, note)) continue;
@@ -1551,8 +1736,11 @@ function renderInfoParents(note) {
 
 function isDescendant(candidate, parent) {
   let current = candidate.parentNote;
+  const seen = new Set();
   while (current) {
     if (current.path === parent.path) return true;
+    if (seen.has(current.path)) return false;
+    seen.add(current.path);
     current = current.parentNote;
   }
   return false;
@@ -1820,6 +2008,8 @@ function patchBodyOnlyNote(note, updated) {
   note.frontmatterRaw = updated.frontmatterRaw;
   note.frontmatterEntries = updated.frontmatterEntries;
   note.frontmatterValues = updated.frontmatterValues;
+  note.declaredLevel = updated.declaredLevel;
+  note.derivedLevel = updated.derivedLevel;
   note.rawLevel = updated.rawLevel;
   note.hasFrontmatter = updated.hasFrontmatter;
   note.hasLevel = updated.hasLevel;
@@ -1827,6 +2017,7 @@ function patchBodyOnlyNote(note, updated) {
   note.body = updated.body;
   note.bodyRefs = updated.bodyRefs;
   note.searchText = updated.searchText;
+  state.searchIndex = createSearchIndex(state.notes);
 }
 
 function createNoteRaw({ title, level, parent, body }) {
@@ -1882,7 +2073,9 @@ function renderGraph({ preserveView } = { preserveView: true }) {
     empty.setAttribute("class", "emptyGraphText");
     empty.setAttribute("x", String(viewportWidth / 2));
     empty.setAttribute("y", String(viewportHeight / 2));
-    empty.textContent = "Open folder or create folder";
+    empty.textContent = hasEmptyWritableWorkspace()
+      ? "Click anywhere to create your first note"
+      : "Open folder or create folder";
     els.graph.appendChild(empty);
     applyViewTransform();
     updateLabelVisibility({ force: true });
@@ -1898,25 +2091,23 @@ function renderGraph({ preserveView } = { preserveView: true }) {
 
   const fragment = document.createDocumentFragment();
 
-  if (state.graphHasHierarchy) {
-    for (const note of notes) {
-      if (!note.parentNote) continue;
-      const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      edge.setAttribute("class", `edge hierarchyEdge${isDimmed(note) || isDimmed(note.parentNote) ? " dimmed" : ""}`);
-      edge.setAttribute("aria-hidden", "true");
-      edge.style.setProperty("--level-color", getLevelColor(note.level));
-      fragment.appendChild(edge);
-      registerGraphEdge({ path: edge, from: note.parentNote.path, to: note.path, type: "hierarchy" });
-    }
+  for (const note of notes) {
+    if (!hasValidHierarchyEdge(note)) continue;
+    const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    edge.setAttribute("class", `edge hierarchyEdge${isDimmed(note) || isDimmed(note.parentNote) ? " dimmed" : ""}`);
+    edge.setAttribute("aria-hidden", "true");
+    edge.style.setProperty("--level-color", getLevelColor(note.level));
+    fragment.appendChild(edge);
+    registerGraphEdge({ path: edge, from: note.parentNote.path, to: note.path, type: "hierarchy" });
+  }
 
-    for (const referenceEdge of getRenderableReferenceEdges(notes)) {
-      const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      edge.setAttribute("class", `edge referenceEdge${referenceEdge.dimmed ? " dimmed" : ""}`);
-      edge.setAttribute("aria-hidden", "true");
-      edge.style.setProperty("--level-color", getLevelColor(referenceEdge.level));
-      fragment.appendChild(edge);
-      registerGraphEdge({ path: edge, from: referenceEdge.from, to: referenceEdge.to, type: "reference" });
-    }
+  for (const referenceEdge of getRenderableReferenceEdges(notes)) {
+    const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    edge.setAttribute("class", `edge referenceEdge${referenceEdge.dimmed ? " dimmed" : ""}`);
+    edge.setAttribute("aria-hidden", "true");
+    edge.style.setProperty("--level-color", getLevelColor(referenceEdge.level));
+    fragment.appendChild(edge);
+    registerGraphEdge({ path: edge, from: referenceEdge.from, to: referenceEdge.to, type: "reference" });
   }
 
   state.labelVisibility = state.largeGraphMode ? computeLargeGraphLabelVisibility() : null;
@@ -2067,24 +2258,46 @@ function collectReferenceEdges(notes) {
   const referenceEdges = new Map();
 
   for (const note of notes) {
-    if (!note.parentNote) continue;
+    if (!hasValidHierarchyEdge(note)) continue;
     hierarchyPairs.add(undirectedPairKey(note.path, note.parentNote.path));
   }
 
-  for (const note of notes) {
-    for (const ref of note.bodyRefNotes) {
-      const target = ref.note;
-      if (!target || target.path === note.path) continue;
-      if (!renderable.has(target.path)) continue;
-      const pairKey = undirectedPairKey(note.path, target.path);
+  if (state.graphIndex && Array.isArray(state.graphIndex.E_ref)) {
+    for (const graphEdge of state.graphIndex.E_ref) {
+      if (!renderable.has(graphEdge.from) || !renderable.has(graphEdge.to)) continue;
+      const pairKey = undirectedPairKey(graphEdge.from, graphEdge.to);
       if (hierarchyPairs.has(pairKey)) continue;
-      if (referenceEdges.has(pairKey)) continue;
+      const existing = referenceEdges.get(pairKey);
+      const target = state.byPath.get(graphEdge.to);
+      if (existing) {
+        existing.weight += graphEdge.weight || 1;
+        continue;
+      }
       referenceEdges.set(pairKey, {
         key: pairKey,
-        from: note.path,
-        to: target.path,
-        level: target.level
+        from: graphEdge.from,
+        to: graphEdge.to,
+        level: target ? target.level : 0,
+        weight: graphEdge.weight || 1
       });
+    }
+  } else {
+    for (const note of notes) {
+      for (const ref of note.bodyRefNotes) {
+        const target = ref.note;
+        if (!target || target.path === note.path) continue;
+        if (!renderable.has(target.path)) continue;
+        const pairKey = undirectedPairKey(note.path, target.path);
+        if (hierarchyPairs.has(pairKey)) continue;
+        if (referenceEdges.has(pairKey)) continue;
+        referenceEdges.set(pairKey, {
+          key: pairKey,
+          from: note.path,
+          to: target.path,
+          level: target.level,
+          weight: 1
+        });
+      }
     }
   }
 
@@ -2128,14 +2341,17 @@ function undirectedPairKey(a, b) {
 function renderGraphNode(canvas, note) {
   const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
   const classes = ["node"];
+  const loose = isLooseHierarchyNote(note);
   if (state.selectedPaths.has(note.path)) classes.push("selected");
   if (isDimmed(note)) classes.push("dimmed");
+  if (loose) classes.push("looseNode");
   group.setAttribute("class", classes.join(" "));
   group.style.setProperty("--level-color", getLevelColor(note.level));
   group.setAttribute("tabindex", "0");
   group.setAttribute("role", "button");
   group.setAttribute("aria-pressed", String(state.selectedPaths.has(note.path)));
-  group.setAttribute("aria-label", note.title);
+  group.setAttribute("aria-label", loose ? `${note.title}, loose note` : note.title);
+  if (loose) group.setAttribute("title", "Drag to another node to connect");
   group.setAttribute("data-path", note.path);
 
   const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -2213,36 +2429,67 @@ function removeGraphNodeLabel(group) {
 }
 
 function buildPositions(notes) {
-  if (!state.graphHasHierarchy) {
-    return buildSquareGridPositions(notes);
-  }
-
-  const wrapped = computeWrappedLevelMetadata(notes, {
-    maxNodesPerSubrow: LARGE_GRAPH_CONFIG.maxNodesPerSubrow
+  const graph = state.graphIndex
+    ? { referenceEdges: state.graphIndex.E_ref }
+    : { referenceEdges: state.referenceEdges };
+  const autoPositions = buildGraphLayout(graph, notes, {
+    levelGap: LEVEL_GAP,
+    nodeGap: NODE_GAP,
+    subtreeGap: NODE_GAP,
+    rootGap: NODE_GAP + 56,
+    collisionGap: NODE_GAP,
+    looseGapX: NODE_GAP,
+    looseGapY: LEVEL_GAP,
+    looseMarginX: NODE_GAP * 2,
+    looseColumns: Math.max(1, Math.ceil(Math.sqrt(notes.filter(isLooseHierarchyNote).length || 1))),
+    barycentricSweeps: 3,
+    referenceRelaxation: true,
+    referenceIterations: state.largeGraphMode ? 4 : 6,
+    referenceStrength: state.largeGraphMode ? 0.1 : 0.16
   });
-  const maxRowCount = wrapped.rows.reduce((max, row) => Math.max(max, row.count), 1);
-  const contentWidth = GRAPH_PAD * 2 + Math.max(0, maxRowCount - 1) * NODE_GAP;
-  const positions = new Map();
-
-  for (const row of wrapped.rows) {
-    const rowWidth = Math.max(0, row.count - 1) * NODE_GAP;
-    const startX = (contentWidth - rowWidth) / 2;
-    const y = GRAPH_PAD + row.rowIndex * LEVEL_GAP;
-
-    row.notes.forEach((note, colIndex) => {
-      positions.set(note.path, {
-        x: startX + colIndex * NODE_GAP,
-        y
-      });
-    });
-  }
-
-  for (const [path, position] of Object.entries(state.manualPositions)) {
-    if (!state.notePaths.has(path)) continue;
-    positions.set(path, position);
-  }
+  const positions = offsetPositions(autoPositions, GRAPH_PAD, GRAPH_PAD);
+  state.autoPositions = new Map(positions);
+  applyManualPositions(positions);
 
   return positions;
+}
+
+function offsetPositions(positions, offsetX, offsetY) {
+  const shifted = new Map();
+  for (const [path, position] of positions.entries()) {
+    shifted.set(path, {
+      x: position.x + offsetX,
+      y: position.y + offsetY
+    });
+  }
+  return shifted;
+}
+
+function applyManualPositions(positions) {
+  for (const [path, position] of Object.entries(state.manualPositions)) {
+    if (!state.notePaths.has(path)) continue;
+    const resolved = resolveStoredPosition(path, position, positions);
+    if (resolved) positions.set(path, resolved);
+  }
+}
+
+function resolveStoredPosition(path, stored, autoPositions = state.autoPositions) {
+  if (!stored) return null;
+  const base = autoPositions.get(path);
+  if (Number.isFinite(stored.dx) || Number.isFinite(stored.dy)) {
+    if (!base) return null;
+    return {
+      x: round(base.x + (Number(stored.dx) || 0)),
+      y: round(base.y + (Number(stored.dy) || 0))
+    };
+  }
+  if (Number.isFinite(stored.x) && Number.isFinite(stored.y)) {
+    return {
+      x: round(stored.x),
+      y: round(stored.y)
+    };
+  }
+  return null;
 }
 
 function buildSquareGridPositions(notes) {
@@ -2386,7 +2633,7 @@ function querySpatialRect(rect, pad = 0) {
   return paths;
 }
 
-function queryNearestSpatialNote(point, radius) {
+function queryNearestSpatialNote(point, radius, excludedPaths = new Set()) {
   const index = state.spatialIndex;
   if (!index) return null;
 
@@ -2403,6 +2650,7 @@ function queryNearestSpatialNote(point, radius) {
       const cell = index.cells.get(`${cellX}:${cellY}`);
       if (!cell) continue;
       for (const path of cell) {
+        if (excludedPaths.has(path)) continue;
         const position = state.positions.get(path);
         if (!position) continue;
         const dx = point.x - position.x;
@@ -2525,9 +2773,20 @@ function updateSearchMatchedPaths() {
     return;
   }
 
-  const matches = new Set();
-  for (const note of state.notes) {
-    if (note.searchText.includes(state.filter)) matches.add(note.path);
+  const matches = new Set(
+    (state.searchIndex ? state.searchIndex.search(state.filter, {
+      limit: Math.max(1, state.notes.length),
+      minScore: 0,
+      includeTrigramFallback: true,
+      alwaysIncludeTrigram: true
+    }) : [])
+      .map((result) => result.path)
+  );
+
+  if (state.filter.length < 3 || !matches.size) {
+    for (const note of state.notes) {
+      if (note.searchText.includes(state.filter)) matches.add(note.path);
+    }
   }
   state.searchMatchedPaths = matches;
 }
@@ -2600,8 +2859,28 @@ function computeLargeGraphLabelVisibility() {
     selectedPaths: state.selectedPaths,
     hoveredPath: state.hoveredPath,
     focusedPath: state.focusedPath,
-    searchMatchedPaths: getSearchMatchedPaths()
+    searchMatchedPaths: getSearchMatchedPaths(),
+    labelRectangles: buildApproxLabelRectangles(state.sortedNotes),
+    labelOverlapPadding: 6
   });
+}
+
+function buildApproxLabelRectangles(notes) {
+  const rectangles = new Map();
+  for (const note of notes) {
+    const position = state.positions.get(note.path);
+    if (!position) continue;
+    const lines = wrapTitle(note.title);
+    const width = Math.max(44, ...lines.map((line) => line.length * 7.2));
+    const height = Math.max(18, lines.length * 15);
+    rectangles.set(note.path, {
+      left: position.x - width / 2,
+      top: position.y + 22,
+      width,
+      height
+    });
+  }
+  return rectangles;
 }
 
 function getLabelVisibilityKey() {
@@ -2792,6 +3071,10 @@ function startGraphPointerDown(event) {
 
     const note = state.byPath.get(path);
     if (note) {
+      if (isLooseHierarchyNote(note)) {
+        startLooseRope(event, note, group);
+        return;
+      }
       startNodeDrag(event, note, group);
       return;
     }
@@ -2904,13 +3187,44 @@ function startPendingRope(event, group) {
   const current = eventToGraphPoint(event);
   state.activeInteraction = {
     type: "rope",
+    mode: "pending",
     pointerId: event.pointerId,
+    sourcePath: PENDING_PATH,
     start,
     current,
-    targetPath: null
+    targetPath: null,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: true
   };
+  group.classList.add("ropeSource");
   ensureRopeElement();
   updateRopePath(start, current);
+  els.graph.setPointerCapture(event.pointerId);
+}
+
+function startLooseRope(event, note, group) {
+  if (event.button !== 0 || state.pendingNode || !isLooseHierarchyNote(note)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeGraphCreatePopover();
+
+  const start = state.positions.get(note.path);
+  if (!start) return;
+
+  state.activeInteraction = {
+    type: "rope",
+    mode: "connect",
+    pointerId: event.pointerId,
+    sourcePath: note.path,
+    start,
+    current: start,
+    targetPath: null,
+    startX: event.clientX,
+    startY: event.clientY,
+    moved: false
+  };
+  group.classList.add("ropeSource");
   els.graph.setPointerCapture(event.pointerId);
 }
 
@@ -2986,7 +3300,7 @@ function continueInteraction(event) {
         y: round(startPosition.y + deltaY)
       };
       state.positions.set(path, position);
-      state.manualPositions[path] = position;
+      state.manualPositions[path] = manualDeltaForPosition(path, position);
       changedPaths.add(path);
     }
     updateGraphGeometryForPaths(changedPaths);
@@ -3016,9 +3330,13 @@ function continueInteraction(event) {
 
   if (interaction.type === "rope") {
     const point = getInteractionGraphPoint(event);
+    const distance = Math.hypot(event.clientX - interaction.startX, event.clientY - interaction.startY);
+    if (distance > 3) interaction.moved = true;
+    if (!interaction.moved && interaction.mode === "connect") return;
+
     interaction.current = point;
-    const target = findRopeTarget(point);
-    interaction.targetPath = target ? target.path : null;
+    const target = findRopeTarget(point, interaction.sourcePath);
+    interaction.targetPath = target && canUseRopeTarget(interaction, target) ? target.path : null;
     setRopeTarget(interaction.targetPath);
     updateRopePath(interaction.start, point);
   }
@@ -3065,15 +3383,32 @@ async function endInteraction(event) {
 
   if (interaction.type === "rope") {
     const parent = state.byPath.get(interaction.targetPath) || null;
+    const child = state.byPath.get(interaction.sourcePath) || null;
+    const wasClick = interaction.mode === "connect" && !interaction.moved;
+
+    if (wasClick) {
+      state.activeInteraction = null;
+      clearRopeSource(interaction);
+      clearRopeTarget();
+      if (child) await selectNote(child.path);
+      return;
+    }
+
     if (parent) {
       state.activeInteraction = null;
+      clearRopeSource(interaction);
       clearRopeTarget();
-      await createNoteFromPending(parent);
+      if (interaction.mode === "connect" && child) {
+        await connectLooseNoteToParent(child, parent);
+      } else {
+        await createNoteFromPending(parent);
+      }
       return;
     }
 
     animateRopeBack(interaction);
     state.activeInteraction = null;
+    clearRopeSource(interaction);
     clearRopeTarget();
     setStatus("Drop the rope on a parent node");
     return;
@@ -3081,6 +3416,12 @@ async function endInteraction(event) {
 
   if (interaction.type === "pan") {
     if (!interaction.moved) {
+      if (hasEmptyWritableWorkspace() && event.button === 0) {
+        state.activeInteraction = null;
+        els.graph.classList.remove("isPanning");
+        await openGraphCreatePopover(event);
+        return;
+      }
       await setGraphSelection(new Set(), {
         openSingle: false,
         statusMessage: selectionStatus(0)
@@ -3103,6 +3444,7 @@ function cancelInteraction() {
   }
   if (state.activeInteraction && state.activeInteraction.type === "rope") {
     animateRopeBack(state.activeInteraction);
+    clearRopeSource(state.activeInteraction);
   }
   if (state.activeInteraction && state.activeInteraction.type === "marquee") {
     updateGraphSelection(state.activeInteraction.previewSelection, state.selectedPaths);
@@ -3135,6 +3477,13 @@ function clearNodeDragClasses(interaction) {
   }
   const primary = interaction.primaryPath && state.nodeElements.get(interaction.primaryPath);
   if (primary) primary.classList.remove("dragging");
+}
+
+function clearRopeSource(interaction) {
+  const path = interaction && interaction.sourcePath;
+  if (!path) return;
+  const group = state.nodeElements.get(path);
+  if (group) group.classList.remove("ropeSource");
 }
 
 function ensureSelectionRectElement() {
@@ -3241,14 +3590,17 @@ function animateRopeBack(interaction) {
   }, 220);
 }
 
-function findRopeTarget(point) {
+function findRopeTarget(point, sourcePath = "") {
+  const excludedPaths = new Set([sourcePath, PENDING_PATH].filter(Boolean));
+
   if (state.spatialIndex) {
-    return queryNearestSpatialNote(point, HIT_RADIUS + 14);
+    return queryNearestSpatialNote(point, HIT_RADIUS + 14, excludedPaths);
   }
 
   let best = null;
   let bestDistance = Infinity;
   for (const note of state.notes) {
+    if (excludedPaths.has(note.path)) continue;
     const position = state.positions.get(note.path);
     if (!position) continue;
     const distance = Math.hypot(point.x - position.x, point.y - position.y);
@@ -3258,6 +3610,14 @@ function findRopeTarget(point) {
     }
   }
   return best;
+}
+
+function canUseRopeTarget(interaction, target) {
+  if (!target || target.path === interaction.sourcePath) return false;
+  if (interaction.mode !== "connect") return true;
+
+  const child = state.byPath.get(interaction.sourcePath);
+  return Boolean(child && !isDescendant(target, child));
 }
 
 function setRopeTarget(path) {
@@ -3298,10 +3658,6 @@ async function openGraphCreatePopover(event) {
     setStatus("Open notes folder to create notes");
     return;
   }
-  if (!state.notes.length) {
-    setStatus("Create a parent-capable note first");
-    return;
-  }
   if (state.dirty) {
     await flushAutosave();
     if (state.dirty) return;
@@ -3321,16 +3677,22 @@ function closeGraphCreatePopover() {
   state.pendingCreatePoint = null;
 }
 
-function createPendingGraphNode(event) {
+async function createPendingGraphNode(event) {
   event.preventDefault();
   const title = els.graphNewTitle.value.trim();
   if (!title || !state.pendingCreatePoint) return;
+  const position = {
+    x: round(state.pendingCreatePoint.x),
+    y: round(state.pendingCreatePoint.y)
+  };
+  if (!state.notes.length) {
+    closeGraphCreatePopover();
+    await createFirstNote(title, position);
+    return;
+  }
   state.pendingNode = {
     title,
-    position: {
-      x: round(state.pendingCreatePoint.x),
-      y: round(state.pendingCreatePoint.y)
-    }
+    position
   };
   closeGraphCreatePopover();
   renderGraph({ preserveView: true });
@@ -3341,7 +3703,8 @@ async function createNoteFromPending(parent) {
   if (!state.pendingNode || !hasWritableWorkspace()) return;
 
   const title = state.pendingNode.title;
-  const level = parent.level + 1;
+  const parentPlan = getParentConnectionPlan(parent, null);
+  const level = parentPlan.level + 1;
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
@@ -3351,6 +3714,14 @@ async function createNoteFromPending(parent) {
   });
 
   try {
+    if (parentPlan.raw !== parent.raw) {
+      await invokeNative("write_note", {
+        notesPath: state.notesPath,
+        path: parent.path,
+        raw: parentPlan.raw
+      });
+    }
+
     await invokeNative("create_note", {
       notesPath: state.notesPath,
       path,
@@ -3358,6 +3729,9 @@ async function createNoteFromPending(parent) {
     });
 
     const note = parseNote(path, raw);
+    if (parentPlan.raw !== parent.raw) {
+      replaceNoteInState(parseNote(parent.path, parentPlan.raw));
+    }
     state.notes.push(note);
     state.notes.sort((a, b) => compareText(a.path, b.path));
     state.selectedPath = note.path;
@@ -3368,17 +3742,135 @@ async function createNoteFromPending(parent) {
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
-    void savePositionPatch(positionPatchForPaths([path]));
     await updateManifestFile();
     renderSelectedNote("Saved new note");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
+    await savePositionPatch(positionPatchForPaths([path]));
     updateSourceStatus();
     renderValidationStatus();
   } catch (error) {
     setStatus("Could not create note");
     console.error(error);
   }
+}
+
+async function connectLooseNoteToParent(child, parent) {
+  if (!child || !parent || child.path === parent.path || !hasWritableWorkspace()) return false;
+  if (isDescendant(parent, child)) {
+    setStatus("Choose a parent outside this note's child chain");
+    return false;
+  }
+
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+    child = state.byPath.get(child.path);
+    parent = state.byPath.get(parent.path);
+    if (!child || !parent) return false;
+  }
+
+  const parentPlan = getParentConnectionPlan(parent, child);
+  const childRaw = composeRaw(child, child.body, {
+    title: child.title,
+    level: parentPlan.level + 1,
+    parentRef: `[[${parent.basename}]]`
+  });
+
+  const writes = [];
+  if (parentPlan.raw !== parent.raw) {
+    writes.push({ path: parent.path, raw: parentPlan.raw });
+  }
+  if (childRaw !== child.raw) {
+    writes.push({ path: child.path, raw: childRaw });
+  }
+
+  if (!writes.length) {
+    setStatus(`${child.title} is already connected to ${parent.title}`);
+    return true;
+  }
+
+  try {
+    for (const write of writes) {
+      await invokeNative("write_note", {
+        notesPath: state.notesPath,
+        path: write.path,
+        raw: write.raw
+      });
+    }
+
+    for (const write of writes) {
+      replaceNoteInState(parseNote(write.path, write.raw));
+    }
+    state.notes.sort((a, b) => compareText(a.path, b.path));
+    state.selectedPath = child.path;
+    state.selectedPaths = new Set([child.path]);
+    state.dirty = false;
+    rebuildIndex();
+    state.validation = validateNotes();
+    state.manualPositions = pruneStoredPositions(state.manualPositions);
+    renderSelectedNote(`Connected ${child.title} under ${parent.title}`);
+    renderNewNoteParents();
+    renderGraph({ preserveView: true });
+    updateSourceStatus();
+    renderValidationStatus();
+    saveActiveWorkspaceState();
+    return true;
+  } catch (error) {
+    setStatus("Could not connect note");
+    console.error(error);
+    return false;
+  }
+}
+
+function replaceNoteInState(note) {
+  const index = state.notes.findIndex((item) => item.path === note.path);
+  if (index === -1) {
+    state.notes.push(note);
+  } else {
+    state.notes.splice(index, 1, note);
+  }
+}
+
+function getParentConnectionPlan(parent, child) {
+  const values = getParentConnectionValues(parent, child);
+  return {
+    ...values,
+    raw: composeRaw(parent, parent.body, values)
+  };
+}
+
+function getParentConnectionValues(parent, child) {
+  if (hasUsableHierarchySlot(parent)) {
+    return {
+      title: parent.title,
+      level: parent.level,
+      parentRef: parent.parentNote ? `[[${parent.parentNote.basename}]]` : null
+    };
+  }
+
+  const apex = findFallbackApex(parent, child);
+  if (apex) {
+    return {
+      title: parent.title,
+      level: apex.level + 1,
+      parentRef: `[[${apex.basename}]]`
+    };
+  }
+
+  return {
+    title: parent.title,
+    level: 0,
+    parentRef: null
+  };
+}
+
+function findFallbackApex(parent, child) {
+  for (const note of state.sortedNotes) {
+    if (note.path === parent.path || (child && note.path === child.path)) continue;
+    if (isValidApex(note)) return note;
+  }
+  return null;
 }
 
 async function onDocumentKeydown(event) {
@@ -3848,14 +4340,25 @@ async function savePositionPatch(patch) {
 function positionPatchForPaths(paths) {
   const patch = {};
   for (const path of paths || []) {
-    const position = state.manualPositions[path] || state.positions.get(path);
+    const position = state.positions.get(path);
     if (!position) continue;
-    patch[path] = {
+    patch[path] = manualDeltaForPosition(path, position);
+  }
+  return patch;
+}
+
+function manualDeltaForPosition(path, position) {
+  const auto = state.autoPositions.get(path);
+  if (!auto) {
+    return {
       x: round(position.x),
       y: round(position.y)
     };
   }
-  return patch;
+  return {
+    dx: round(position.x - auto.x),
+    dy: round(position.y - auto.y)
+  };
 }
 
 function positionRemovalPatch(paths) {
@@ -3870,11 +4373,19 @@ function pruneStoredPositions(positions, allowedPaths = state.notePaths) {
   const next = {};
   for (const [path, position] of Object.entries(positions || {})) {
     if (!allowedPaths.has(path)) continue;
-    if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) continue;
-    next[path] = {
-      x: round(position.x),
-      y: round(position.y)
-    };
+    if (Number.isFinite(position.dx) || Number.isFinite(position.dy)) {
+      next[path] = {
+        dx: round(Number(position.dx) || 0),
+        dy: round(Number(position.dy) || 0)
+      };
+      continue;
+    }
+    if (Number.isFinite(position.x) && Number.isFinite(position.y)) {
+      next[path] = {
+        x: round(position.x),
+        y: round(position.y)
+      };
+    }
   }
   return next;
 }
@@ -3900,7 +4411,7 @@ function renderValidationStatus() {
     }
 
     els.validationStatus.textContent = "Grid mode";
-    els.validationStatus.title = "Hierarchy metadata is incomplete. Showing nodes in a square grid until level/parent links are added.";
+    els.validationStatus.title = "Hierarchy metadata is incomplete. Loose nodes stay visible and can be connected to parent nodes.";
     return;
   }
 
@@ -3918,13 +4429,18 @@ function renderValidationStatus() {
   els.validationStatus.textContent = `${state.validation.length} issue${state.validation.length === 1 ? "" : "s"}: ${parts.join(", ")}`;
   els.validationStatus.title = state.validation.map((issue) => issue.message).join("\n");
   if (!state.graphHasHierarchy) {
-    els.validationStatus.title = `${els.validationStatus.title}\nGraph is shown as a square grid until hierarchy metadata is complete.`;
+    els.validationStatus.title = `${els.validationStatus.title}\nLoose nodes stay visible and can be connected to parent nodes.`;
   }
 }
 
 function renderNewNoteParents() {
   const fragment = document.createDocumentFragment();
   const parents = state.sortedParentOptions;
+
+  const rootOption = document.createElement("option");
+  rootOption.value = "";
+  rootOption.textContent = parents.length ? "No parent (new root / loose)" : "No parent (first root note)";
+  fragment.appendChild(rootOption);
 
   for (const note of parents) {
     const option = document.createElement("option");
@@ -3952,11 +4468,6 @@ async function openNewNoteDialog() {
     if (state.dirty) return;
   }
 
-  if (!state.notes.length) {
-    setStatus("Create an apex note first");
-    return;
-  }
-
   renderNewNoteParents();
   els.newNoteTitle.value = "";
 
@@ -3977,9 +4488,14 @@ function closeNewNoteDialog() {
 }
 
 function updateNewNoteHint() {
+  if (!state.notes.length) {
+    els.newNoteHint.textContent = "Creates the first level 0 root note";
+    return;
+  }
+
   const parent = state.byPath.get(els.newNoteParent.value);
   if (!parent) {
-    els.newNoteHint.textContent = "";
+    els.newNoteHint.textContent = "Creates a level 0 root or loose note";
     return;
   }
 
@@ -3992,9 +4508,14 @@ async function createNewNote(event) {
 
   const title = els.newNoteTitle.value.trim();
   const parent = state.byPath.get(els.newNoteParent.value);
-  if (!title || !parent || !hasWritableWorkspace()) return;
+  if (!title || !hasWritableWorkspace()) return;
+  if (!parent && !state.notes.length) {
+    await createFirstNote(title, getViewportCenterGraphPoint());
+    closeNewNoteDialog();
+    return;
+  }
 
-  const level = parent.level + 1;
+  const level = parent ? parent.level + 1 : 0;
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
@@ -4027,6 +4548,53 @@ async function createNewNote(event) {
   } catch (error) {
     setStatus("Could not create note");
     console.error(error);
+  }
+}
+
+async function createFirstNote(title, position = getGraphViewportCenter()) {
+  if (!title || !hasEmptyWritableWorkspace()) return false;
+
+  const path = getAvailableNewNotePath(title);
+  const raw = createNoteRaw({
+    title,
+    level: 0,
+    parent: null,
+    body: `# ${title}\n`
+  });
+
+  try {
+    await invokeNative("create_note", {
+      notesPath: state.notesPath,
+      path,
+      raw
+    });
+
+    const note = parseNote(path, raw);
+    state.notes.push(note);
+    state.notes.sort((a, b) => compareText(a.path, b.path));
+    state.selectedPath = note.path;
+    state.selectedPaths = new Set([note.path]);
+    state.dirty = false;
+    state.manualPositions[path] = {
+      x: round(position.x),
+      y: round(position.y)
+    };
+    rebuildIndex();
+    state.validation = validateNotes();
+    state.manualPositions = pruneStoredPositions(state.manualPositions);
+    await updateManifestFile();
+    renderSelectedNote("Saved first note");
+    renderNewNoteParents();
+    renderGraph({ preserveView: true });
+    await savePositionPatch(positionPatchForPaths([path]));
+    updateSourceStatus();
+    renderValidationStatus();
+    saveActiveWorkspaceState();
+    return true;
+  } catch (error) {
+    setStatus("Could not create note");
+    console.error(error);
+    return false;
   }
 }
 
@@ -4074,9 +4642,9 @@ function setStatus(message) {
 function updateSourceStatus() {
   const isFolder = hasWritableWorkspace();
   const hasSelection = Boolean(getSelectedNote());
-  const canCreateChild = state.notes.length > 0;
-  els.sourceStatus.textContent = isFolder ? state.workspaceName || "User folder" : "No folder";
-  els.newNoteButton.disabled = !isFolder || !canCreateChild;
+  updateGraphTitle();
+  els.sourceStatus.textContent = isFolder ? "" : "No folder";
+  els.newNoteButton.disabled = !isFolder;
   els.infoTitle.disabled = !isFolder || !hasSelection;
   els.infoParent.disabled = !isFolder || !hasSelection;
   els.deleteNoteButton.disabled = !canDeleteCurrentSelection();

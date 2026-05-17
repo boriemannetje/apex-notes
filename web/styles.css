@@ -147,13 +147,73 @@ button:disabled:hover {
   border-bottom: 1px solid var(--line-1);
 }
 
+.brandGroup {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
 .brand {
+  min-width: 0;
   overflow: hidden;
   color: var(--fg);
   white-space: nowrap;
   text-overflow: ellipsis;
   font-weight: 640;
   letter-spacing: -0.01em;
+}
+
+.helpButton {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.graphTitle {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.graphWorkspaceName {
+  min-width: 4ch;
+  max-width: min(34vw, 420px);
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+}
+
+.graphWorkspaceName:disabled {
+  color: var(--fg);
+  opacity: 1;
+}
+
+.graphWorkspaceName:focus {
+  outline: none;
+}
+
+.graphWorkspaceName:focus-visible {
+  box-shadow: 0 2px 0 var(--purple);
+}
+
+.graphTitleSuffix {
+  flex: 0 0 auto;
 }
 
 .search {
@@ -502,6 +562,10 @@ body.graphFullscreen .editorPane {
   cursor: grabbing;
 }
 
+.looseNode {
+  cursor: crosshair;
+}
+
 .nodeHit {
   fill: transparent;
   stroke: transparent;
@@ -558,6 +622,16 @@ body.graphFullscreen .editorPane {
 .node.selected .nodeLabel {
   fill: var(--fg);
   font-weight: 720;
+}
+
+.looseNode .nodeDot {
+  stroke-dasharray: 4 4;
+}
+
+.looseNode.ropeSource .nodeDot {
+  fill: var(--purple-soft);
+  stroke: var(--purple);
+  stroke-width: 2.5;
 }
 
 .node.selected .nodeLabel,
@@ -780,6 +854,10 @@ h2 {
   width: min(560px, calc(100vw - 28px));
 }
 
+.graphHelpDialog {
+  width: min(540px, calc(100vw - 28px));
+}
+
 .deleteConfirmDialog {
   width: min(460px, calc(100vw - 28px));
 }
@@ -805,6 +883,19 @@ h2 {
 .dialogBody p {
   margin: 0;
   color: var(--muted);
+}
+
+.interactionList {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.interactionList li::marker {
+  color: var(--fg);
 }
 
 .newNoteDialog label {

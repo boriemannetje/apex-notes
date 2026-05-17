@@ -1,8 +1,8 @@
 # Apex Notes
 
-Apex Notes is a local desktop app for editing a Markdown note hierarchy.
+Apex Notes is a local desktop app for editing Markdown note hierarchies.
 
-The graph is derived from frontmatter: `parent` creates the tree, and body `[[wiki links]]` create dotted contextual connections.
+The graph is derived from frontmatter: `parent` creates hierarchy edges when present, and body `[[wiki links]]` create dotted contextual connections.
 
 Download the latest build at [apex-notes.netlify.app](https://apex-notes.netlify.app) or from [GitHub Releases](https://github.com/boriemannetje/apex-notes/releases).
 
@@ -58,7 +58,7 @@ This public repository contains the app source, neutral sample notes, and the bu
 
 Markdown files live in `notes/`. The bundled folder contains only neutral starter data.
 
-The graph uses frontmatter, not body links, for hierarchy. `level` is an unbounded depth number: the apex is `0`, and every child is one deeper than its parent.
+The graph uses frontmatter, not body links, for hierarchy. `parent` is the canonical hierarchy edge when present. Parentless notes are valid loose notes or independent roots, and every connected child is one level deeper than its parent.
 
 See `AGENTS.md` before creating or linking notes.
 

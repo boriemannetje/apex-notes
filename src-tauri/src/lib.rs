@@ -46,8 +46,14 @@ struct NoteWrite {
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct NotePosition {
-    x: f64,
-    y: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dx: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dy: Option<f64>,
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -155,6 +161,42 @@ fn create_workspace_blocking(
     write_layout_file(&notes_root, &HashMap::new()).map_err(to_error)?;
     write_manifest_file(&notes_root, &[apex_file]).map_err(to_error)?;
     workspace_from_paths(root, notes_root)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn rename_workspace(root_path: String, folder_name: String) -> Result<Workspace, String> {
+    tauri::async_runtime::spawn_blocking(move || rename_workspace_blocking(root_path, folder_name))
+        .await
+        .map_err(to_error)?
+}
+
+fn rename_workspace_blocking(root_path: String, folder_name: String) -> Result<Workspace, String> {
+    let root = require_existing_dir(root_path, "Selected path is not a folder")?;
+    let requested_name = slugify(&folder_name).ok_or("Folder name cannot be empty")?;
+    let current_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Cannot rename this folder")?;
+
+    if requested_name == current_name {
+        return read_workspace_blocking(root.to_string_lossy().into_owned());
+    }
+
+    let parent = root.parent().ok_or("Cannot rename this folder")?;
+    let target = parent.join(&requested_name);
+    if target.exists() {
+        return Err("A folder with that name already exists".into());
+    }
+
+    fs::rename(&root, &target).map_err(to_error)?;
+    let notes = target.join("notes");
+    reject_symlink(&notes, "Notes folder cannot be a symlink").map_err(to_error)?;
+    let notes_root = if notes.is_dir() {
+        notes
+    } else {
+        target.clone()
+    };
+    workspace_from_paths(target, notes_root)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -337,6 +379,7 @@ pub fn run() {
             list_note_files,
             read_notes,
             create_workspace,
+            rename_workspace,
             write_note,
             create_note,
             create_notes,

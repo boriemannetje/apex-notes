@@ -16,23 +16,24 @@ parent: null
 
 Level semantics:
 
-- `0` is the apex.
-- Any non-apex note has level `parent.level + 1`.
-- Levels are unbounded depth numbers. Do not assign names to levels beyond the apex.
+- `0` is a root depth, not a guarantee that there is only one apex in the folder.
+- A note with `parent: null` may be a loose note or the root of an independent hierarchy.
+- A note with a parent has level `parent.level + 1`.
+- Levels are unbounded depth numbers. Do not assign names to levels.
 
 ## Canonical Linking Rule
 
-The `parent` property is the only canonical hierarchy edge.
+The `parent` property is the only canonical hierarchy edge when present.
 
-Use `parent: null` only for the level `0` apex note.
+Use `parent: null` for loose notes and roots of independent hierarchies.
 
-For every other note, `parent` must point to exactly one immediate parent:
+For every connected child note, `parent` must point to exactly one immediate parent:
 
 ```yaml
 parent: "[[parent-note]]"
 ```
 
-The parent must be exactly one level above the child.
+The parent must be exactly one level above the child. Multiple independent hierarchies may live in one folder.
 
 Do not use body links to define hierarchy. Body links are contextual references only.
 
@@ -58,4 +59,4 @@ The local app can read files directly after the user opens the notes folder, but
 
 ## Strict Separation
 
-Do not add schema fields beyond `title`, `level`, and `parent` unless the schema is explicitly changed. The app derives children from each note's single parent.
+Do not add schema fields beyond `title`, `level`, and `parent` unless the schema is explicitly changed. The app derives children from each present parent edge.

@@ -59,7 +59,7 @@ parent: null
 ---
 ```
 
-`parent` is the only hierarchy edge. Body `[[wiki links]]` are contextual references and render as dotted graph lines.
+`parent` is the only hierarchy edge when present. Parentless notes are valid loose notes or roots of independent hierarchies. Body `[[wiki links]]` are contextual references and render as dotted graph lines.
 
 When editing existing notes, preserve filenames. When adding or deleting Markdown files under `notes/`, update `notes/manifest.json` in the same PR. Do not add frontmatter fields beyond `title`, `level`, and `parent` unless the schema is intentionally changed.
 

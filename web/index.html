@@ -12,7 +12,10 @@
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">Apex Notes</div>
+      <div class="brandGroup">
+        <div class="brand">Apex Notes</div>
+        <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interactions" title="Graph interactions">?</button>
+      </div>
       <input id="searchInput" class="search" type="search" placeholder="Search">
       <button id="newNoteButton" type="button">New note</button>
       <button id="openFolderButton" type="button">Open notes folder</button>
@@ -24,7 +27,10 @@
     <main class="layout">
       <section class="graphPane" aria-label="Graph">
         <div class="paneHeader">
-          <span>Graph</span>
+          <label class="graphTitle">
+            <input id="graphWorkspaceName" class="graphWorkspaceName" type="text" value="Folder" autocomplete="off" spellcheck="false" aria-label="Folder name">
+            <span class="graphTitleSuffix">Graph</span>
+          </label>
           <div class="paneStatus">
             <span id="validationStatus" class="muted"></span>
             <span id="sourceStatus" class="muted"></span>
@@ -92,7 +98,7 @@
         </label>
         <label>
           <span>Parent</span>
-          <select id="newNoteParent" required></select>
+          <select id="newNoteParent"></select>
         </label>
         <div id="newNoteHint" class="muted"></div>
         <div class="dialogActions">
@@ -128,6 +134,24 @@
         <div class="dialogActions">
           <button id="closeHierarchyPromptButton" type="button">Close</button>
           <button id="copyHierarchyPromptButton" type="button">Copy prompt</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="graphHelpDialog" class="newNoteDialog graphHelpDialog">
+      <div class="dialogBody">
+        <h2>Graph interactions</h2>
+        <ul class="interactionList">
+          <li>Click empty graph space in an empty folder to create the first note.</li>
+          <li>Double-click empty graph space to create a child note, then drag the purple rope onto a parent node.</li>
+          <li>Drag a dashed loose node onto another node to connect it as a child.</li>
+          <li>Click a node to open it. Shift-drag, Command-drag, or Control-drag empty space to select several nodes.</li>
+          <li>Drag selected nodes to move them. Press Backspace or Delete to move selected notes to Trash.</li>
+          <li>Copy, cut, and paste selected nodes. Paste text into the graph to create a note, or drop Markdown files to import them.</li>
+          <li>Scroll to zoom. Alt-drag or middle-drag to pan. Use Reset to fit the graph.</li>
+        </ul>
+        <div class="dialogActions">
+          <button id="closeGraphHelpButton" type="button">Close</button>
         </div>
       </div>
     </dialog>

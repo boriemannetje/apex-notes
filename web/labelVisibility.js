@@ -120,6 +120,173 @@ export function rankNoteHubs(notes = [], stats = null) {
   }));
 }
 
+export function computeGraphCentralityScores(notes = [], options = {}) {
+  const noteList = normalizeNotes(notes);
+  const stats = options.stats instanceof Map
+    ? options.stats
+    : computeNoteLinkStats(noteList.map((item) => item.note));
+  const paths = noteList.map((item) => item.path);
+  const pageRank = computePageRank(paths, stats, options);
+  const maxDegree = Math.max(1, ...paths.map((path) => {
+    const entry = stats.get(path);
+    return entry ? entry.uniqueNeighborCount || 0 : 0;
+  }));
+  const maxWeightedRefs = Math.max(1, ...paths.map((path) => {
+    const entry = stats.get(path);
+    return entry ? getWeightedReferenceScore(entry, options) : 0;
+  }));
+  const result = new Map();
+
+  for (const path of paths) {
+    const entry = stats.get(path) || {};
+    const weightedReferenceScore = getWeightedReferenceScore(entry, options);
+    result.set(path, {
+      path,
+      degreeCentrality: (entry.uniqueNeighborCount || 0) / maxDegree,
+      linkDegree: entry.uniqueNeighborCount || 0,
+      pageRank: pageRank.get(path) || 0,
+      weightedReferenceScore,
+      normalizedWeightedReferenceScore: weightedReferenceScore / maxWeightedRefs
+    });
+  }
+
+  return result;
+}
+
+export function computeLabelScores(notes = [], options = {}) {
+  const noteList = normalizeNotes(notes);
+  const stats = options.stats instanceof Map
+    ? options.stats
+    : computeNoteLinkStats(noteList.map((item) => item.note));
+  const graphCentrality = options.graphCentrality instanceof Map
+    ? options.graphCentrality
+    : computeGraphCentralityScores(noteList.map((item) => item.note), { ...options, stats });
+  const centralityByPath = normalizeMetricSource(options.centrality || options.centralityByPath);
+  const pageRankByPath = normalizeMetricSource(options.pageRank || options.pageRankByPath);
+  const weightedRefsByPath = normalizeMetricSource(options.weightedRefs || options.weightedRefsByPath);
+  const forcedPaths = normalizePathSet(options.forceVisiblePaths || options.forcedPaths);
+  const selectedPaths = normalizePathSet(options.selectedPaths || options.selectedPath);
+  const searchMatchedPaths = normalizePathSet(options.searchMatchedPaths || options.searchMatchedPath);
+  const hoveredPaths = normalizePathSet(options.hoveredPaths || options.hoveredPath);
+  const maxHubScore = Math.max(1, ...noteList.map((item) => stats.get(item.path)?.hubScore || 0));
+  const maxReferenceIn = Math.max(1, ...noteList.map((item) => stats.get(item.path)?.referenceInCount || 0));
+  const maxLevel = Math.max(1, ...noteList.map((item) => Number.isFinite(item.level) ? item.level : 0));
+  const weights = {
+    level: 0.35,
+    hub: 0.3,
+    centrality: 0.2,
+    pageRank: 0.25,
+    weightedRefs: 0.2,
+    referenceIn: 0.15,
+    forced: 100,
+    selected: 10,
+    search: 8,
+    hovered: 2,
+    ...(options.weights || {})
+  };
+  const scores = new Map();
+
+  for (const item of noteList) {
+    const entry = stats.get(item.path) || {};
+    const centrality = graphCentrality.get(item.path) || {};
+    const levelValue = Number.isFinite(item.level) ? 1 - Math.min(item.level, maxLevel) / (maxLevel + 1) : 0;
+    const centralityValue = metricValue(centralityByPath, item.path, centrality.degreeCentrality || 0);
+    const pageRankValue = metricValue(pageRankByPath, item.path, centrality.pageRank || 0);
+    const weightedRefsValue = metricValue(
+      weightedRefsByPath,
+      item.path,
+      centrality.normalizedWeightedReferenceScore || 0
+    );
+    const hubValue = (entry.hubScore || 0) / maxHubScore;
+    const referenceInValue = (entry.referenceInCount || 0) / maxReferenceIn;
+    const boost =
+      (forcedPaths.has(item.path) ? weights.forced : 0) +
+      (selectedPaths.has(item.path) ? weights.selected : 0) +
+      (searchMatchedPaths.has(item.path) ? weights.search : 0) +
+      (hoveredPaths.has(item.path) ? weights.hovered : 0);
+    const score =
+      boost +
+      levelValue * weights.level +
+      hubValue * weights.hub +
+      centralityValue * weights.centrality +
+      pageRankValue * weights.pageRank +
+      weightedRefsValue * weights.weightedRefs +
+      referenceInValue * weights.referenceIn;
+
+    scores.set(item.path, {
+      path: item.path,
+      title: item.title,
+      level: item.level,
+      score,
+      boost,
+      levelScore: levelValue,
+      hubScore: hubValue,
+      centralityScore: centralityValue,
+      pageRankScore: pageRankValue,
+      weightedReferenceScore: weightedRefsValue,
+      referenceInScore: referenceInValue,
+      stats: entry,
+      graphCentrality: centrality
+    });
+  }
+
+  return scores;
+}
+
+export function rankLabelsByScore(notes = [], options = {}) {
+  const scores = options.scores instanceof Map ? options.scores : computeLabelScores(notes, options);
+  return [...scores.values()].sort(compareLabelScores);
+}
+
+export function selectNonOverlappingLabels(candidates = [], rectangles = null, options = {}) {
+  const padding = Math.max(0, Number(options.padding) || 0);
+  const maxLabels = Number.isFinite(Number(options.maxLabels)) ? Number(options.maxLabels) : Infinity;
+  const allowMissingRect = options.allowMissingRect !== false;
+  const protectedPaths = normalizePathSet(options.protectedPaths || options.forcedPaths);
+  const normalizedCandidates = [...candidates]
+    .map(normalizeLabelCandidate)
+    .filter(Boolean)
+    .sort(compareLabelScores);
+  const selected = [];
+  const rejected = [];
+  const selectedRects = [];
+
+  for (const candidate of normalizedCandidates) {
+    if (selected.length >= maxLabels && !protectedPaths.has(candidate.path)) {
+      rejected.push({ ...candidate, reason: "limit" });
+      continue;
+    }
+
+    const rect = getLabelRect(rectangles, candidate.path);
+    if (!rect) {
+      if (allowMissingRect || protectedPaths.has(candidate.path)) {
+        selected.push(candidate);
+      } else {
+        rejected.push({ ...candidate, reason: "missing-rect" });
+      }
+      continue;
+    }
+
+    const paddedRect = padRect(rect, padding);
+    const overlaps = selectedRects.some((selectedRect) => rectsOverlap(paddedRect, selectedRect));
+    if (!overlaps || protectedPaths.has(candidate.path)) {
+      selected.push(candidate);
+      selectedRects.push(paddedRect);
+    } else {
+      rejected.push({ ...candidate, reason: "overlap" });
+    }
+  }
+
+  return {
+    selected,
+    rejected,
+    selectedPaths: new Set(selected.map((candidate) => candidate.path)),
+    rejectedPaths: new Set(rejected.map((candidate) => candidate.path)),
+    selectedPathList: selected.map((candidate) => candidate.path),
+    rejectedPathList: rejected.map((candidate) => candidate.path)
+  };
+}
+
 export function prepareLabelVisibilityCache(notes = [], stats = null) {
   const noteList = normalizeNotes(notes);
   const allPaths = noteList.map((item) => item.path);
@@ -203,7 +370,24 @@ export function decideVisibleLabels(notes = [], options = {}) {
   const automaticVisiblePaths = policy.showAll
     ? new Set(allPaths)
     : getAutomaticVisiblePaths(noteList, stats, policy, cache);
-  const visiblePaths = new Set([...automaticVisiblePaths, ...forcedVisiblePaths]);
+  let visiblePaths = new Set([...automaticVisiblePaths, ...forcedVisiblePaths]);
+  let overlapSelection = null;
+
+  if (options.labelRectangles) {
+    const rankedLabels = rankLabelsByScore(noteList.map((item) => item.note), {
+      ...options,
+      stats,
+      forceVisiblePaths: forcedVisiblePaths
+    }).filter((entry) => visiblePaths.has(entry.path));
+    overlapSelection = selectNonOverlappingLabels(rankedLabels, options.labelRectangles, {
+      padding: options.labelOverlapPadding,
+      maxLabels: policy.labelCap,
+      protectedPaths: forcedVisiblePaths,
+      allowMissingRect: options.allowMissingLabelRect
+    });
+    visiblePaths = overlapSelection.selectedPaths;
+  }
+
   const hiddenPathList = allPaths.filter((path) => !visiblePaths.has(path));
 
   return {
@@ -214,7 +398,8 @@ export function decideVisibleLabels(notes = [], options = {}) {
     visiblePathList: allPaths.filter((path) => visiblePaths.has(path)),
     hiddenPathList,
     automaticVisiblePaths,
-    forcedVisiblePaths
+    forcedVisiblePaths,
+    overlapSelection
   };
 }
 
@@ -433,6 +618,165 @@ function isIterable(value) {
   return value && typeof value !== "string" && typeof value[Symbol.iterator] === "function";
 }
 
+function computePageRank(paths, stats, options = {}) {
+  const damping = Number.isFinite(Number(options.pageRankDamping)) ? Number(options.pageRankDamping) : 0.85;
+  const iterations = Number.isFinite(Number(options.pageRankIterations)) ? Number(options.pageRankIterations) : 20;
+  const baseScore = paths.length ? (1 - damping) / paths.length : 0;
+  const ranks = new Map(paths.map((path) => [path, paths.length ? 1 / paths.length : 0]));
+  const pathSet = new Set(paths);
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    const next = new Map(paths.map((path) => [path, baseScore]));
+    for (const path of paths) {
+      const entry = stats.get(path);
+      const outgoing = entry ? [...entry.outgoingPaths || []].filter((target) => pathSet.has(target)) : [];
+      if (!outgoing.length) {
+        const share = damping * (ranks.get(path) || 0) / Math.max(1, paths.length);
+        for (const target of paths) next.set(target, (next.get(target) || 0) + share);
+        continue;
+      }
+      const share = damping * (ranks.get(path) || 0) / outgoing.length;
+      for (const target of outgoing) next.set(target, (next.get(target) || 0) + share);
+    }
+    ranks.clear();
+    for (const [path, rank] of next) ranks.set(path, rank);
+  }
+
+  const maxRank = Math.max(1e-9, ...ranks.values());
+  for (const [path, rank] of ranks) ranks.set(path, rank / maxRank);
+  return ranks;
+}
+
+function getWeightedReferenceScore(entry, options = {}) {
+  const weights = {
+    incomingBody: 2,
+    outgoingBody: 1,
+    hierarchyChild: 0.9,
+    hierarchyParent: 0.45,
+    ...(options.referenceWeights || {})
+  };
+  return (
+    (entry.referenceInCount || 0) * weights.incomingBody +
+    (entry.referenceOutCount || 0) * weights.outgoingBody +
+    (entry.hierarchyChildCount || 0) * weights.hierarchyChild +
+    (entry.hierarchyParentCount || 0) * weights.hierarchyParent
+  );
+}
+
+function normalizeMetricSource(source) {
+  if (!source) return new Map();
+  if (source instanceof Map) return source;
+  if (Array.isArray(source)) {
+    return new Map(source.map((entry) => {
+      if (Array.isArray(entry)) return entry;
+      return [entry.path || entry.id, metricValueFromEntry(entry)];
+    }).filter(([path]) => path));
+  }
+  if (typeof source === "object") return new Map(Object.entries(source));
+  return new Map();
+}
+
+function metricValue(source, path, fallback = 0) {
+  if (!source || !source.has(path)) return fallback;
+  return metricValueFromEntry(source.get(path), fallback);
+}
+
+function metricValueFromEntry(entry, fallback = 0) {
+  if (typeof entry === "number") return Number.isFinite(entry) ? entry : fallback;
+  if (!entry || typeof entry !== "object") return fallback;
+  const value =
+    entry.score ??
+    entry.value ??
+    entry.rank ??
+    entry.pageRank ??
+    entry.centrality ??
+    entry.weightedReferenceScore ??
+    fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizePathSet(value) {
+  const paths = new Set();
+  const add = (item) => {
+    if (!item) return;
+    if (typeof item === "string") {
+      paths.add(item);
+      return;
+    }
+    if (isIterable(item)) {
+      for (const nested of item) add(nested);
+      return;
+    }
+    const path = getPath(item);
+    if (path) paths.add(path);
+  };
+  add(value);
+  return paths;
+}
+
+function normalizeLabelCandidate(candidate) {
+  if (!candidate) return null;
+  if (typeof candidate === "string") return { path: candidate, score: 0, title: candidate };
+  const path = getPath(candidate);
+  if (!path) return null;
+  return {
+    ...candidate,
+    path,
+    title: candidate.title || path,
+    score: Number.isFinite(Number(candidate.score)) ? Number(candidate.score) : 0
+  };
+}
+
+function getLabelRect(rectangles, path) {
+  if (!rectangles || !path) return null;
+  let rect = null;
+  if (rectangles instanceof Map) {
+    rect = rectangles.get(path);
+  } else if (Array.isArray(rectangles)) {
+    const item = rectangles.find((entry) => {
+      if (!entry) return false;
+      if (Array.isArray(entry)) return entry[0] === path;
+      return entry.path === path || entry.id === path;
+    });
+    rect = Array.isArray(item) ? item[1] : item && (item.rect || item);
+  } else if (typeof rectangles === "object") {
+    rect = rectangles[path];
+  }
+
+  return normalizeRect(rect);
+}
+
+function normalizeRect(rect) {
+  if (!rect) return null;
+  const left = Number(rect.left ?? rect.x);
+  const top = Number(rect.top ?? rect.y);
+  const width = Number(rect.width ?? ((rect.right ?? 0) - left));
+  const height = Number(rect.height ?? ((rect.bottom ?? 0) - top));
+  if (![left, top, width, height].every(Number.isFinite)) return null;
+  return {
+    left,
+    top,
+    right: Number.isFinite(Number(rect.right)) ? Number(rect.right) : left + width,
+    bottom: Number.isFinite(Number(rect.bottom)) ? Number(rect.bottom) : top + height,
+    width,
+    height
+  };
+}
+
+function padRect(rect, padding) {
+  return {
+    left: rect.left - padding,
+    top: rect.top - padding,
+    right: rect.right + padding,
+    bottom: rect.bottom + padding
+  };
+}
+
+function rectsOverlap(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
 function compareLevelCandidate(a, b, rankedByPath) {
   const aRank = rankedByPath.get(a.path);
   const bRank = rankedByPath.get(b.path);
@@ -450,6 +794,15 @@ function compareHubStats(a, b) {
     (b.incomingBodyLinks || 0) - (a.incomingBodyLinks || 0) ||
     (b.outgoingBodyLinks || 0) - (a.outgoingBodyLinks || 0) ||
     b.referenceInCount - a.referenceInCount ||
+    compareLevel(a.level, b.level) ||
+    compareText(a.title, b.title) ||
+    compareText(a.path, b.path)
+  );
+}
+
+function compareLabelScores(a, b) {
+  return (
+    b.score - a.score ||
     compareLevel(a.level, b.level) ||
     compareText(a.title, b.title) ||
     compareText(a.path, b.path)
