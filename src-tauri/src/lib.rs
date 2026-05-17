@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    fs,
-    io,
+    collections::{HashMap, HashSet},
+    fs, io,
     path::{Component, Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{SystemTime, UNIX_EPOCH},
 };
+use tauri::Manager;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +34,14 @@ struct Workspace {
     workspace_name: String,
     notes: Vec<NoteFile>,
     positions: HashMap<String, NotePosition>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RecentProject {
+    root_path: String,
+    name: String,
+    last_opened_at: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -274,7 +282,10 @@ fn write_manifest_blocking(notes_path: String, paths: Vec<String>) -> Result<(),
     let notes_root = require_existing_dir(notes_path, "Notes path is not a folder")?;
     for path in &paths {
         if !is_markdown_path(Path::new(path)) {
-            return Err(format!("Only Markdown notes can be listed in the manifest: {}", path));
+            return Err(format!(
+                "Only Markdown notes can be listed in the manifest: {}",
+                path
+            ));
         }
         safe_markdown_child_path(&notes_root, path)?;
     }
@@ -371,6 +382,52 @@ fn trash_notes_blocking(notes_path: String, paths: Vec<String>) -> Result<(), St
     Ok(())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn read_recent_projects(app: tauri::AppHandle) -> Result<Vec<RecentProject>, String> {
+    let path = recent_projects_path(&app)?;
+    read_recent_projects_file(&path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn remember_recent_project(
+    app: tauri::AppHandle,
+    root_path: String,
+    name: String,
+) -> Result<Vec<RecentProject>, String> {
+    let root = require_existing_dir(root_path, "Recent project path is not a folder")?;
+    let root_path = root.to_string_lossy().into_owned();
+    let name = if name.trim().is_empty() {
+        workspace_display_name(&root_path)
+    } else {
+        name.trim().to_string()
+    };
+
+    let path = recent_projects_path(&app)?;
+    let mut projects = read_recent_projects_file(&path)?;
+    projects.retain(|project| project.root_path != root_path);
+    projects.push(RecentProject {
+        root_path,
+        name,
+        last_opened_at: now_ms(),
+    });
+
+    let projects = normalize_recent_projects(projects);
+    write_recent_projects_file(&path, &projects)?;
+    Ok(projects)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn forget_recent_project(
+    app: tauri::AppHandle,
+    root_path: String,
+) -> Result<Vec<RecentProject>, String> {
+    let path = recent_projects_path(&app)?;
+    let mut projects = read_recent_projects_file(&path)?;
+    projects.retain(|project| project.root_path != root_path);
+    write_recent_projects_file(&path, &projects)?;
+    Ok(projects)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -387,10 +444,82 @@ pub fn run() {
             write_layout,
             write_layout_patch,
             trash_note,
-            trash_notes
+            trash_notes,
+            read_recent_projects,
+            remember_recent_project,
+            forget_recent_project
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
+}
+
+fn recent_projects_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_local_data_dir().map_err(to_error)?;
+    fs::create_dir_all(&dir).map_err(to_error)?;
+    Ok(dir.join("recent-projects.json"))
+}
+
+fn read_recent_projects_file(path: &Path) -> Result<Vec<RecentProject>, String> {
+    match fs::read_to_string(path) {
+        Ok(raw) => {
+            let projects = serde_json::from_str(&raw).unwrap_or_default();
+            Ok(normalize_recent_projects(projects))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(to_error(err)),
+    }
+}
+
+fn write_recent_projects_file(path: &Path, projects: &[RecentProject]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(to_error)?;
+    }
+    let raw = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&normalize_recent_projects(projects.to_vec()))
+            .map_err(to_error)?
+    );
+    write_if_changed(path, &raw).map_err(to_error)
+}
+
+fn normalize_recent_projects(mut projects: Vec<RecentProject>) -> Vec<RecentProject> {
+    for project in &mut projects {
+        project.root_path = project.root_path.trim().to_string();
+        project.name = project.name.trim().to_string();
+        if project.name.is_empty() {
+            project.name = workspace_display_name(&project.root_path);
+        }
+    }
+
+    projects.retain(|project| !project.root_path.is_empty());
+    projects.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at));
+
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(projects.len().min(8));
+    for project in projects {
+        if seen.insert(project.root_path.clone()) {
+            normalized.push(project);
+        }
+        if normalized.len() == 8 {
+            break;
+        }
+    }
+    normalized
+}
+
+fn workspace_display_name(root_path: &str) -> String {
+    Path::new(root_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Folder")
+        .to_string()
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace, String> {
@@ -582,7 +711,10 @@ fn safe_child_path(base: &Path, relative: &str) -> Result<PathBuf, String> {
 
 fn safe_markdown_child_path(base: &Path, relative: &str) -> Result<PathBuf, String> {
     if !is_markdown_path(Path::new(relative)) {
-        return Err(format!("Only Markdown note paths are allowed: {}", relative));
+        return Err(format!(
+            "Only Markdown note paths are allowed: {}",
+            relative
+        ));
     }
     safe_child_path(base, relative)
 }
@@ -760,6 +892,29 @@ mod tests {
         assert!(result.is_err());
         fs::remove_dir_all(root).ok();
         fs::remove_dir_all(outside).ok();
+    }
+
+    #[test]
+    fn normalize_recent_projects_dedupes_and_limits() {
+        let mut projects = Vec::new();
+        for index in 0..10 {
+            projects.push(RecentProject {
+                root_path: format!("/tmp/project-{}", index),
+                name: format!("Project {}", index),
+                last_opened_at: index,
+            });
+        }
+        projects.push(RecentProject {
+            root_path: "/tmp/project-9".to_string(),
+            name: "Duplicate".to_string(),
+            last_opened_at: 99,
+        });
+
+        let normalized = normalize_recent_projects(projects);
+
+        assert_eq!(normalized.len(), 8);
+        assert_eq!(normalized[0].root_path, "/tmp/project-9");
+        assert_eq!(normalized[0].name, "Duplicate");
     }
 }
 

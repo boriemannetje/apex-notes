@@ -25,9 +25,17 @@ import {
   parseWikiTarget,
   slugify
 } from "./noteRefs.js";
+import {
+  loadRecentProjects,
+  normalizeRecentProjects,
+  projectLocationFromPath,
+  rememberRecentProject,
+  removeRecentProject,
+  saveRecentProjects
+} from "./recentProjects.js";
 import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
-const LEVEL_COLORS = ["#f2f0ea", "#9fc5ff", "#b8f0c0", "#ffe08a", "#ffb6d1", "#b88cff", "#7de3ff", "#f6a86d"];
+const LEVEL_COLORS = ["#f1eee6", "#9fc5ff", "#a9d6ac", "#e8d188", "#ffb6d1", "#f2b380", "#7fd6df", "#c7b89a"];
 const STORAGE_PREFIX = "hamkg-layout-v2";
 const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
 - check for pre existing hyrachy, sometimes only a few files don't have the correct formatting
@@ -60,6 +68,7 @@ const wikiLinkRefreshEffect = StateEffect.define();
 
 const state = {
   workspaces: [],
+  recentProjects: loadRecentProjects(),
   activeWorkspaceId: null,
   nextWorkspaceId: 1,
   notes: [],
@@ -133,6 +142,12 @@ const state = {
 };
 
 const els = {
+  launchScreen: document.querySelector("#launchScreen"),
+  launchOpenProjectButton: document.querySelector("#launchOpenProjectButton"),
+  launchCreateProjectButton: document.querySelector("#launchCreateProjectButton"),
+  launchRecentList: document.querySelector("#launchRecentList"),
+  launchRecentEmpty: document.querySelector("#launchRecentEmpty"),
+  launchStatus: document.querySelector("#launchStatus"),
   workspaceTabs: document.querySelector("#workspaceTabs"),
   graphWorkspaceName: document.querySelector("#graphWorkspaceName"),
   graph: document.querySelector("#graph"),
@@ -263,6 +278,7 @@ class WikiLinkWidget extends WidgetType {
 initializeEditor();
 bindEvents();
 startEmpty();
+void hydrateRecentProjects();
 
 function initializeEditor() {
   state.editorView = new EditorView({
@@ -327,6 +343,9 @@ function bindEvents() {
   els.closeGraphHelpButton.addEventListener("click", closeGraphHelpDialog);
   els.openFolderButton.addEventListener("click", openNotesFolder);
   els.createFolderButton.addEventListener("click", openCreateFolderDialog);
+  els.launchOpenProjectButton.addEventListener("click", openNotesFolder);
+  els.launchCreateProjectButton.addEventListener("click", openCreateFolderDialog);
+  els.launchRecentList.addEventListener("click", onLaunchRecentClick);
   els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
   els.graphWorkspaceName.addEventListener("input", syncGraphWorkspaceNameSize);
   els.graphWorkspaceName.addEventListener("blur", () => {
@@ -336,7 +355,7 @@ function bindEvents() {
   els.newNoteButton.addEventListener("click", openNewNoteDialog);
   els.zoomInButton.addEventListener("click", () => zoomAtCenter(1.18));
   els.zoomOutButton.addEventListener("click", () => zoomAtCenter(1 / 1.18));
-  els.resetViewButton.addEventListener("click", () => fitGraphView());
+  els.resetViewButton.addEventListener("click", fitGraphViewFromControl);
   els.fullscreenGraphButton.addEventListener("click", toggleGraphFullscreen);
   els.cancelNewNoteButton.addEventListener("click", () => closeNewNoteDialog());
   els.cancelCreateFolderButton.addEventListener("click", () => closeCreateFolderDialog());
@@ -348,6 +367,10 @@ function bindEvents() {
   els.newNoteParent.addEventListener("change", updateNewNoteHint);
   els.newNoteForm.addEventListener("submit", createNewNote);
   els.createFolderForm.addEventListener("submit", createGraphFolder);
+  els.noteTitle.addEventListener("blur", commitHeaderNoteTitle);
+  els.noteTitle.addEventListener("keydown", onHeaderNoteTitleKeydown);
+  els.noteTitle.addEventListener("paste", onHeaderNoteTitlePaste);
+  els.noteInfo.addEventListener("toggle", keepDisabledInfoClosed);
   els.infoTitle.addEventListener("input", onInfoChanged);
   els.infoParent.addEventListener("change", onInfoChanged);
   els.deleteNoteButton.addEventListener("click", deleteSelectedNote);
@@ -380,7 +403,16 @@ function bindEvents() {
   document.addEventListener("fullscreenchange", syncGraphFullscreenState);
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      const isGraphCreateTarget = els.graphCreatePopover.contains(event.target);
+      if (!isGraphCreateTarget && (isTextEntryTarget(event.target) || isAnyDialogOpen())) return;
+
+      const hadGraphCreatePopover = !els.graphCreatePopover.hidden;
       closeGraphCreatePopover();
+      if (hadGraphCreatePopover) {
+        event.preventDefault();
+        setStatus("New graph note canceled");
+      }
+
       if (state.pendingNode && !state.activeInteraction) {
         state.pendingNode = null;
         requestGraphRender({ preserveView: true });
@@ -408,6 +440,16 @@ function closeGraphHelpDialog() {
   } else {
     els.graphHelpDialog.setAttribute("hidden", "");
   }
+}
+
+function isAnyDialogOpen() {
+  return [
+    els.graphHelpDialog,
+    els.newNoteDialog,
+    els.createFolderDialog,
+    els.hierarchyPromptDialog,
+    els.deleteConfirmDialog
+  ].some((dialog) => dialog && dialog.open);
 }
 
 function toggleGraphFullscreen() {
@@ -464,14 +506,21 @@ function syncGraphFullscreenState() {
 function syncGraphFullscreenButton() {
   const isFullscreen = document.body.classList.contains("graphFullscreen");
   els.fullscreenGraphButton.textContent = isFullscreen ? "Exit full screen" : "Full screen";
+  els.fullscreenGraphButton.setAttribute(
+    "aria-label",
+    isFullscreen ? "Exit full screen graph" : "Enter full screen graph"
+  );
+  els.fullscreenGraphButton.title = isFullscreen ? "Exit full screen graph" : "Enter full screen graph";
   els.fullscreenGraphButton.setAttribute("aria-pressed", String(isFullscreen));
 }
 
 function updateGraphTitle() {
   const isEditingName = document.activeElement === els.graphWorkspaceName;
   const workspaceName = state.workspaceName || "Folder";
-  els.graphWorkspaceName.disabled = !hasWritableWorkspace();
+  const canRename = hasWritableWorkspace();
+  els.graphWorkspaceName.disabled = !canRename;
   els.graphWorkspaceName.placeholder = workspaceName;
+  els.graphWorkspaceName.title = canRename ? "Rename current folder" : "Open or create a folder to rename it";
   if (!isEditingName) {
     els.graphWorkspaceName.value = workspaceName;
   }
@@ -492,6 +541,98 @@ function onGraphWorkspaceNameKeydown(event) {
     event.preventDefault();
     updateGraphTitle();
     els.graphWorkspaceName.blur();
+  }
+}
+
+function updateHeaderNoteTitleEditable(isEditable) {
+  els.noteTitle.contentEditable = isEditable ? "plaintext-only" : "false";
+  els.noteTitle.setAttribute("aria-readonly", String(!isEditable));
+  els.noteTitle.setAttribute("aria-label", isEditable ? "Edit selected note title" : "Selected note title");
+  els.noteTitle.title = isEditable ? "Edit selected note title" : "Selected note title";
+  els.noteTitle.tabIndex = isEditable ? 0 : -1;
+  els.noteTitle.classList.toggle("editableTitle", isEditable);
+  if (isEditable) {
+    els.noteTitle.setAttribute("role", "textbox");
+    els.noteTitle.setAttribute("aria-multiline", "false");
+  } else {
+    els.noteTitle.removeAttribute("role");
+    els.noteTitle.removeAttribute("aria-multiline");
+  }
+}
+
+function commitHeaderNoteTitle() {
+  const note = getSelectedNote();
+  if (!hasWritableWorkspace() || !note) return;
+
+  const title = normalizeHeaderTitleText(els.noteTitle.textContent);
+  if (!title || title === note.title) {
+    els.noteTitle.textContent = note.title || "Untitled";
+    return;
+  }
+
+  els.infoTitle.value = title;
+  els.infoTitle.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function onHeaderNoteTitleKeydown(event) {
+  if (!els.noteTitle.classList.contains("editableTitle")) return;
+  event.stopPropagation();
+  if (event.key === "Enter") {
+    event.preventDefault();
+    els.noteTitle.blur();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    const note = getSelectedNote();
+    els.noteTitle.textContent = note ? note.title : "Select a note";
+    els.noteTitle.blur();
+  }
+}
+
+function onHeaderNoteTitlePaste(event) {
+  if (!els.noteTitle.classList.contains("editableTitle")) return;
+  event.preventDefault();
+  const text = normalizeHeaderTitleText(event.clipboardData?.getData("text") || "");
+  if (!text) return;
+  insertTextIntoEditableTitle(text);
+}
+
+function insertTextIntoEditableTitle(text) {
+  const selection = window.getSelection();
+  if (!selection || !selection.rangeCount || !els.noteTitle.contains(selection.anchorNode)) {
+    els.noteTitle.textContent = normalizeHeaderTitleText(`${els.noteTitle.textContent || ""} ${text}`);
+    placeCaretAtEnd(els.noteTitle);
+    return;
+  }
+
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const textNode = document.createTextNode(text);
+  range.insertNode(textNode);
+  range.setStartAfter(textNode);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  els.noteTitle.textContent = normalizeHeaderTitleText(els.noteTitle.textContent);
+  placeCaretAtEnd(els.noteTitle);
+}
+
+function placeCaretAtEnd(element) {
+  const selection = window.getSelection();
+  if (!selection) return;
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function normalizeHeaderTitleText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function keepDisabledInfoClosed() {
+  if (els.noteInfo.getAttribute("aria-disabled") === "true" && els.noteInfo.open) {
+    els.noteInfo.open = false;
   }
 }
 
@@ -523,7 +664,7 @@ async function renameActiveWorkspace() {
       rootPath: previousRootPath,
       folderName: requestedName
     });
-    setNativeWorkspace(workspace, "Renamed folder", { previousRootPath });
+    setNativeWorkspace(workspace, "Folder renamed", { previousRootPath });
   } catch (error) {
     setStatus(`Could not rename folder: ${String(error)}`);
     updateGraphTitle();
@@ -552,6 +693,14 @@ function onWorkspaceTabsClick(event) {
     event.preventDefault();
     void switchWorkspaceTab(switchButton.dataset.switchWorkspace);
   }
+}
+
+function onLaunchRecentClick(event) {
+  const recentButton = event.target.closest("[data-recent-root-path]");
+  if (!recentButton) return;
+
+  event.preventDefault();
+  void openRecentProject(recentButton.dataset.recentRootPath);
 }
 
 function startEmpty() {
@@ -616,11 +765,12 @@ function startEmpty() {
   updateSourceStatus();
   renderValidationStatus();
   renderWorkspaceTabs();
+  renderLaunchScreen();
 }
 
 async function openNotesFolder() {
   if (!isTauriApp()) {
-    setStatus("Open the Tauri app to use local folders");
+    setStatus("Open the desktop app to use local folders");
     return;
   }
 
@@ -633,7 +783,7 @@ async function openNotesFolder() {
     const rootPath = await pickNativeDirectory();
     if (!rootPath) return;
     const workspace = await invokeNative("read_workspace", { rootPath });
-    setNativeWorkspace(workspace, "Loaded from folder");
+    setNativeWorkspace(workspace, "Folder loaded");
   } catch (error) {
     if (error && error.name !== "AbortError") {
       setStatus("Could not open folder");
@@ -642,9 +792,36 @@ async function openNotesFolder() {
   }
 }
 
+async function openRecentProject(rootPath) {
+  if (!rootPath) return;
+
+  if (!isTauriApp()) {
+    setStatus("Open the desktop app to use recent projects");
+    return;
+  }
+
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return;
+  }
+
+  try {
+    setStatus("Opening recent project");
+    const workspace = await invokeNative("read_workspace", { rootPath });
+    setNativeWorkspace(workspace, "Recent project opened");
+  } catch (error) {
+    state.recentProjects = removeRecentProject(rootPath, state.recentProjects);
+    saveRecentProjects(state.recentProjects);
+    renderLaunchScreen();
+    void forgetNativeRecentProject(rootPath);
+    setStatus("Could not open recent project");
+    console.error(error);
+  }
+}
+
 async function openCreateFolderDialog() {
   if (!isTauriApp()) {
-    setStatus("Open the Tauri app to create folders");
+    setStatus("Open the desktop app to create folders");
     return;
   }
 
@@ -676,7 +853,7 @@ async function createGraphFolder(event) {
   const apexTitle = els.createApexTitle.value.trim() || "Apex";
 
   try {
-    setStatus("Choose a parent folder");
+    setStatus("Choose where to create the folder");
     const parentPath = await pickNativeDirectory();
     if (!parentPath) return;
     const workspace = await invokeNative("create_workspace", {
@@ -684,7 +861,7 @@ async function createGraphFolder(event) {
       folderName: requestedFolder,
       apexTitle
     });
-    setNativeWorkspace(workspace, "Created folder");
+    setNativeWorkspace(workspace, "Folder created");
     closeCreateFolderDialog();
   } catch (error) {
     if (error && error.name !== "AbortError") {
@@ -710,6 +887,22 @@ async function pickNativeDirectory() {
 
 async function invokeNative(command, args = {}) {
   return window.__TAURI__.core.invoke(command, args);
+}
+
+async function hydrateRecentProjects() {
+  if (!isTauriApp()) {
+    renderLaunchScreen();
+    return;
+  }
+
+  try {
+    state.recentProjects = normalizeRecentProjects(await invokeNative("read_recent_projects"));
+    saveRecentProjects(state.recentProjects);
+    renderLaunchScreen();
+  } catch (error) {
+    renderLaunchScreen();
+    console.error(error);
+  }
 }
 
 function fileSignature(file) {
@@ -962,6 +1155,7 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {})
   }
 
   restoreWorkspaceState(target, statusMessage, { preserveView: target.hasView });
+  rememberWorkspaceRecent({ rootPath, workspaceName }, previousRootPath);
 }
 
 function hasWritableWorkspace() {
@@ -1087,7 +1281,7 @@ async function switchWorkspaceTab(workspaceId) {
   saveActiveWorkspaceState();
   const workspace = state.workspaces.find((item) => item.id === workspaceId);
   if (!workspace) return;
-  restoreWorkspaceState(workspace, "Loaded from tab", { preserveView: true });
+  restoreWorkspaceState(workspace, "Folder tab loaded", { preserveView: true });
 }
 
 async function closeWorkspaceTab(workspaceId) {
@@ -1131,16 +1325,24 @@ function renderWorkspaceTabs() {
     switchButton.className = "workspaceTabMain";
     switchButton.type = "button";
     switchButton.dataset.switchWorkspace = workspace.id;
+    const workspaceLabel = workspace.workspaceName || "Folder";
+    switchButton.setAttribute(
+      "aria-label",
+      `${isActive ? "Current folder" : "Switch to folder"}: ${workspaceLabel}${isDirty ? ", unsaved changes" : ""}`
+    );
+    switchButton.title = `${workspaceLabel}${isDirty ? " - unsaved changes" : ""}`;
 
     const title = document.createElement("span");
     title.className = "workspaceTabTitle";
-    title.textContent = workspace.workspaceName || "Folder";
+    title.textContent = workspaceLabel;
     switchButton.appendChild(title);
 
     if (isDirty) {
       const dirty = document.createElement("span");
       dirty.className = "workspaceTabDirty";
       dirty.textContent = "*";
+      dirty.setAttribute("aria-label", "Unsaved changes");
+      dirty.title = "Unsaved changes";
       switchButton.appendChild(dirty);
     }
 
@@ -1167,6 +1369,83 @@ function renderWorkspaceTabs() {
   }
 
   els.workspaceTabs.replaceChildren(fragment);
+}
+
+function rememberWorkspaceRecent(workspace, previousRootPath) {
+  if (previousRootPath && previousRootPath !== workspace.rootPath) {
+    state.recentProjects = removeRecentProject(previousRootPath, state.recentProjects);
+  }
+
+  state.recentProjects = rememberRecentProject(
+    {
+      rootPath: workspace.rootPath,
+      name: workspace.workspaceName
+    },
+    state.recentProjects
+  );
+  saveRecentProjects(state.recentProjects);
+  renderLaunchScreen();
+  void rememberNativeRecentProject(workspace, previousRootPath);
+}
+
+async function rememberNativeRecentProject(workspace, previousRootPath) {
+  if (!isTauriApp() || !workspace.rootPath) return;
+
+  try {
+    if (previousRootPath && previousRootPath !== workspace.rootPath) {
+      await invokeNative("forget_recent_project", { rootPath: previousRootPath });
+    }
+    state.recentProjects = normalizeRecentProjects(await invokeNative("remember_recent_project", {
+      rootPath: workspace.rootPath,
+      name: workspace.workspaceName
+    }));
+    saveRecentProjects(state.recentProjects);
+    renderLaunchScreen();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function forgetNativeRecentProject(rootPath) {
+  if (!isTauriApp() || !rootPath) return;
+
+  try {
+    state.recentProjects = normalizeRecentProjects(await invokeNative("forget_recent_project", { rootPath }));
+    saveRecentProjects(state.recentProjects);
+    renderLaunchScreen();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function renderLaunchScreen() {
+  const isLaunchVisible = state.source !== "folder";
+  document.body.classList.toggle("noWorkspace", isLaunchVisible);
+  els.launchScreen.setAttribute("aria-hidden", String(!isLaunchVisible));
+
+  const fragment = document.createDocumentFragment();
+  for (const project of state.recentProjects) {
+    const button = document.createElement("button");
+    button.className = "recentProjectButton";
+    button.type = "button";
+    button.dataset.recentRootPath = project.rootPath;
+    button.title = project.rootPath;
+    button.setAttribute("aria-label", `Open ${project.name}`);
+
+    const name = document.createElement("span");
+    name.className = "recentProjectName";
+    name.textContent = project.name;
+
+    const location = document.createElement("span");
+    location.className = "recentProjectLocation";
+    location.textContent = projectLocationFromPath(project.rootPath);
+
+    button.append(name, location);
+    fragment.appendChild(button);
+  }
+
+  els.launchRecentList.replaceChildren(fragment);
+  els.launchRecentEmpty.hidden = Boolean(state.recentProjects.length);
 }
 
 function rebuildIndex() {
@@ -1572,7 +1851,7 @@ async function selectNote(path, force = false) {
   state.selectedPath = path;
   state.selectedPaths = new Set([path]);
   state.dirty = false;
-  renderSelectedNote(state.source === "folder" ? "Loaded" : "Read-only");
+  renderSelectedNote(state.source === "folder" ? "Note loaded" : "Read-only note");
   updateGraphSelection(previousSelection, state.selectedPaths);
   scheduleLabelVisibilityRefresh({ force: true });
   if (state.largeGraphMode) {
@@ -1634,7 +1913,7 @@ function renderGraphSelectionSummary(statusMessage) {
 }
 
 function selectionStatus(count) {
-  if (!count) return "No graph selection";
+  if (!count) return "No notes selected";
   return `${count} note${count === 1 ? "" : "s"} selected`;
 }
 
@@ -1657,7 +1936,7 @@ function renderSelectedNote(statusMessage) {
     els.notePath.textContent = "";
     setEditorBody("");
     renderInfoPanel(null);
-    setStatus(statusMessage || "No note loaded");
+    setStatus(statusMessage || "Select a note");
     return;
   }
 
@@ -1719,7 +1998,7 @@ function renderInfoParents(note) {
   const fragment = document.createDocumentFragment();
   const rootOption = document.createElement("option");
   rootOption.value = "";
-  rootOption.textContent = "No parent (root / loose)";
+  rootOption.textContent = "No parent (root or loose)";
   fragment.appendChild(rootOption);
 
   for (const parent of state.sortedParentOptions) {
@@ -1836,7 +2115,7 @@ async function deleteGraphSelection() {
   const notes = selectedNotes.length ? selectedNotes : [getSelectedNote()].filter(Boolean);
 
   if (!notes.length || !hasWritableWorkspace()) {
-    setStatus("Open notes folder to delete notes");
+    setStatus("Open a folder to move notes to Trash");
     return false;
   }
 
@@ -1879,7 +2158,7 @@ async function deleteGraphSelection() {
     renderValidationStatus();
     return true;
   } catch (error) {
-    setStatus("Could not delete note");
+    setStatus("Could not move note to Trash");
     console.error(error);
     return false;
   }
@@ -1910,7 +2189,7 @@ async function autosaveSelectedNote() {
   if (!note) return;
 
   if (!hasWritableWorkspace()) {
-    setStatus("Open notes folder to edit");
+    setStatus("Open a folder to edit notes");
     return;
   }
 
@@ -2074,11 +2353,12 @@ function renderGraph({ preserveView } = { preserveView: true }) {
     empty.setAttribute("x", String(viewportWidth / 2));
     empty.setAttribute("y", String(viewportHeight / 2));
     empty.textContent = hasEmptyWritableWorkspace()
-      ? "Click anywhere to create your first note"
-      : "Open folder or create folder";
+      ? "Click the graph to create the first note"
+      : "Open or create a folder to begin";
     els.graph.appendChild(empty);
     applyViewTransform();
     updateLabelVisibility({ force: true });
+    syncFitViewButton();
     finishPerfMeasure(perf);
     return;
   }
@@ -2125,6 +2405,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   applyViewTransform();
   updateGraphGeometry();
   updateLabelVisibility({ force: true });
+  syncFitViewButton();
   finishPerfMeasure(perf);
 }
 
@@ -2350,8 +2631,13 @@ function renderGraphNode(canvas, note) {
   group.setAttribute("tabindex", "0");
   group.setAttribute("role", "button");
   group.setAttribute("aria-pressed", String(state.selectedPaths.has(note.path)));
-  group.setAttribute("aria-label", loose ? `${note.title}, loose note` : note.title);
-  if (loose) group.setAttribute("title", "Drag to another node to connect");
+  group.setAttribute("aria-label", graphNodeAriaLabel(note, { loose }));
+  group.setAttribute(
+    "title",
+    loose
+      ? `${note.title} - loose note. Drag onto another note to connect.`
+      : `${note.title} - click to open, drag to move.`
+  );
   group.setAttribute("data-path", note.path);
 
   const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -2374,10 +2660,11 @@ function renderGraphNode(canvas, note) {
 function renderPendingNode(canvas) {
   const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
   group.setAttribute("class", "node pendingNode");
-  group.style.setProperty("--level-color", "#b88cff");
+  group.style.setProperty("--level-color", "var(--purple)");
   group.setAttribute("tabindex", "0");
   group.setAttribute("role", "button");
-  group.setAttribute("aria-label", `New note ${state.pendingNode.title}`);
+  group.setAttribute("aria-label", `New note ${state.pendingNode.title}. Drag the rope onto a parent note.`);
+  group.setAttribute("title", "Drag the rope onto a parent note");
   group.setAttribute("data-path", PENDING_PATH);
 
   const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -2393,6 +2680,15 @@ function renderPendingNode(canvas) {
   appendNodeLabel(group, state.pendingNode.title, "nodeLabel pendingLabel");
   canvas.appendChild(group);
   state.nodeElements.set(PENDING_PATH, group);
+}
+
+function graphNodeAriaLabel(note, { loose = false } = {}) {
+  const parts = [note.title];
+  parts.push(Number.isFinite(note.level) ? `level ${note.level}` : "no level");
+  if (loose) parts.push("loose note");
+  if (state.selectedPaths.has(note.path)) parts.push("selected");
+  if (isSearchMatched(note)) parts.push("search match");
+  return parts.join(", ");
 }
 
 function appendNodeLabel(group, title, className) {
@@ -2975,6 +3271,16 @@ function zoomAtPoint(clientX, clientY, factor) {
   refreshLabelsAfterZoom(previousScale);
 }
 
+function fitGraphViewFromControl() {
+  if (!state.notes.length && !state.pendingNode) {
+    setStatus(hasWritableWorkspace() ? "Create a note to fit the graph" : "Open or create a folder to fit the graph");
+    return;
+  }
+
+  fitGraphView();
+  setStatus("Graph fitted to view");
+}
+
 function fitGraphView(animate = true) {
   if (!state.graphBounds || !els.graphCanvas) return;
   const previousScale = state.view.scale;
@@ -3002,6 +3308,16 @@ function applyViewTransform(animate = false) {
     `translate(${round(state.view.x)} ${round(state.view.y)}) scale(${round(state.view.scale)})`
   );
   finishPerfMeasure(perf);
+}
+
+function syncFitViewButton() {
+  const hasGraphContent = state.notes.length > 0 || Boolean(state.pendingNode);
+  const label = hasGraphContent
+    ? "Fit graph to view"
+    : (hasWritableWorkspace() ? "Create a note before fitting the graph" : "Open or create a folder before fitting the graph");
+  els.resetViewButton.disabled = !hasGraphContent;
+  els.resetViewButton.setAttribute("aria-label", label);
+  els.resetViewButton.title = label;
 }
 
 function onGraphPointerOver(event) {
@@ -3655,7 +3971,7 @@ function clientToSvgPoint(clientX, clientY) {
 async function openGraphCreatePopover(event) {
   if (event.target.closest && event.target.closest(".node")) return;
   if (!hasWritableWorkspace()) {
-    setStatus("Open notes folder to create notes");
+    setStatus("Open a folder to create notes");
     return;
   }
   if (state.dirty) {
@@ -3743,7 +4059,7 @@ async function createNoteFromPending(parent) {
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
     await updateManifestFile();
-    renderSelectedNote("Saved new note");
+    renderSelectedNote("Note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
     await savePositionPatch(positionPatchForPaths([path]));
@@ -3978,7 +4294,7 @@ async function writeClipboardText(text) {
 
 async function pasteClipboardIntoGraph(point = state.lastGraphPoint || getViewportCenterGraphPoint()) {
   if (!hasWritableWorkspace()) {
-    setStatus("Open notes folder to paste notes");
+    setStatus("Open a folder to paste notes");
     return false;
   }
 
@@ -4088,7 +4404,7 @@ async function createNoteFromPastedText(text, point) {
 async function createNotesBatch(specs, statusMessage) {
   if (!specs.length) return false;
   if (!hasWritableWorkspace()) {
-    setStatus("Open notes folder to create notes");
+    setStatus("Open a folder to create notes");
     return false;
   }
 
@@ -4257,7 +4573,7 @@ function hasMarkdownDrop(event) {
 
 async function importMarkdownFiles(files, point) {
   if (!hasWritableWorkspace()) {
-    setStatus("Open notes folder to drop Markdown files");
+    setStatus("Open a folder to drop Markdown files");
     return false;
   }
 
@@ -4439,7 +4755,7 @@ function renderNewNoteParents() {
 
   const rootOption = document.createElement("option");
   rootOption.value = "";
-  rootOption.textContent = parents.length ? "No parent (new root / loose)" : "No parent (first root note)";
+  rootOption.textContent = parents.length ? "No parent (new root or loose)" : "No parent (first root note)";
   fragment.appendChild(rootOption);
 
   for (const note of parents) {
@@ -4459,7 +4775,7 @@ function renderNewNoteParents() {
 
 async function openNewNoteDialog() {
   if (!hasWritableWorkspace()) {
-    setStatus("Open notes folder to create notes");
+    setStatus("Open a folder to create notes");
     return;
   }
 
@@ -4489,18 +4805,18 @@ function closeNewNoteDialog() {
 
 function updateNewNoteHint() {
   if (!state.notes.length) {
-    els.newNoteHint.textContent = "Creates the first level 0 root note";
+    els.newNoteHint.textContent = "Creates the first level 0 root note.";
     return;
   }
 
   const parent = state.byPath.get(els.newNoteParent.value);
   if (!parent) {
-    els.newNoteHint.textContent = "Creates a level 0 root or loose note";
+    els.newNoteHint.textContent = "Creates a level 0 root or loose note.";
     return;
   }
 
   const nextLevel = parent.level + 1;
-  els.newNoteHint.textContent = `Level ${nextLevel} · parent [[${parent.basename}]]`;
+  els.newNoteHint.textContent = `Level ${nextLevel}, parent [[${parent.basename}]].`;
 }
 
 async function createNewNote(event) {
@@ -4539,7 +4855,7 @@ async function createNewNote(event) {
     rebuildIndex();
     state.validation = validateNotes();
     await updateManifestFile();
-    renderSelectedNote("Saved new note");
+    renderSelectedNote("Note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
     updateSourceStatus();
@@ -4583,7 +4899,7 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
     await updateManifestFile();
-    renderSelectedNote("Saved first note");
+    renderSelectedNote("First note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
     await savePositionPatch(positionPatchForPaths([path]));
@@ -4637,19 +4953,30 @@ function parentOptionLabel(note) {
 
 function setStatus(message) {
   els.editorStatus.textContent = message || "";
+  els.launchStatus.textContent = message || "";
 }
 
 function updateSourceStatus() {
   const isFolder = hasWritableWorkspace();
   const hasSelection = Boolean(getSelectedNote());
+  const canDelete = canDeleteCurrentSelection();
   updateGraphTitle();
   els.sourceStatus.textContent = isFolder ? "" : "No folder";
+  els.sourceStatus.title = isFolder ? (state.rootPath || state.workspaceName || "Folder open") : "Open or create a folder to edit notes";
   els.newNoteButton.disabled = !isFolder;
+  els.newNoteButton.title = isFolder ? "Create a note in this folder" : "Open or create a folder first";
   els.infoTitle.disabled = !isFolder || !hasSelection;
   els.infoParent.disabled = !isFolder || !hasSelection;
-  els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
+  els.noteInfo.setAttribute("aria-disabled", String(!isFolder || !hasSelection));
+  keepDisabledInfoClosed();
+  els.deleteNoteButton.disabled = !canDelete;
+  els.deleteNoteButton.title = canDelete ? "Move selection to Trash" : "Select notes to move to Trash";
+  els.deleteNoteButton.setAttribute("aria-label", canDelete ? "Move selection to Trash" : "Select notes to move to Trash");
+  syncFitViewButton();
+  updateHeaderNoteTitleEditable(isFolder && hasSelection);
   setEditorEditable(isFolder && hasSelection);
   renderWorkspaceTabs();
+  renderLaunchScreen();
 }
 
 function canDeleteCurrentSelection() {

@@ -9,6 +9,7 @@
     "serve": "npm run build:web && python3 -m http.server 8765 -d web",
     "dev": "tauri dev",
     "build": "npm run build:web:prod && tauri build",
+    "test": "node --test web/*.test.js",
     "tauri": "tauri"
   },
   "dependencies": {

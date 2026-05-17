@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <meta name="description" content="Apex Notes is a local-first Markdown hierarchy app for editing graph-shaped note folders.">
-    <meta name="theme-color" content="#060606">
+    <meta name="theme-color" content="#11110f">
     <title>Apex Notes</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg">
     <link rel="stylesheet" href="./styles.css">
@@ -14,32 +14,72 @@
     <header class="topbar">
       <div class="brandGroup">
         <div class="brand">Apex Notes</div>
-        <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interactions" title="Graph interactions">?</button>
+        <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interaction help" title="Graph interaction help">?</button>
       </div>
-      <input id="searchInput" class="search" type="search" placeholder="Search">
-      <button id="newNoteButton" type="button">New note</button>
-      <button id="openFolderButton" type="button">Open notes folder</button>
-      <button id="createFolderButton" type="button">Create folder</button>
+      <input id="searchInput" class="search" type="search" placeholder="Search notes" aria-label="Search notes" title="Search titles, paths, and note text">
+      <button id="newNoteButton" type="button" aria-label="Create a new note" title="Create a new note">New note</button>
+      <button id="openFolderButton" type="button" aria-label="Open a local notes folder" title="Open a local notes folder">Open folder</button>
+      <button id="createFolderButton" type="button" aria-label="Create a new notes folder" title="Create a new notes folder">Create folder</button>
     </header>
 
     <nav id="workspaceTabs" class="workspaceTabs" aria-label="Open note folders" role="tablist"></nav>
 
+    <section id="launchScreen" class="launchScreen" aria-labelledby="launchTitle">
+      <div class="launchInner">
+        <div class="launchBrand">
+          <img class="launchLogo" src="./favicon.svg" alt="" aria-hidden="true">
+          <div class="launchBrandText">
+            <h1 id="launchTitle">Apex Notes</h1>
+            <div class="launchSubtitle">Local-first Markdown hierarchies</div>
+          </div>
+        </div>
+
+        <div class="launchActions" aria-label="Project actions">
+          <button id="launchOpenProjectButton" class="launchAction" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+              <path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
+              <path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h4"></path>
+            </svg>
+            <span>Open project</span>
+          </button>
+          <button id="launchCreateProjectButton" class="launchAction" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+              <path d="M12 5v14"></path>
+              <path d="M5 12h14"></path>
+              <path d="M4 6h5l2 2h9v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"></path>
+            </svg>
+            <span>Create project</span>
+          </button>
+        </div>
+
+        <section class="launchRecent" aria-labelledby="launchRecentTitle">
+          <div class="launchRecentHeader">
+            <h2 id="launchRecentTitle">Recent projects</h2>
+          </div>
+          <div id="launchRecentList" class="launchRecentList"></div>
+          <div id="launchRecentEmpty" class="launchRecentEmpty">No recent projects</div>
+        </section>
+
+        <div id="launchStatus" class="launchStatus muted" role="status" aria-live="polite"></div>
+      </div>
+    </section>
+
     <main class="layout">
-      <section class="graphPane" aria-label="Graph">
+      <section class="graphPane" aria-label="Hierarchy graph">
         <div class="paneHeader">
           <label class="graphTitle">
-            <input id="graphWorkspaceName" class="graphWorkspaceName" type="text" value="Folder" autocomplete="off" spellcheck="false" aria-label="Folder name">
+            <input id="graphWorkspaceName" class="graphWorkspaceName" type="text" value="Folder" autocomplete="off" spellcheck="false" aria-label="Current folder name" title="Rename current folder">
             <span class="graphTitleSuffix">Graph</span>
           </label>
           <div class="paneStatus">
-            <span id="validationStatus" class="muted"></span>
-            <span id="sourceStatus" class="muted"></span>
+            <span id="validationStatus" class="muted" aria-live="polite"></span>
+            <span id="sourceStatus" class="muted" aria-live="polite"></span>
           </div>
-          <div class="zoomControls" aria-label="Graph zoom controls">
-            <button id="zoomOutButton" type="button" aria-label="Zoom out">-</button>
-            <button id="resetViewButton" type="button">Reset</button>
-            <button id="zoomInButton" type="button" aria-label="Zoom in">+</button>
-            <button id="fullscreenGraphButton" type="button">Full screen</button>
+          <div class="zoomControls" aria-label="Graph view controls">
+            <button id="zoomOutButton" type="button" aria-label="Zoom out" title="Zoom out">-</button>
+            <button id="resetViewButton" type="button" aria-label="Fit graph to view" title="Fit graph to view">Fit</button>
+            <button id="zoomInButton" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+            <button id="fullscreenGraphButton" type="button" aria-label="Enter full screen graph" title="Enter full screen graph">Full screen</button>
           </div>
         </div>
         <div id="graphScroller" class="graphScroller">
@@ -47,10 +87,10 @@
         </div>
       </section>
 
-      <aside class="editorPane" aria-label="Editor">
+      <aside class="editorPane" aria-label="Note editor">
         <div class="editorHeader">
           <div class="noteMeta">
-            <h1 id="noteTitle">Select a note</h1>
+            <h1 id="noteTitle" spellcheck="false" aria-label="Selected note title" title="Selected note title">Select a note</h1>
             <div id="notePath" class="muted"></div>
           </div>
           <div class="editorControls">
@@ -85,16 +125,16 @@
         <div class="editorWrap">
           <div id="editor" class="editorHost"></div>
         </div>
-        <div id="editorStatus" class="status muted"></div>
+        <div id="editorStatus" class="status muted" role="status" aria-live="polite"></div>
       </aside>
     </main>
 
-    <dialog id="newNoteDialog" class="newNoteDialog">
+    <dialog id="newNoteDialog" class="newNoteDialog" aria-labelledby="newNoteDialogTitle">
       <form id="newNoteForm" method="dialog">
-        <h2>New note</h2>
+        <h2 id="newNoteDialogTitle">New note</h2>
         <label>
           <span>Title</span>
-          <input id="newNoteTitle" type="text" autocomplete="off" required>
+          <input id="newNoteTitle" type="text" autocomplete="off" placeholder="Untitled note" required>
         </label>
         <label>
           <span>Parent</span>
@@ -108,9 +148,9 @@
       </form>
     </dialog>
 
-    <dialog id="createFolderDialog" class="newNoteDialog">
+    <dialog id="createFolderDialog" class="newNoteDialog" aria-labelledby="createFolderDialogTitle">
       <form id="createFolderForm" method="dialog">
-        <h2>Create folder</h2>
+        <h2 id="createFolderDialogTitle">Create folder</h2>
         <label>
           <span>Folder name</span>
           <input id="createFolderName" type="text" autocomplete="off" value="apex-notes" required>
@@ -119,7 +159,7 @@
           <span>Apex note title</span>
           <input id="createApexTitle" type="text" autocomplete="off" value="Apex" required>
         </label>
-        <div class="muted">Choose where to create it in the native folder picker.</div>
+        <div class="muted">Choose the parent location in the system folder picker.</div>
         <div class="dialogActions">
           <button id="cancelCreateFolderButton" type="button">Cancel</button>
           <button type="submit">Create</button>
@@ -127,10 +167,10 @@
       </form>
     </dialog>
 
-    <dialog id="hierarchyPromptDialog" class="newNoteDialog hierarchyPromptDialog">
+    <dialog id="hierarchyPromptDialog" class="newNoteDialog hierarchyPromptDialog" aria-labelledby="hierarchyPromptDialogTitle">
       <div class="dialogBody">
-        <h2>Paste this prompt into your agent to make this folder into a hierarchical chart</h2>
-        <p class="muted">This folder opened without valid note hierarchy data. Copy the generated prompt, paste it into your agent, then reopen the folder.</p>
+        <h2 id="hierarchyPromptDialogTitle">Build a hierarchy with an agent</h2>
+        <p class="muted">This folder opened without valid hierarchy data. Copy the prompt, run it with your agent, then reopen the folder.</p>
         <div class="dialogActions">
           <button id="closeHierarchyPromptButton" type="button">Close</button>
           <button id="copyHierarchyPromptButton" type="button">Copy prompt</button>
@@ -138,9 +178,9 @@
       </div>
     </dialog>
 
-    <dialog id="graphHelpDialog" class="newNoteDialog graphHelpDialog">
+    <dialog id="graphHelpDialog" class="newNoteDialog graphHelpDialog" aria-labelledby="graphHelpDialogTitle">
       <div class="dialogBody">
-        <h2>Graph interactions</h2>
+        <h2 id="graphHelpDialogTitle">Graph interactions</h2>
         <ul class="interactionList">
           <li>Click empty graph space in an empty folder to create the first note.</li>
           <li>Double-click empty graph space to create a child note, then drag the purple rope onto a parent node.</li>
@@ -148,7 +188,7 @@
           <li>Click a node to open it. Shift-drag, Command-drag, or Control-drag empty space to select several nodes.</li>
           <li>Drag selected nodes to move them. Press Backspace or Delete to move selected notes to Trash.</li>
           <li>Copy, cut, and paste selected nodes. Paste text into the graph to create a note, or drop Markdown files to import them.</li>
-          <li>Scroll to zoom. Alt-drag or middle-drag to pan. Use Reset to fit the graph.</li>
+          <li>Scroll to zoom. Alt-drag or middle-drag to pan. Use Fit to center the graph in view.</li>
         </ul>
         <div class="dialogActions">
           <button id="closeGraphHelpButton" type="button">Close</button>
@@ -156,7 +196,7 @@
       </div>
     </dialog>
 
-    <dialog id="deleteConfirmDialog" class="newNoteDialog deleteConfirmDialog">
+    <dialog id="deleteConfirmDialog" class="newNoteDialog deleteConfirmDialog" aria-labelledby="deleteConfirmTitle">
       <div class="dialogBody">
         <h2 id="deleteConfirmTitle">Move note to Trash?</h2>
         <p id="deleteConfirmMessage">This note will be moved to Trash.</p>
@@ -170,8 +210,8 @@
 
     <form id="graphCreatePopover" class="graphCreatePopover" hidden>
       <label>
-        <span>Title</span>
-        <input id="graphNewTitle" type="text" autocomplete="off" required>
+        <span>Note title</span>
+        <input id="graphNewTitle" type="text" autocomplete="off" placeholder="New note" aria-label="New note title" required>
       </label>
       <div class="popoverActions">
         <button id="cancelGraphCreateButton" type="button">Cancel</button>
