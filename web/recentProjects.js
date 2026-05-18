@@ -49,21 +49,30 @@ export function projectNameFromPath(rootPath) {
   return parts[parts.length - 1] || "Folder";
 }
 
-export function projectLocationFromPath(rootPath) {
+export function projectParentFromPath(rootPath) {
   const normalized = normalizePath(rootPath);
   if (!normalized) return "";
 
   const separator = normalized.includes("\\") ? "\\" : "/";
-  const parts = splitPath(normalized);
-  if (parts.length <= 1) return separator === "\\" ? "" : "/";
+  const index = normalized.lastIndexOf(separator);
+  if (index <= 0) return separator === "\\" ? "" : separator;
+  return normalized.slice(0, index) || separator;
+}
 
-  const parent = normalized.slice(0, normalized.lastIndexOf(separator)) || separator;
-  const homeMatch = parent.match(/^\/Users\/[^/]+(\/.*)?$/);
+export function projectDisplayPath(rootPath) {
+  const normalized = normalizePath(rootPath);
+  if (!normalized) return "";
+
+  const homeMatch = normalized.match(/^\/Users\/[^/]+(\/.*)?$/);
   if (homeMatch) {
     return homeMatch[1] ? `~${homeMatch[1]}` : "~";
   }
 
-  return parent;
+  return normalized;
+}
+
+export function projectLocationFromPath(rootPath) {
+  return projectDisplayPath(projectParentFromPath(rootPath));
 }
 
 export function normalizeRecentProjects(projects) {

@@ -4,8 +4,10 @@ import test from "node:test";
 import {
   RECENT_PROJECT_LIMIT,
   loadRecentProjects,
+  projectDisplayPath,
   projectLocationFromPath,
   projectNameFromPath,
+  projectParentFromPath,
   rememberRecentProject,
   removeRecentProject,
   saveRecentProjects
@@ -60,6 +62,8 @@ test("loads and saves through storage without throwing on malformed data", () =>
 
 test("formats recent project names and parent locations", () => {
   assert.equal(projectNameFromPath("/Users/boris/Documents/theplan"), "theplan");
+  assert.equal(projectParentFromPath("/Users/boris/Documents/theplan"), "/Users/boris/Documents");
+  assert.equal(projectDisplayPath("/Users/boris/Documents"), "~/Documents");
   assert.equal(projectLocationFromPath("/Users/boris/Documents/theplan"), "~/Documents");
   assert.equal(projectLocationFromPath("/workspace"), "/");
   assert.equal(projectLocationFromPath("/"), "/");

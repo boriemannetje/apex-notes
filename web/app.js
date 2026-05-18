@@ -28,7 +28,10 @@ import {
 import {
   loadRecentProjects,
   normalizeRecentProjects,
+  projectDisplayPath,
   projectLocationFromPath,
+  projectNameFromPath,
+  projectParentFromPath,
   rememberRecentProject,
   removeRecentProject,
   saveRecentProjects
@@ -59,6 +62,7 @@ const GRAPH_PAD = 96;
 const PENDING_PATH = "__pending_node__";
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
+const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
 const PERF_ENABLED =
   window.location.search.includes("perf=1") ||
   window.localStorage.getItem("apex-notes-perf") === "1";
@@ -69,6 +73,9 @@ const wikiLinkRefreshEffect = StateEffect.define();
 const state = {
   workspaces: [],
   recentProjects: loadRecentProjects(),
+  defaultProjectLocation: "",
+  browsedProjectLocation: "",
+  createProjectParentPath: "",
   activeWorkspaceId: null,
   nextWorkspaceId: 1,
   notes: [],
@@ -138,7 +145,8 @@ const state = {
   queuedInteractionEvent: null,
   graphBounds: null,
   graphViewport: null,
-  graphFullscreenFallback: false
+  graphFullscreenFallback: false,
+  graphProjectLauncherOpen: false
 };
 
 const els = {
@@ -148,6 +156,13 @@ const els = {
   launchRecentList: document.querySelector("#launchRecentList"),
   launchRecentEmpty: document.querySelector("#launchRecentEmpty"),
   launchStatus: document.querySelector("#launchStatus"),
+  graphProjectLauncher: document.querySelector("#graphProjectLauncher"),
+  graphOpenProjectButton: document.querySelector("#graphOpenProjectButton"),
+  graphCreateProjectButton: document.querySelector("#graphCreateProjectButton"),
+  graphRecentList: document.querySelector("#graphRecentList"),
+  graphRecentEmpty: document.querySelector("#graphRecentEmpty"),
+  graphLaunchStatus: document.querySelector("#graphLaunchStatus"),
+  closeGraphProjectLauncherButton: document.querySelector("#closeGraphProjectLauncherButton"),
   workspaceTabs: document.querySelector("#workspaceTabs"),
   graphWorkspaceName: document.querySelector("#graphWorkspaceName"),
   graph: document.querySelector("#graph"),
@@ -185,7 +200,8 @@ const els = {
   createFolderDialog: document.querySelector("#createFolderDialog"),
   createFolderForm: document.querySelector("#createFolderForm"),
   createFolderName: document.querySelector("#createFolderName"),
-  createApexTitle: document.querySelector("#createApexTitle"),
+  createFolderLocationSelect: document.querySelector("#createFolderLocationSelect"),
+  createFolderLocationPath: document.querySelector("#createFolderLocationPath"),
   cancelCreateFolderButton: document.querySelector("#cancelCreateFolderButton"),
   hierarchyPromptDialog: document.querySelector("#hierarchyPromptDialog"),
   copyHierarchyPromptButton: document.querySelector("#copyHierarchyPromptButton"),
@@ -346,6 +362,10 @@ function bindEvents() {
   els.launchOpenProjectButton.addEventListener("click", openNotesFolder);
   els.launchCreateProjectButton.addEventListener("click", openCreateFolderDialog);
   els.launchRecentList.addEventListener("click", onLaunchRecentClick);
+  els.graphOpenProjectButton.addEventListener("click", openNotesFolder);
+  els.graphCreateProjectButton.addEventListener("click", openCreateFolderDialog);
+  els.graphRecentList.addEventListener("click", onLaunchRecentClick);
+  els.closeGraphProjectLauncherButton.addEventListener("click", closeGraphProjectLauncher);
   els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
   els.graphWorkspaceName.addEventListener("input", syncGraphWorkspaceNameSize);
   els.graphWorkspaceName.addEventListener("blur", () => {
@@ -359,6 +379,7 @@ function bindEvents() {
   els.fullscreenGraphButton.addEventListener("click", toggleGraphFullscreen);
   els.cancelNewNoteButton.addEventListener("click", () => closeNewNoteDialog());
   els.cancelCreateFolderButton.addEventListener("click", () => closeCreateFolderDialog());
+  els.createFolderLocationSelect.addEventListener("change", onCreateProjectLocationChange);
   els.closeHierarchyPromptButton.addEventListener("click", () => closeHierarchyPromptDialog());
   els.copyHierarchyPromptButton.addEventListener("click", () => copyHierarchyPrompt());
   els.cancelDeleteButton.addEventListener("click", () => settleDeleteConfirm(false));
@@ -440,6 +461,25 @@ function closeGraphHelpDialog() {
   } else {
     els.graphHelpDialog.setAttribute("hidden", "");
   }
+}
+
+function openGraphProjectLauncher() {
+  if (!hasWritableWorkspace()) {
+    return;
+  }
+
+  closeGraphCreatePopover();
+  state.graphProjectLauncherOpen = true;
+  renderGraphProjectLauncher();
+  setStatus("Choose a project");
+}
+
+function closeGraphProjectLauncher() {
+  if (!state.graphProjectLauncherOpen) return;
+
+  state.graphProjectLauncherOpen = false;
+  renderGraphProjectLauncher();
+  setStatus(hasWritableWorkspace() ? "Graph ready" : "");
 }
 
 function isAnyDialogOpen() {
@@ -676,7 +716,7 @@ function onWorkspaceTabsClick(event) {
   const openButton = event.target.closest("[data-open-workspace]");
   if (openButton) {
     event.preventDefault();
-    void openNotesFolder();
+    openGraphProjectLauncher();
     return;
   }
 
@@ -691,6 +731,10 @@ function onWorkspaceTabsClick(event) {
   const switchButton = event.target.closest("[data-switch-workspace]");
   if (switchButton) {
     event.preventDefault();
+    if (switchButton.dataset.switchWorkspace === state.activeWorkspaceId) {
+      closeGraphProjectLauncher();
+      return;
+    }
     void switchWorkspaceTab(switchButton.dataset.switchWorkspace);
   }
 }
@@ -705,6 +749,7 @@ function onLaunchRecentClick(event) {
 
 function startEmpty() {
   stopLiveSync();
+  closeGraphProjectLauncher();
   state.activeWorkspaceId = null;
   state.notes = [];
   state.graphIndex = null;
@@ -783,6 +828,7 @@ async function openNotesFolder() {
     const rootPath = await pickNativeDirectory();
     if (!rootPath) return;
     const workspace = await invokeNative("read_workspace", { rootPath });
+    closeGraphProjectLauncher();
     setNativeWorkspace(workspace, "Folder loaded");
   } catch (error) {
     if (error && error.name !== "AbortError") {
@@ -808,6 +854,7 @@ async function openRecentProject(rootPath) {
   try {
     setStatus("Opening recent project");
     const workspace = await invokeNative("read_workspace", { rootPath });
+    closeGraphProjectLauncher();
     setNativeWorkspace(workspace, "Recent project opened");
   } catch (error) {
     state.recentProjects = removeRecentProject(rootPath, state.recentProjects);
@@ -830,6 +877,9 @@ async function openCreateFolderDialog() {
     if (state.dirty) return;
   }
 
+  await hydrateDefaultProjectLocation();
+  prepareCreateProjectDialog();
+
   if (typeof els.createFolderDialog.showModal === "function") {
     els.createFolderDialog.showModal();
   } else {
@@ -846,21 +896,152 @@ function closeCreateFolderDialog() {
   }
 }
 
+async function hydrateDefaultProjectLocation() {
+  if (!isTauriApp() || state.defaultProjectLocation) return;
+
+  try {
+    state.defaultProjectLocation = await invokeNative("default_project_location");
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function prepareCreateProjectDialog() {
+  if (!els.createFolderName.value.trim()) {
+    els.createFolderName.value = "apex-notes";
+  }
+  if (!state.createProjectParentPath) {
+    state.createProjectParentPath = getPreferredProjectLocation();
+  }
+  renderCreateProjectLocations();
+}
+
+function getPreferredProjectLocation() {
+  return buildProjectLocationOptions()[0]?.path || "";
+}
+
+function buildProjectLocationOptions() {
+  const locations = [];
+
+  if (state.rootPath) {
+    locations.push({
+      path: projectParentFromPath(state.rootPath),
+      label: "Current location"
+    });
+  }
+
+  if (state.browsedProjectLocation) {
+    locations.push({
+      path: state.browsedProjectLocation,
+      label: "Selected location"
+    });
+  }
+
+  for (const project of state.recentProjects) {
+    const path = projectParentFromPath(project.rootPath);
+    locations.push({
+      path,
+      label: projectNameFromPath(path)
+    });
+  }
+
+  if (state.defaultProjectLocation) {
+    locations.push({
+      path: state.defaultProjectLocation,
+      label: "Default location"
+    });
+  }
+
+  const seen = new Set();
+  const options = [];
+  for (const location of locations) {
+    const path = String(location.path || "").trim();
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    options.push({
+      path,
+      label: location.label || projectNameFromPath(path) || "Location"
+    });
+    if (options.length === 4) break;
+  }
+
+  return options;
+}
+
+function renderCreateProjectLocations() {
+  const options = buildProjectLocationOptions();
+  if (!options.some((option) => option.path === state.createProjectParentPath)) {
+    state.createProjectParentPath = options[0]?.path || "";
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const option of options) {
+    const item = document.createElement("option");
+    item.value = option.path;
+    item.textContent = `${option.label} - ${projectDisplayPath(option.path)}`;
+    fragment.appendChild(item);
+  }
+
+  const browse = document.createElement("option");
+  browse.value = BROWSE_PROJECT_LOCATION_VALUE;
+  browse.textContent = "Browse...";
+  fragment.appendChild(browse);
+
+  els.createFolderLocationSelect.replaceChildren(fragment);
+  els.createFolderLocationSelect.value = state.createProjectParentPath || BROWSE_PROJECT_LOCATION_VALUE;
+  els.createFolderLocationPath.textContent = state.createProjectParentPath
+    ? projectDisplayPath(state.createProjectParentPath)
+    : "Choose Browse to pick a location";
+}
+
+async function onCreateProjectLocationChange() {
+  const selected = els.createFolderLocationSelect.value;
+  if (selected !== BROWSE_PROJECT_LOCATION_VALUE) {
+    state.createProjectParentPath = selected;
+    renderCreateProjectLocations();
+    return;
+  }
+
+  const previous = state.createProjectParentPath;
+  try {
+    setStatus("Choose where to store the project");
+    const parentPath = await pickNativeDirectory();
+    if (parentPath) {
+      state.browsedProjectLocation = parentPath;
+      state.createProjectParentPath = parentPath;
+    } else {
+      state.createProjectParentPath = previous;
+    }
+  } catch (error) {
+    state.createProjectParentPath = previous;
+    if (error && error.name !== "AbortError") {
+      setStatus("Could not choose project location");
+      console.error(error);
+    }
+  }
+
+  renderCreateProjectLocations();
+}
+
 async function createGraphFolder(event) {
   event.preventDefault();
 
   const requestedFolder = slugify(els.createFolderName.value.trim()) || "apex-notes";
-  const apexTitle = els.createApexTitle.value.trim() || "Apex";
+  const parentPath = state.createProjectParentPath || getPreferredProjectLocation();
+
+  if (!parentPath) {
+    setStatus("Choose a project location");
+    renderCreateProjectLocations();
+    return;
+  }
 
   try {
-    setStatus("Choose where to create the folder");
-    const parentPath = await pickNativeDirectory();
-    if (!parentPath) return;
+    setStatus("Creating project");
     const workspace = await invokeNative("create_workspace", {
       parentPath,
-      folderName: requestedFolder,
-      apexTitle
+      folderName: requestedFolder
     });
+    closeGraphProjectLauncher();
     setNativeWorkspace(workspace, "Folder created");
     closeCreateFolderDialog();
   } catch (error) {
@@ -1199,6 +1380,7 @@ function saveActiveWorkspaceState() {
 
 function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { preserveView: true }) {
   stopLiveSync();
+  closeGraphProjectLauncher();
   closeGraphCreatePopover();
   cancelQueuedGraphRender();
   cancelLabelVisibilityRefresh();
@@ -1422,9 +1604,26 @@ function renderLaunchScreen() {
   const isLaunchVisible = state.source !== "folder";
   document.body.classList.toggle("noWorkspace", isLaunchVisible);
   els.launchScreen.setAttribute("aria-hidden", String(!isLaunchVisible));
+  renderProjectList(els.launchRecentList, state.recentProjects);
+  els.launchRecentEmpty.hidden = Boolean(state.recentProjects.length);
+  renderGraphProjectLauncher();
+}
 
+function renderGraphProjectLauncher() {
+  const isVisible = hasWritableWorkspace() && state.graphProjectLauncherOpen;
+  els.graphPane.classList.toggle("projectLauncherOpen", isVisible);
+  els.graphProjectLauncher.hidden = !isVisible;
+  els.graphProjectLauncher.setAttribute("aria-hidden", String(!isVisible));
+  els.graph.setAttribute("aria-hidden", String(isVisible));
+  if (isVisible) {
+    renderProjectList(els.graphRecentList, state.recentProjects);
+    els.graphRecentEmpty.hidden = Boolean(state.recentProjects.length);
+  }
+}
+
+function renderProjectList(listElement, projects) {
   const fragment = document.createDocumentFragment();
-  for (const project of state.recentProjects) {
+  for (const project of projects) {
     const button = document.createElement("button");
     button.className = "recentProjectButton";
     button.type = "button";
@@ -1444,8 +1643,7 @@ function renderLaunchScreen() {
     fragment.appendChild(button);
   }
 
-  els.launchRecentList.replaceChildren(fragment);
-  els.launchRecentEmpty.hidden = Boolean(state.recentProjects.length);
+  listElement.replaceChildren(fragment);
 }
 
 function rebuildIndex() {
@@ -4954,6 +5152,7 @@ function parentOptionLabel(note) {
 function setStatus(message) {
   els.editorStatus.textContent = message || "";
   els.launchStatus.textContent = message || "";
+  els.graphLaunchStatus.textContent = message || "";
 }
 
 function updateSourceStatus() {

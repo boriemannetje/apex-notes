@@ -731,6 +731,10 @@ body.noWorkspace .launchScreen {
   scrollbar-width: thin;
 }
 
+.graphPane.projectLauncherOpen .graphScroller {
+  overflow: auto;
+}
+
 .graph {
   display: block;
   width: 100%;
@@ -757,6 +761,61 @@ body.noWorkspace .launchScreen {
 
 .graph.isDropTarget {
   background: rgba(184, 140, 255, 0.1);
+}
+
+.graphPane.projectLauncherOpen .graph {
+  display: none;
+}
+
+.graphProjectLauncher {
+  display: grid;
+  min-width: 0;
+  min-height: 100%;
+  place-items: center;
+  padding: clamp(18px, 4vw, 42px);
+}
+
+.graphProjectLauncher[hidden] {
+  display: none;
+}
+
+.graphProjectInner {
+  display: grid;
+  width: min(680px, 100%);
+  max-width: 100%;
+  gap: clamp(16px, 3vw, 24px);
+}
+
+.graphProjectHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.graphProjectHeading {
+  min-width: 0;
+}
+
+.graphProjectHeading h2 {
+  overflow-wrap: anywhere;
+  font-size: clamp(20px, 4vw, 26px);
+  line-height: 1.08;
+}
+
+.graphProjectClose svg {
+  width: 16px;
+  height: 16px;
+}
+
+.graphProjectActions {
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+}
+
+.graphProjectRecent .recentProjectButton {
+  height: auto;
+  min-height: 38px;
 }
 
 body.graphFullscreen {
@@ -1188,6 +1247,10 @@ h2 {
   width: min(460px, calc(100vw - 28px));
 }
 
+.createProjectDialog {
+  width: min(460px, calc(100vw - 28px));
+}
+
 .newNoteDialog::backdrop {
   background: rgba(17, 17, 15, 0.78);
   backdrop-filter: blur(6px);
@@ -1235,6 +1298,24 @@ h2 {
 .newNoteDialog select {
   width: 100%;
   padding: 0 10px;
+}
+
+.projectLocationField {
+  min-width: 0;
+}
+
+.projectLocationField select {
+  cursor: pointer;
+}
+
+.projectLocationPath {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
 }
 
 .dialogActions {

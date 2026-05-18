@@ -83,6 +83,49 @@
           </div>
         </div>
         <div id="graphScroller" class="graphScroller">
+          <section id="graphProjectLauncher" class="graphProjectLauncher" aria-labelledby="graphProjectTitle" hidden>
+            <div class="graphProjectInner">
+              <div class="graphProjectHeader">
+                <div class="graphProjectHeading">
+                  <h2 id="graphProjectTitle">Open another project</h2>
+                </div>
+                <button id="closeGraphProjectLauncherButton" class="iconButton graphProjectClose" type="button" aria-label="Return to graph" title="Return to graph">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                    <path d="M18 6 6 18"></path>
+                    <path d="m6 6 12 12"></path>
+                  </svg>
+                </button>
+              </div>
+
+              <div class="launchActions graphProjectActions" aria-label="Project actions">
+                <button id="graphOpenProjectButton" class="launchAction" type="button">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                    <path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
+                    <path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h4"></path>
+                  </svg>
+                  <span>Open project</span>
+                </button>
+                <button id="graphCreateProjectButton" class="launchAction" type="button">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                    <path d="M12 5v14"></path>
+                    <path d="M5 12h14"></path>
+                    <path d="M4 6h5l2 2h9v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"></path>
+                  </svg>
+                  <span>Create project</span>
+                </button>
+              </div>
+
+              <section class="launchRecent graphProjectRecent" aria-labelledby="graphRecentTitle">
+                <div class="launchRecentHeader">
+                  <h2 id="graphRecentTitle">Recent projects</h2>
+                </div>
+                <div id="graphRecentList" class="launchRecentList"></div>
+                <div id="graphRecentEmpty" class="launchRecentEmpty">No recent projects</div>
+              </section>
+
+              <div id="graphLaunchStatus" class="launchStatus muted" role="status" aria-live="polite"></div>
+            </div>
+          </section>
           <svg id="graph" class="graph" role="img" aria-label="Markdown hierarchy graph" tabindex="0"></svg>
         </div>
       </section>
@@ -148,18 +191,18 @@
       </form>
     </dialog>
 
-    <dialog id="createFolderDialog" class="newNoteDialog" aria-labelledby="createFolderDialogTitle">
+    <dialog id="createFolderDialog" class="newNoteDialog createProjectDialog" aria-labelledby="createFolderDialogTitle">
       <form id="createFolderForm" method="dialog">
-        <h2 id="createFolderDialogTitle">Create folder</h2>
+        <h2 id="createFolderDialogTitle">Create project</h2>
         <label>
-          <span>Folder name</span>
+          <span>Project name</span>
           <input id="createFolderName" type="text" autocomplete="off" value="apex-notes" required>
         </label>
-        <label>
-          <span>Apex note title</span>
-          <input id="createApexTitle" type="text" autocomplete="off" value="Apex" required>
+        <label class="projectLocationField">
+          <span>Store in</span>
+          <select id="createFolderLocationSelect" aria-label="Project storage location"></select>
+          <span id="createFolderLocationPath" class="projectLocationPath"></span>
         </label>
-        <div class="muted">Choose the parent location in the system folder picker.</div>
         <div class="dialogActions">
           <button id="cancelCreateFolderButton" type="button">Cancel</button>
           <button type="submit">Create</button>

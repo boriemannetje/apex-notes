@@ -126,13 +126,9 @@ fn read_notes_blocking(notes_path: String, paths: Vec<String>) -> Result<Vec<Not
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn create_workspace(
-    parent_path: String,
-    folder_name: String,
-    apex_title: String,
-) -> Result<Workspace, String> {
+async fn create_workspace(parent_path: String, folder_name: String) -> Result<Workspace, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        create_workspace_blocking(parent_path, folder_name, apex_title)
+        create_workspace_blocking(parent_path, folder_name)
     })
     .await
     .map_err(to_error)?
@@ -141,7 +137,6 @@ async fn create_workspace(
 fn create_workspace_blocking(
     parent_path: String,
     folder_name: String,
-    apex_title: String,
 ) -> Result<Workspace, String> {
     let parent = require_existing_dir(parent_path, "Parent path is not a folder")?;
 
@@ -150,25 +145,20 @@ fn create_workspace_blocking(
     let notes_root = root.join("notes");
     fs::create_dir_all(&notes_root).map_err(to_error)?;
 
-    let apex_title = if apex_title.trim().is_empty() {
-        "Apex".to_string()
-    } else {
-        apex_title.trim().to_string()
-    };
-    let apex_file = format!(
-        "{}.md",
-        slugify(&apex_title).unwrap_or_else(|| "apex".into())
-    );
-    let raw = format!(
-        "---\ntitle: \"{}\"\nlevel: 0\nparent: null\n---\n\n# {}\n",
-        escape_yaml(&apex_title),
-        apex_title
-    );
-
-    fs::write(notes_root.join(&apex_file), raw).map_err(to_error)?;
     write_layout_file(&notes_root, &HashMap::new()).map_err(to_error)?;
-    write_manifest_file(&notes_root, &[apex_file]).map_err(to_error)?;
+    write_manifest_file(&notes_root, &[]).map_err(to_error)?;
     workspace_from_paths(root, notes_root)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn default_project_location(app: tauri::AppHandle) -> Result<String, String> {
+    let path = app
+        .path()
+        .document_dir()
+        .or_else(|_| app.path().home_dir())
+        .map_err(to_error)?;
+    let path = path.canonicalize().unwrap_or(path);
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -436,6 +426,7 @@ pub fn run() {
             list_note_files,
             read_notes,
             create_workspace,
+            default_project_location,
             rename_workspace,
             write_note,
             create_note,
@@ -878,6 +869,30 @@ mod tests {
         fs::remove_dir_all(outside).ok();
     }
 
+    #[test]
+    fn create_workspace_starts_without_an_apex_note() {
+        let parent = temp_notes_dir("workspace-parent");
+
+        let workspace = create_workspace_blocking(
+            parent.to_string_lossy().into_owned(),
+            "New Project".to_string(),
+        )
+        .expect("create workspace");
+
+        assert!(workspace.notes.is_empty());
+        assert!(Path::new(&workspace.notes_path)
+            .join("manifest.json")
+            .is_file());
+        assert_eq!(
+            fs::read_to_string(Path::new(&workspace.notes_path).join("manifest.json"))
+                .expect("read manifest"),
+            "[]\n"
+        );
+        assert!(!Path::new(&workspace.notes_path).join("apex.md").exists());
+
+        fs::remove_dir_all(parent).ok();
+    }
+
     #[cfg(unix)]
     #[test]
     fn read_workspace_rejects_symlink_notes_folder() {
@@ -945,10 +960,6 @@ fn slugify(value: &str) -> Option<String> {
     } else {
         Some(slug)
     }
-}
-
-fn escape_yaml(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn to_error(error: impl std::fmt::Display) -> String {
