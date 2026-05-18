@@ -19,7 +19,8 @@
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.42.1",
     "@tauri-apps/api": "2.11.0",
-    "@tauri-apps/plugin-dialog": "2.7.1"
+    "@tauri-apps/plugin-dialog": "2.7.1",
+    "lucide": "1.16.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.1",

@@ -69,12 +69,30 @@ select {
 }
 
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   min-width: 34px;
   padding: 0 12px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 650;
   white-space: nowrap;
+}
+
+.buttonLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lucideIcon {
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 button:hover,
@@ -118,21 +136,14 @@ select:disabled {
 }
 
 .iconButton {
-  display: inline-grid;
   width: 36px;
   min-width: 36px;
-  place-items: center;
   padding: 0;
 }
 
 .iconButton svg {
   width: 17px;
   height: 17px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .dangerIconButton {
@@ -216,18 +227,18 @@ select:disabled {
 }
 
 .helpButton {
-  display: inline-grid;
   flex: 0 0 auto;
   width: 24px;
   min-width: 24px;
   height: 24px;
-  place-items: center;
   padding: 0;
   border-radius: 50%;
   color: var(--muted);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
+}
+
+.helpButton svg {
+  width: 14px;
+  height: 14px;
 }
 
 .helpButton:hover,
@@ -300,9 +311,31 @@ select:disabled {
     var(--focus-ring);
 }
 
-.search {
+.searchField {
+  position: relative;
+  display: flex;
   min-width: 0;
-  padding: 0 12px;
+  align-items: center;
+}
+
+.searchFieldIcon {
+  position: absolute;
+  left: 10px;
+  z-index: 1;
+  display: inline-flex;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.searchFieldIcon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.search {
+  width: 100%;
+  min-width: 0;
+  padding: 0 12px 0 34px;
   font-size: 13px;
 }
 
@@ -396,11 +429,9 @@ select:disabled {
   position: absolute;
   top: 7px;
   right: 7px;
-  display: grid;
   width: 22px;
   min-width: 22px;
   height: 22px;
-  place-items: center;
   padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
@@ -413,28 +444,15 @@ select:disabled {
     opacity var(--transition-fast);
 }
 
+.workspaceTabClose svg {
+  width: 14px;
+  height: 14px;
+}
+
 .workspaceTab:hover .workspaceTabClose,
 .workspaceTab.active .workspaceTabClose,
 .workspaceTabClose:focus-visible {
   color: var(--muted);
-}
-
-.workspaceTabClose::before,
-.workspaceTabClose::after {
-  content: "";
-  position: absolute;
-  width: 10px;
-  height: 1.4px;
-  border-radius: 1px;
-  background: currentColor;
-}
-
-.workspaceTabClose::before {
-  transform: rotate(45deg);
-}
-
-.workspaceTabClose::after {
-  transform: rotate(-45deg);
 }
 
 .workspaceTabClose:hover,
@@ -446,18 +464,19 @@ select:disabled {
 }
 
 .workspaceTabAdd {
-  display: grid;
   flex: 0 0 34px;
   width: 34px;
   height: 36px;
-  place-items: center;
   margin-top: 1px;
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 21px;
-  line-height: 1;
+}
+
+.workspaceTabAdd svg {
+  width: 16px;
+  height: 16px;
 }
 
 .workspaceTabAdd:hover,
@@ -599,9 +618,9 @@ body.noWorkspace .launchScreen {
   display: grid;
   width: 100%;
   height: 36px;
-  grid-template-columns: minmax(0, 1fr) minmax(90px, auto);
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
-  gap: 18px;
+  gap: 10px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -614,6 +633,24 @@ body.noWorkspace .launchScreen {
   background: transparent;
   color: var(--fg);
   box-shadow: none;
+}
+
+.recentProjectIcon {
+  display: inline-flex;
+  color: var(--muted);
+}
+
+.recentProjectIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.recentProjectText {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(90px, auto);
+  align-items: center;
+  gap: 18px;
 }
 
 .recentProjectName,
@@ -639,6 +676,11 @@ body.noWorkspace .launchScreen {
 .recentProjectButton:hover .recentProjectLocation,
 .recentProjectButton:focus-visible .recentProjectLocation {
   color: var(--fg);
+}
+
+.recentProjectButton:hover .recentProjectIcon,
+.recentProjectButton:focus-visible .recentProjectIcon {
+  color: var(--accent);
 }
 
 .launchRecentEmpty {
@@ -711,15 +753,20 @@ body.noWorkspace .launchScreen {
   padding: 0;
 }
 
+.zoomControls button svg {
+  width: 15px;
+  height: 15px;
+}
+
 .zoomControls #resetViewButton {
-  width: 44px;
+  width: 34px;
   padding: 0;
 }
 
 .zoomControls #fullscreenGraphButton {
-  width: auto;
-  min-width: 112px;
-  padding: 0 10px;
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
 }
 
 .graphScroller {
@@ -1497,9 +1544,14 @@ h2 {
   .recentProjectButton {
     height: auto;
     min-height: 44px;
+    grid-template-columns: 18px minmax(0, 1fr);
+    gap: 10px;
+    align-content: center;
+  }
+
+  .recentProjectText {
     grid-template-columns: 1fr;
     gap: 2px;
-    align-content: center;
   }
 
   .recentProjectLocation {

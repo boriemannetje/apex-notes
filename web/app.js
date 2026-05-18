@@ -36,6 +36,7 @@ import {
   removeRecentProject,
   saveRecentProjects
 } from "./recentProjects.js";
+import { createIcon, setButtonIcon } from "./icons.js";
 import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
 const LEVEL_COLORS = ["#f1eee6", "#9fc5ff", "#a9d6ac", "#e8d188", "#ffb6d1", "#f2b380", "#7fd6df", "#c7b89a"];
@@ -172,6 +173,7 @@ const els = {
   graphHelpButton: document.querySelector("#graphHelpButton"),
   graphHelpDialog: document.querySelector("#graphHelpDialog"),
   closeGraphHelpButton: document.querySelector("#closeGraphHelpButton"),
+  searchFieldIcon: document.querySelector("#searchFieldIcon"),
   searchInput: document.querySelector("#searchInput"),
   openFolderButton: document.querySelector("#openFolderButton"),
   createFolderButton: document.querySelector("#createFolderButton"),
@@ -292,9 +294,28 @@ class WikiLinkWidget extends WidgetType {
 }
 
 initializeEditor();
+initializeIcons();
 bindEvents();
 startEmpty();
 void hydrateRecentProjects();
+
+function initializeIcons() {
+  setButtonIcon(els.graphHelpButton, "help");
+  setButtonIcon(els.newNoteButton, "newNote", "New note");
+  setButtonIcon(els.openFolderButton, "openProject", "Open folder");
+  setButtonIcon(els.createFolderButton, "createProject", "Create folder");
+  setButtonIcon(els.launchOpenProjectButton, "openProject", "Open project");
+  setButtonIcon(els.launchCreateProjectButton, "createProject", "Create project");
+  setButtonIcon(els.graphOpenProjectButton, "openProject", "Open project");
+  setButtonIcon(els.graphCreateProjectButton, "createProject", "Create project");
+  setButtonIcon(els.closeGraphProjectLauncherButton, "close");
+  els.searchFieldIcon.appendChild(createIcon("search"));
+  setButtonIcon(els.zoomOutButton, "zoomOut");
+  setButtonIcon(els.resetViewButton, "fit");
+  setButtonIcon(els.zoomInButton, "zoomIn");
+  setButtonIcon(els.fullscreenGraphButton, "fullscreenEnter");
+  setButtonIcon(els.deleteNoteButton, "trash");
+}
 
 function initializeEditor() {
   state.editorView = new EditorView({
@@ -545,7 +566,7 @@ function syncGraphFullscreenState() {
 
 function syncGraphFullscreenButton() {
   const isFullscreen = document.body.classList.contains("graphFullscreen");
-  els.fullscreenGraphButton.textContent = isFullscreen ? "Exit full screen" : "Full screen";
+  setButtonIcon(els.fullscreenGraphButton, isFullscreen ? "fullscreenExit" : "fullscreenEnter");
   els.fullscreenGraphButton.setAttribute(
     "aria-label",
     isFullscreen ? "Exit full screen graph" : "Enter full screen graph"
@@ -1534,6 +1555,7 @@ function renderWorkspaceTabs() {
     closeButton.dataset.closeWorkspace = workspace.id;
     closeButton.setAttribute("aria-label", `Close ${workspace.workspaceName || "folder"}`);
     closeButton.title = `Close ${workspace.workspaceName || "folder"}`;
+    closeButton.appendChild(createIcon("close"));
 
     tab.append(switchButton, closeButton);
     fragment.appendChild(tab);
@@ -1546,7 +1568,7 @@ function renderWorkspaceTabs() {
     addButton.dataset.openWorkspace = "true";
     addButton.setAttribute("aria-label", "Open another notes folder");
     addButton.title = "Open another notes folder";
-    addButton.textContent = "+";
+    addButton.appendChild(createIcon("openProject"));
     fragment.appendChild(addButton);
   }
 
@@ -1639,7 +1661,15 @@ function renderProjectList(listElement, projects) {
     location.className = "recentProjectLocation";
     location.textContent = projectLocationFromPath(project.rootPath);
 
-    button.append(name, location);
+    const icon = document.createElement("span");
+    icon.className = "recentProjectIcon";
+    icon.appendChild(createIcon("openProject"));
+
+    const text = document.createElement("span");
+    text.className = "recentProjectText";
+    text.append(name, location);
+
+    button.append(icon, text);
     fragment.appendChild(button);
   }
 

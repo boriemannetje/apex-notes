@@ -14,9 +14,12 @@
     <header class="topbar">
       <div class="brandGroup">
         <div class="brand">Apex Notes</div>
-        <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interaction help" title="Graph interaction help">?</button>
+        <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interaction help" title="Graph interaction help"></button>
       </div>
-      <input id="searchInput" class="search" type="search" placeholder="Search notes" aria-label="Search notes" title="Search titles, paths, and note text">
+      <label class="searchField" title="Search titles, paths, and note text">
+        <span id="searchFieldIcon" class="searchFieldIcon" aria-hidden="true"></span>
+        <input id="searchInput" class="search" type="search" placeholder="Search notes" aria-label="Search notes">
+      </label>
       <button id="newNoteButton" type="button" aria-label="Create a new note" title="Create a new note">New note</button>
       <button id="openFolderButton" type="button" aria-label="Open a local notes folder" title="Open a local notes folder">Open folder</button>
       <button id="createFolderButton" type="button" aria-label="Create a new notes folder" title="Create a new notes folder">Create folder</button>
@@ -36,19 +39,10 @@
 
         <div class="launchActions" aria-label="Project actions">
           <button id="launchOpenProjectButton" class="launchAction" type="button">
-            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
-              <path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
-              <path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h4"></path>
-            </svg>
-            <span>Open project</span>
+            Open project
           </button>
           <button id="launchCreateProjectButton" class="launchAction" type="button">
-            <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
-              <path d="M12 5v14"></path>
-              <path d="M5 12h14"></path>
-              <path d="M4 6h5l2 2h9v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"></path>
-            </svg>
-            <span>Create project</span>
+            Create project
           </button>
         </div>
 
@@ -76,10 +70,10 @@
             <span id="sourceStatus" class="muted" aria-live="polite"></span>
           </div>
           <div class="zoomControls" aria-label="Graph view controls">
-            <button id="zoomOutButton" type="button" aria-label="Zoom out" title="Zoom out">-</button>
-            <button id="resetViewButton" type="button" aria-label="Fit graph to view" title="Fit graph to view">Fit</button>
-            <button id="zoomInButton" type="button" aria-label="Zoom in" title="Zoom in">+</button>
-            <button id="fullscreenGraphButton" type="button" aria-label="Enter full screen graph" title="Enter full screen graph">Full screen</button>
+            <button id="zoomOutButton" type="button" aria-label="Zoom out" title="Zoom out"></button>
+            <button id="resetViewButton" type="button" aria-label="Fit graph to view" title="Fit graph to view"></button>
+            <button id="zoomInButton" type="button" aria-label="Zoom in" title="Zoom in"></button>
+            <button id="fullscreenGraphButton" type="button" aria-label="Enter full screen graph" title="Enter full screen graph"></button>
           </div>
         </div>
         <div id="graphScroller" class="graphScroller">
@@ -89,29 +83,15 @@
                 <div class="graphProjectHeading">
                   <h2 id="graphProjectTitle">Open another project</h2>
                 </div>
-                <button id="closeGraphProjectLauncherButton" class="iconButton graphProjectClose" type="button" aria-label="Return to graph" title="Return to graph">
-                  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
-                    <path d="M18 6 6 18"></path>
-                    <path d="m6 6 12 12"></path>
-                  </svg>
-                </button>
+                <button id="closeGraphProjectLauncherButton" class="iconButton graphProjectClose" type="button" aria-label="Return to graph" title="Return to graph"></button>
               </div>
 
               <div class="launchActions graphProjectActions" aria-label="Project actions">
                 <button id="graphOpenProjectButton" class="launchAction" type="button">
-                  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
-                    <path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
-                    <path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h4"></path>
-                  </svg>
-                  <span>Open project</span>
+                  Open project
                 </button>
                 <button id="graphCreateProjectButton" class="launchAction" type="button">
-                  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
-                    <path d="M12 5v14"></path>
-                    <path d="M5 12h14"></path>
-                    <path d="M4 6h5l2 2h9v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"></path>
-                  </svg>
-                  <span>Create project</span>
+                  Create project
                 </button>
               </div>
 
@@ -154,15 +134,7 @@
                 </label>
               </div>
             </details>
-            <button id="deleteNoteButton" class="iconButton dangerIconButton" type="button" aria-label="Move selection to Trash" title="Move selection to Trash">
-              <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
-                <path d="M3 6h18"></path>
-                <path d="M8 6V4h8v2"></path>
-                <path d="M19 6l-1 14H6L5 6"></path>
-                <path d="M10 11v5"></path>
-                <path d="M14 11v5"></path>
-              </svg>
-            </button>
+            <button id="deleteNoteButton" class="iconButton dangerIconButton" type="button" aria-label="Move selection to Trash" title="Move selection to Trash"></button>
           </div>
         </div>
         <div class="editorWrap">
