@@ -26,6 +26,12 @@ import {
   slugify
 } from "./noteRefs.js";
 import {
+  createAbsolutePositionPatch,
+  findChildPosition,
+  findLooseGridPositions,
+  resolveStoredPosition as resolveStoredGraphPosition
+} from "./graphPositioning.js";
+import {
   loadRecentProjects,
   normalizeRecentProjects,
   projectDisplayPath,
@@ -63,6 +69,16 @@ const GRAPH_PAD = 96;
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
+const POSITIONING_OPTIONS = {
+  levelGap: LEVEL_GAP,
+  nodeGap: NODE_GAP,
+  collisionGap: NODE_GAP,
+  looseGapX: NODE_GAP,
+  looseGapY: LEVEL_GAP,
+  looseMarginX: NODE_GAP * 2,
+  looseColumns: 3,
+  precision: 2
+};
 const PERF_ENABLED =
   window.location.search.includes("perf=1") ||
   window.localStorage.getItem("apex-notes-perf") === "1";
@@ -1245,6 +1261,7 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   const incomingNotes = new Map();
   const added = new Set();
   const changed = new Set();
+  const layoutSnapshot = snapshotGraphPositions();
 
   for (const file of files || []) {
     if (!file || !file.path) continue;
@@ -1279,11 +1296,14 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   rebuildIndex();
   state.validation = validateNotes();
   state.manualPositions = pruneStoredPositions(state.manualPositions);
+  freezeGraphPositions(layoutSnapshot, { excludePaths: deletedSet });
+  seedAddedNotePositions(added, layoutSnapshot);
   normalizeSelectionAfterNotesChanged();
 
   renderCurrentSelection(liveUpdateStatus(added.size, changed.size, deletedSet.size));
   renderNewNoteParents();
   renderGraph({ preserveView: true });
+  void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, added)));
   updateSourceStatus();
   maybeShowHierarchyPrompt();
   renderValidationStatus();
@@ -2424,6 +2444,8 @@ async function deleteGraphSelection() {
     if (state.dirty) return false;
   }
 
+  const layoutSnapshot = snapshotGraphPositions();
+
   try {
     await invokeNative("trash_notes", {
       notesPath: state.notesPath,
@@ -2445,11 +2467,15 @@ async function deleteGraphSelection() {
     state.dirty = false;
     rebuildIndex();
     state.validation = validateNotes();
-    void savePositionPatch(positionRemovalPatch(deletedPaths));
+    freezeGraphPositions(layoutSnapshot, { excludePaths: deletedPaths });
     await updateManifestFile();
     renderCurrentSelection(`Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
+    void savePositionPatch({
+      ...positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)),
+      ...positionRemovalPatch(deletedPaths)
+    });
     updateSourceStatus();
     renderValidationStatus();
     return true;
@@ -2492,6 +2518,7 @@ async function autosaveSelectedNote() {
   const raw = composeRaw(note, getEditorBody(), getInfoValues(note));
   const path = note.path;
   const token = ++state.saveToken;
+  const layoutSnapshot = snapshotGraphPositions();
   setStatus("Saving...");
 
   try {
@@ -2515,12 +2542,14 @@ async function autosaveSelectedNote() {
       rebuildIndex();
       state.validation = validateNotes();
       state.selectedPath = updated.path;
+      freezeGraphPositions(layoutSnapshot);
 
       els.noteTitle.textContent = updated.title;
       els.notePath.textContent = updated.path;
       renderInfoPanel(updated);
       renderNewNoteParents();
       renderGraph({ preserveView: true });
+      void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
       renderValidationStatus();
     } else {
       patchBodyOnlyNote(note, updated);
@@ -2962,7 +2991,7 @@ function graphNodeTitle(note, { loose = false } = {}) {
     return `${note.title} - drag from this node to connect.`;
   }
   if (loose) {
-    return `${note.title} - loose note. Drag onto another note to connect.`;
+    return `${note.title} - loose note. Click to open, drag to move, double-click to connect.`;
   }
   return `${note.title} - click to open, drag to move.`;
 }
@@ -3046,22 +3075,110 @@ function applyManualPositions(positions) {
 }
 
 function resolveStoredPosition(path, stored, autoPositions = state.autoPositions) {
-  if (!stored) return null;
-  const base = autoPositions.get(path);
-  if (Number.isFinite(stored.dx) || Number.isFinite(stored.dy)) {
-    if (!base) return null;
-    return {
-      x: round(base.x + (Number(stored.dx) || 0)),
-      y: round(base.y + (Number(stored.dy) || 0))
-    };
+  return resolveStoredGraphPosition(path, stored, autoPositions, POSITIONING_OPTIONS);
+}
+
+function snapshotGraphPositions(paths = state.notePaths) {
+  const snapshot = new Map();
+  const targetPaths = paths instanceof Set ? paths : new Set(paths || []);
+
+  for (const path of targetPaths) {
+    const position = state.positions.get(path);
+    if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) continue;
+    snapshot.set(path, absolutePosition(position));
   }
-  if (Number.isFinite(stored.x) && Number.isFinite(stored.y)) {
-    return {
-      x: round(stored.x),
-      y: round(stored.y)
-    };
+
+  return snapshot;
+}
+
+function freezeGraphPositions(snapshot, { excludePaths = new Set() } = {}) {
+  for (const [path, position] of snapshot.entries()) {
+    if (!state.notePaths.has(path) || excludePaths.has(path)) continue;
+    state.manualPositions[path] = absolutePosition(position);
   }
-  return null;
+}
+
+function seedAddedNotePositions(paths, layoutSnapshot = new Map()) {
+  const addedPaths = paths instanceof Set ? [...paths] : [...(paths || [])];
+  if (!addedPaths.length) return;
+
+  const occupied = new Map();
+  for (const [path, position] of layoutSnapshot.entries()) {
+    if (state.notePaths.has(path)) {
+      occupied.set(path, absolutePosition(position));
+    }
+  }
+
+  for (const [path, stored] of Object.entries(state.manualPositions)) {
+    const resolved = resolveStoredPosition(path, stored, state.autoPositions);
+    if (resolved && state.notePaths.has(path)) {
+      occupied.set(path, absolutePosition(resolved));
+    }
+  }
+
+  const sortedAddedPaths = addedPaths
+    .filter((path) => state.notePaths.has(path))
+    .sort((a, b) => {
+      const noteA = state.byPath.get(a);
+      const noteB = state.byPath.get(b);
+      const levelA = noteA && Number.isFinite(noteA.level) ? noteA.level : Number.MAX_SAFE_INTEGER;
+      const levelB = noteB && Number.isFinite(noteB.level) ? noteB.level : Number.MAX_SAFE_INTEGER;
+      return levelA - levelB || compareText(a, b);
+    });
+
+  const loosePaths = [];
+
+  for (const path of sortedAddedPaths) {
+    if (occupied.has(path)) continue;
+    const note = state.byPath.get(path);
+    if (!note) continue;
+    const parentPath = note.parentNote && note.parentNote.path;
+    if (!parentPath || !occupied.has(parentPath)) {
+      loosePaths.push(path);
+      continue;
+    }
+
+    const position = positionForAddedNote(note, occupied);
+    state.manualPositions[path] = position;
+    occupied.set(path, position);
+  }
+
+  const loosePatch = findLooseGridPositions(loosePaths, occupied, POSITIONING_OPTIONS);
+  for (const path of loosePaths) {
+    const position = loosePatch[path] || absolutePosition({ x: GRAPH_PAD, y: GRAPH_PAD });
+    state.manualPositions[path] = position;
+    occupied.set(path, position);
+  }
+}
+
+function positionForAddedNote(note, occupied) {
+  const parentPath = note.parentNote && note.parentNote.path;
+  const childPosition = parentPath
+    ? findChildPosition(parentPath, occupied, POSITIONING_OPTIONS)
+    : null;
+
+  if (childPosition) {
+    return childPosition;
+  }
+
+  const loosePatch = findLooseGridPositions([note.path], occupied, POSITIONING_OPTIONS);
+  return loosePatch[note.path] || absolutePosition({ x: GRAPH_PAD, y: GRAPH_PAD });
+}
+
+function layoutPathsFromSnapshot(snapshot, extraPaths = []) {
+  return [
+    ...new Set([
+      ...snapshot.keys(),
+      ...(extraPaths instanceof Set ? extraPaths : extraPaths || [])
+    ])
+  ].filter((path) => state.notePaths.has(path));
+}
+
+function absolutePosition(position) {
+  return {
+    x: round(position.x),
+    y: round(position.y)
+  };
 }
 
 function buildSquareGridPositions(notes) {
@@ -3718,10 +3835,6 @@ function startGraphPointerDown(event) {
         state.suppressGraphCreateUntil = Date.now() + 650;
         return;
       }
-      if (isLooseHierarchyNote(note)) {
-        startLooseRope(event, note, group);
-        return;
-      }
       startNodeDrag(event, note, group);
       return;
     }
@@ -3834,11 +3947,6 @@ function startMarqueeSelection(event) {
   };
   els.graph.classList.add("isSelecting");
   els.graph.setPointerCapture(event.pointerId);
-}
-
-function startLooseRope(event, note, group) {
-  if (event.button !== 0 || !isLooseHierarchyNote(note)) return;
-  startNodeRope(event, note, group, getNodeRopeMode(note));
 }
 
 function startArmedRope(event, note, group) {
@@ -3971,7 +4079,7 @@ function continueInteraction(event) {
         y: round(startPosition.y + deltaY)
       };
       state.positions.set(path, position);
-      state.manualPositions[path] = manualDeltaForPosition(path, position);
+      state.manualPositions[path] = absolutePosition(position);
       changedPaths.add(path);
     }
     updateGraphGeometryForPaths(changedPaths);
@@ -4380,6 +4488,7 @@ async function createLooseGraphNote(title, position) {
     if (state.dirty) return false;
   }
 
+  const layoutSnapshot = snapshotGraphPositions();
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
@@ -4408,11 +4517,12 @@ async function createLooseGraphNote(title, position) {
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
+    freezeGraphPositions(layoutSnapshot);
     await updateManifestFile();
     renderSelectedNote("Loose note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    await savePositionPatch(positionPatchForPaths([path]));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, [path])));
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
@@ -4431,12 +4541,15 @@ async function connectLooseNoteToParent(child, parent) {
     return false;
   }
 
+  let layoutSnapshot = snapshotGraphPositions();
+
   if (state.dirty) {
     await flushAutosave();
     if (state.dirty) return false;
     child = state.byPath.get(child.path);
     parent = state.byPath.get(parent.path);
     if (!child || !parent) return false;
+    layoutSnapshot = snapshotGraphPositions();
   }
 
   const parentPlan = getParentConnectionPlan(parent, child);
@@ -4493,9 +4606,11 @@ async function connectLooseNoteToParent(child, parent) {
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
+    freezeGraphPositions(layoutSnapshot);
     renderSelectedNote(`Connected ${child.title} under ${parent.title}`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
+    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
@@ -4510,12 +4625,15 @@ async function connectLooseNoteToParent(child, parent) {
 async function connectNoteReference(source, target) {
   if (!source || !target || source.path === target.path || !hasWritableWorkspace()) return false;
 
+  let layoutSnapshot = snapshotGraphPositions();
+
   if (state.dirty) {
     await flushAutosave();
     if (state.dirty) return false;
     source = state.byPath.get(source.path);
     target = state.byPath.get(target.path);
     if (!source || !target) return false;
+    layoutSnapshot = snapshotGraphPositions();
   }
 
   if (hasBodyReference(source, target)) {
@@ -4545,9 +4663,11 @@ async function connectNoteReference(source, target) {
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
+    freezeGraphPositions(layoutSnapshot);
     renderSelectedNote(`Linked ${source.title} to ${target.title}`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
+    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
@@ -4852,6 +4972,9 @@ async function createNotesBatch(specs, statusMessage) {
     return false;
   }
 
+  const layoutSnapshot = snapshotGraphPositions();
+  const createdPaths = specs.map((spec) => spec.path);
+
   try {
     await invokeNative("create_notes", {
       notesPath: state.notesPath,
@@ -4879,11 +5002,13 @@ async function createNotesBatch(specs, statusMessage) {
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
-    void savePositionPatch(positionPatchForPaths(specs.map((spec) => spec.path)));
+    freezeGraphPositions(layoutSnapshot);
+    seedAddedNotePositions(createdPaths, layoutSnapshot);
     await updateManifestFile();
     renderCurrentSelection(statusMessage);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
+    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, createdPaths)));
     updateSourceStatus();
     renderValidationStatus();
     return true;
@@ -5098,27 +5223,7 @@ async function savePositionPatch(patch) {
 }
 
 function positionPatchForPaths(paths) {
-  const patch = {};
-  for (const path of paths || []) {
-    const position = state.positions.get(path);
-    if (!position) continue;
-    patch[path] = manualDeltaForPosition(path, position);
-  }
-  return patch;
-}
-
-function manualDeltaForPosition(path, position) {
-  const auto = state.autoPositions.get(path);
-  if (!auto) {
-    return {
-      x: round(position.x),
-      y: round(position.y)
-    };
-  }
-  return {
-    dx: round(position.x - auto.x),
-    dy: round(position.y - auto.y)
-  };
+  return createAbsolutePositionPatch(paths, state.positions, POSITIONING_OPTIONS);
 }
 
 function positionRemovalPatch(paths) {
@@ -5283,6 +5388,7 @@ async function createNewNote(event) {
     parent,
     body: `# ${title}\n`
   });
+  const layoutSnapshot = snapshotGraphPositions();
 
   try {
     await invokeNative("create_note", {
@@ -5298,10 +5404,13 @@ async function createNewNote(event) {
     state.dirty = false;
     rebuildIndex();
     state.validation = validateNotes();
+    freezeGraphPositions(layoutSnapshot);
+    seedAddedNotePositions([path], layoutSnapshot);
     await updateManifestFile();
     renderSelectedNote("Note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
+    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, [path])));
     updateSourceStatus();
     renderValidationStatus();
     closeNewNoteDialog();
