@@ -60,7 +60,6 @@ const HIT_RADIUS = 22;
 const LEVEL_GAP = 138;
 const NODE_GAP = 168;
 const GRAPH_PAD = 96;
-const PENDING_PATH = "__pending_node__";
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
@@ -130,12 +129,14 @@ const state = {
   hierarchyPromptShown: false,
   hierarchyPromptText: "",
   pendingCreatePoint: null,
-  pendingNode: null,
   nodeClipboard: null,
   ropeElement: null,
   ropeTargetPath: null,
   selectionRectElement: null,
   lastGraphPoint: null,
+  lastNodePointerDown: null,
+  suppressGraphCreateUntil: 0,
+  armedRope: null,
   view: {
     x: 0,
     y: 0,
@@ -416,7 +417,7 @@ function bindEvents() {
   els.infoTitle.addEventListener("input", onInfoChanged);
   els.infoParent.addEventListener("change", onInfoChanged);
   els.deleteNoteButton.addEventListener("click", deleteSelectedNote);
-  els.graphCreatePopover.addEventListener("submit", createPendingGraphNode);
+  els.graphCreatePopover.addEventListener("submit", createGraphNoteFromPopover);
   els.cancelGraphCreateButton.addEventListener("click", closeGraphCreatePopover);
 
   els.searchInput.addEventListener("input", () => {
@@ -427,7 +428,7 @@ function bindEvents() {
   });
 
   els.graph.addEventListener("wheel", onGraphWheel, { passive: false });
-  els.graph.addEventListener("dblclick", openGraphCreatePopover);
+  els.graph.addEventListener("dblclick", onGraphDoubleClick);
   els.graph.addEventListener("pointerdown", startGraphPointerDown);
   els.graph.addEventListener("pointerover", onGraphPointerOver);
   els.graph.addEventListener("pointerout", onGraphPointerOut);
@@ -441,6 +442,7 @@ function bindEvents() {
   els.graph.addEventListener("dragleave", onGraphDragLeave);
   els.graph.addEventListener("drop", onGraphDrop);
   document.addEventListener("keydown", onDocumentKeydown);
+  document.addEventListener("pointerdown", onDocumentPointerDown);
   window.addEventListener("resize", scheduleResizeRender);
   document.addEventListener("fullscreenchange", syncGraphFullscreenState);
   window.addEventListener("keydown", (event) => {
@@ -454,11 +456,9 @@ function bindEvents() {
         event.preventDefault();
         setStatus("New graph note canceled");
       }
-
-      if (state.pendingNode && !state.activeInteraction) {
-        state.pendingNode = null;
-        requestGraphRender({ preserveView: true });
-        setStatus("New graph node canceled");
+      if (state.armedRope) {
+        event.preventDefault();
+        clearArmedRope("Connection canceled");
       }
       if (state.graphFullscreenFallback && document.body.classList.contains("graphFullscreen") && !document.fullscreenElement) {
         event.preventDefault();
@@ -818,9 +818,11 @@ function startEmpty() {
   state.hoveredPath = null;
   state.focusedPath = null;
   state.pendingCreatePoint = null;
-  state.pendingNode = null;
   state.nodeClipboard = null;
   state.lastGraphPoint = null;
+  state.lastNodePointerDown = null;
+  state.suppressGraphCreateUntil = 0;
+  state.armedRope = null;
   state.activeInteraction = null;
   cancelQueuedInteraction();
   state.graphViewport = null;
@@ -1435,10 +1437,12 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.hierarchyPromptText = workspace.hierarchyPromptText || "";
   state.view = workspace.view ? { ...workspace.view } : { x: 0, y: 0, scale: 1 };
   state.pendingCreatePoint = null;
-  state.pendingNode = null;
   state.activeInteraction = null;
   state.hoveredPath = null;
   state.focusedPath = null;
+  state.lastNodePointerDown = null;
+  state.suppressGraphCreateUntil = 0;
+  state.armedRope = null;
   state.autoPositions = new Map();
   state.positions = new Map();
   state.nodeElements = new Map();
@@ -1820,7 +1824,56 @@ function hasUsableHierarchySlot(note) {
 }
 
 function isLooseHierarchyNote(note) {
-  return Boolean(note && (!note.hasFrontmatter || !note.hasTitle || !hasUsableHierarchySlot(note)));
+  return isIncompleteHierarchyNote(note) || isParentlessLooseRoot(note);
+}
+
+function isIncompleteHierarchyNote(note) {
+  return Boolean(
+    note &&
+    (
+      !note.hasFrontmatter ||
+      !note.hasTitle ||
+      !hasUsableHierarchySlot(note)
+    )
+  );
+}
+
+function isParentlessLooseRoot(note) {
+  return Boolean(
+    note &&
+    isValidApex(note) &&
+    !note.parentNote &&
+    !(Array.isArray(note.children) && note.children.length) &&
+    countParentlessHierarchyNotes() > 1
+  );
+}
+
+function countParentlessHierarchyNotes() {
+  return state.notes.filter((note) => isValidParentlessHierarchyNote(note)).length;
+}
+
+function isValidParentlessHierarchyNote(note) {
+  return Boolean(
+    note &&
+    note.hasFrontmatter &&
+    note.hasTitle &&
+    note.hasLevel &&
+    Number.isFinite(note.level) &&
+    !cleanWikiRef(note.parentRef)
+  );
+}
+
+function shouldCreateHierarchyConnection(note) {
+  if (!note) return false;
+  if (isIncompleteHierarchyNote(note)) return true;
+  if (!cleanWikiRef(note.parentRef)) {
+    return countParentlessHierarchyNotes() > 1;
+  }
+  return false;
+}
+
+function getNodeRopeMode(note) {
+  return shouldCreateHierarchyConnection(note) ? "connect" : "reference";
 }
 
 function maybeShowHierarchyPrompt() {
@@ -2091,7 +2144,6 @@ async function selectNote(path, force = false) {
 async function setGraphSelection(paths, { openSingle = false, statusMessage = "" } = {}) {
   const nextSelection = new Set(
     [...paths]
-      .filter((path) => path !== PENDING_PATH)
       .filter((path) => state.byPath.has(path))
   );
 
@@ -2251,6 +2303,22 @@ function isDescendant(candidate, parent) {
     current = current.parentNote;
   }
   return false;
+}
+
+function collectDescendants(parent) {
+  const descendants = [];
+  const stack = [...(parent.children || [])];
+  const seen = new Set([parent.path]);
+
+  while (stack.length) {
+    const note = stack.shift();
+    if (!note || seen.has(note.path)) continue;
+    seen.add(note.path);
+    descendants.push(note);
+    stack.push(...(note.children || []));
+  }
+
+  return descendants;
 }
 
 function onInfoChanged() {
@@ -2563,18 +2631,18 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   state.edgeElementsByPath = new Map();
   state.ropeElement = null;
   state.ropeTargetPath = null;
+  state.armedRope = state.armedRope && state.byPath.has(state.armedRope.sourcePath)
+    ? state.armedRope
+    : null;
   state.selectionRectElement = null;
 
   const notes = getRenderableNotes();
   state.positions = buildPositions(notes);
-  if (state.pendingNode) {
-    state.positions.set(PENDING_PATH, state.pendingNode.position);
-  }
   state.graphBounds = getGraphBounds(state.positions);
   state.spatialIndex = buildSpatialIndex(notes);
   state.labelVisibilityKey = "";
 
-  if (!notes.length && !state.pendingNode) {
+  if (!notes.length) {
     els.graph.appendChild(canvas);
     const empty = document.createElementNS("http://www.w3.org/2000/svg", "text");
     empty.setAttribute("class", "emptyGraphText");
@@ -2622,10 +2690,6 @@ function renderGraph({ preserveView } = { preserveView: true }) {
 
   for (const note of notes) {
     renderGraphNode(fragment, note);
-  }
-
-  if (state.pendingNode) {
-    renderPendingNode(fragment);
   }
 
   canvas.appendChild(fragment);
@@ -2727,7 +2791,6 @@ function updateGraphSelection(previousPaths, nextPaths) {
 
 function applyGraphDimming() {
   for (const [path, group] of state.nodeElements.entries()) {
-    if (path === PENDING_PATH) continue;
     const note = state.byPath.get(path);
     if (note) {
       group.classList.toggle("dimmed", isDimmed(note));
@@ -2854,6 +2917,7 @@ function renderGraphNode(canvas, note) {
   if (state.selectedPaths.has(note.path)) classes.push("selected");
   if (isDimmed(note)) classes.push("dimmed");
   if (loose) classes.push("looseNode");
+  if (state.armedRope && state.armedRope.sourcePath === note.path) classes.push("ropeArmed");
   group.setAttribute("class", classes.join(" "));
   group.style.setProperty("--level-color", getLevelColor(note.level));
   group.setAttribute("tabindex", "0");
@@ -2862,9 +2926,7 @@ function renderGraphNode(canvas, note) {
   group.setAttribute("aria-label", graphNodeAriaLabel(note, { loose }));
   group.setAttribute(
     "title",
-    loose
-      ? `${note.title} - loose note. Drag onto another note to connect.`
-      : `${note.title} - click to open, drag to move.`
+    graphNodeTitle(note, { loose })
   );
   group.setAttribute("data-path", note.path);
 
@@ -2885,38 +2947,24 @@ function renderGraphNode(canvas, note) {
   state.nodeElements.set(note.path, group);
 }
 
-function renderPendingNode(canvas) {
-  const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-  group.setAttribute("class", "node pendingNode");
-  group.style.setProperty("--level-color", "var(--purple)");
-  group.setAttribute("tabindex", "0");
-  group.setAttribute("role", "button");
-  group.setAttribute("aria-label", `New note ${state.pendingNode.title}. Drag the rope onto a parent note.`);
-  group.setAttribute("title", "Drag the rope onto a parent note");
-  group.setAttribute("data-path", PENDING_PATH);
-
-  const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-  hit.setAttribute("class", "nodeHit");
-  hit.setAttribute("r", String(HIT_RADIUS + 4));
-  group.appendChild(hit);
-
-  const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-  dot.setAttribute("class", "nodeDot pendingDot");
-  dot.setAttribute("r", String(SELECTED_DOT_RADIUS));
-  group.appendChild(dot);
-
-  appendNodeLabel(group, state.pendingNode.title, "nodeLabel pendingLabel");
-  canvas.appendChild(group);
-  state.nodeElements.set(PENDING_PATH, group);
-}
-
 function graphNodeAriaLabel(note, { loose = false } = {}) {
   const parts = [note.title];
   parts.push(Number.isFinite(note.level) ? `level ${note.level}` : "no level");
   if (loose) parts.push("loose note");
+  if (state.armedRope && state.armedRope.sourcePath === note.path) parts.push("connection ready");
   if (state.selectedPaths.has(note.path)) parts.push("selected");
   if (isSearchMatched(note)) parts.push("search match");
   return parts.join(", ");
+}
+
+function graphNodeTitle(note, { loose = false } = {}) {
+  if (state.armedRope && state.armedRope.sourcePath === note.path) {
+    return `${note.title} - drag from this node to connect.`;
+  }
+  if (loose) {
+    return `${note.title} - loose note. Drag onto another note to connect.`;
+  }
+  return `${note.title} - click to open, drag to move.`;
 }
 
 function appendNodeLabel(group, title, className) {
@@ -2942,9 +2990,9 @@ function shouldRenderInitialNodeLabel(note) {
 
 function ensureGraphNodeLabel(group, path) {
   if (group.querySelector(".nodeLabel")) return;
-  const note = path === PENDING_PATH ? state.pendingNode : state.byPath.get(path);
+  const note = state.byPath.get(path);
   if (!note) return;
-  appendNodeLabel(group, note.title, path === PENDING_PATH ? "nodeLabel pendingLabel" : "nodeLabel");
+  appendNodeLabel(group, note.title, "nodeLabel");
 }
 
 function removeGraphNodeLabel(group) {
@@ -2965,7 +3013,7 @@ function buildPositions(notes) {
     looseGapX: NODE_GAP,
     looseGapY: LEVEL_GAP,
     looseMarginX: NODE_GAP * 2,
-    looseColumns: Math.max(1, Math.ceil(Math.sqrt(notes.filter(isLooseHierarchyNote).length || 1))),
+    looseColumns: Math.max(1, Math.ceil(Math.sqrt(notes.filter(isIncompleteHierarchyNote).length || 1))),
     barycentricSweeps: 3,
     referenceRelaxation: true,
     referenceIterations: state.largeGraphMode ? 4 : 6,
@@ -3345,10 +3393,9 @@ function updateLabelVisibility({ force = false } = {}) {
 
   if (!state.largeGraphMode) {
     for (const [path, group] of state.nodeElements.entries()) {
-      const visible = path !== PENDING_PATH || Boolean(state.pendingNode);
-      if (visible) ensureGraphNodeLabel(group, path);
-      group.classList.toggle("label-hidden", !visible);
-      group.classList.toggle("label-visible", visible);
+      ensureGraphNodeLabel(group, path);
+      group.classList.toggle("label-hidden", false);
+      group.classList.toggle("label-visible", true);
     }
     state.labelVisibility = null;
     state.labelVisibilityKey = cacheKey;
@@ -3361,7 +3408,7 @@ function updateLabelVisibility({ force = false } = {}) {
   state.labelVisibilityKey = cacheKey;
 
   for (const [path, group] of state.nodeElements.entries()) {
-    const visible = path === PENDING_PATH || labelVisibility.visiblePaths.has(path);
+    const visible = labelVisibility.visiblePaths.has(path);
     if (visible) {
       ensureGraphNodeLabel(group, path);
     } else {
@@ -3408,8 +3455,7 @@ function buildApproxLabelRectangles(notes) {
 }
 
 function getLabelVisibilityKey() {
-  const pendingKey = state.pendingNode ? "pending" : "settled";
-  const sizeKey = `${state.nodeElements.size}:${state.sortedNotes.length}:${pendingKey}`;
+  const sizeKey = `${state.nodeElements.size}:${state.sortedNotes.length}`;
   if (!state.largeGraphMode) return `small:${sizeKey}`;
 
   const policy = getLabelVisibilityPolicy(state.view.scale);
@@ -3500,7 +3546,7 @@ function zoomAtPoint(clientX, clientY, factor) {
 }
 
 function fitGraphViewFromControl() {
-  if (!state.notes.length && !state.pendingNode) {
+  if (!state.notes.length) {
     setStatus(hasWritableWorkspace() ? "Create a note to fit the graph" : "Open or create a folder to fit the graph");
     return;
   }
@@ -3539,7 +3585,7 @@ function applyViewTransform(animate = false) {
 }
 
 function syncFitViewButton() {
-  const hasGraphContent = state.notes.length > 0 || Boolean(state.pendingNode);
+  const hasGraphContent = state.notes.length > 0;
   const label = hasGraphContent
     ? "Fit graph to view"
     : (hasWritableWorkspace() ? "Create a note before fitting the graph" : "Open or create a folder before fitting the graph");
@@ -3550,7 +3596,7 @@ function syncFitViewButton() {
 
 function onGraphPointerOver(event) {
   const path = getNodePathFromEvent(event);
-  if (!path || path === PENDING_PATH || path === state.hoveredPath) return;
+  if (!path || path === state.hoveredPath) return;
   state.hoveredPath = path;
   scheduleLabelVisibilityRefresh({ force: true });
   scheduleLargeGraphRefresh();
@@ -3570,7 +3616,7 @@ function onGraphPointerOut(event) {
 
 function onGraphFocusIn(event) {
   const path = getNodePathFromEvent(event);
-  if (!path || path === PENDING_PATH || path === state.focusedPath) return;
+  if (!path || path === state.focusedPath) return;
   state.focusedPath = path;
   scheduleLabelVisibilityRefresh({ force: true });
   scheduleLargeGraphRefresh();
@@ -3588,6 +3634,46 @@ function getNodePathFromEvent(event) {
   const group = event.target.closest ? event.target.closest(".node") : null;
   if (!group || !els.graph.contains(group)) return null;
   return group.getAttribute("data-path");
+}
+
+function getNodePathAtEvent(event) {
+  const path = getNodePathFromEvent(event);
+  if (path && state.byPath.has(path)) return path;
+
+  const recent = state.lastNodePointerDown;
+  if (
+    recent &&
+    Date.now() - recent.time < 650 &&
+    Math.hypot(event.clientX - recent.clientX, event.clientY - recent.clientY) <= HIT_RADIUS + 18 &&
+    state.byPath.has(recent.path)
+  ) {
+    return recent.path;
+  }
+
+  const target = findRopeTarget(eventToGraphPoint(event));
+  return target ? target.path : null;
+}
+
+function onGraphDoubleClick(event) {
+  const nodePath = getNodePathAtEvent(event);
+  if (nodePath) {
+    event.preventDefault();
+    event.stopPropagation();
+    state.suppressGraphCreateUntil = Date.now() + 650;
+    const note = state.byPath.get(nodePath);
+    if (!state.activeInteraction && note) {
+      armNodeRope(note);
+    }
+    return;
+  }
+
+  if (Date.now() < state.suppressGraphCreateUntil) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
+  void openGraphCreatePopover(event);
 }
 
 function focusGraph() {
@@ -3608,13 +3694,30 @@ function startGraphPointerDown(event) {
   const group = event.target.closest ? event.target.closest(".node") : null;
   if (group && els.graph.contains(group)) {
     const path = group.getAttribute("data-path");
-    if (path === PENDING_PATH) {
-      startPendingRope(event, group);
-      return;
-    }
-
     const note = state.byPath.get(path);
     if (note) {
+      state.lastNodePointerDown = {
+        path: note.path,
+        time: Date.now(),
+        clientX: event.clientX,
+        clientY: event.clientY
+      };
+      if (state.armedRope) {
+        if (state.armedRope.sourcePath === note.path) {
+          startArmedRope(event, note, group);
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        clearArmedRope("Connection canceled");
+        return;
+      }
+      if (isNodeConnectionGesture(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        state.suppressGraphCreateUntil = Date.now() + 650;
+        return;
+      }
       if (isLooseHierarchyNote(note)) {
         startLooseRope(event, note, group);
         return;
@@ -3622,6 +3725,13 @@ function startGraphPointerDown(event) {
       startNodeDrag(event, note, group);
       return;
     }
+  }
+
+  if (state.armedRope && event.button === 0) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearArmedRope("Connection canceled");
+    return;
   }
 
   if (shouldStartMarqueeSelection(event)) {
@@ -3637,7 +3747,7 @@ function onGraphKeydown(event) {
   const group = event.target.closest ? event.target.closest(".node") : null;
   if (!group || !els.graph.contains(group)) return;
   const path = group.getAttribute("data-path");
-  if (!path || path === PENDING_PATH) return;
+  if (!path) return;
   event.preventDefault();
   selectNote(path);
 }
@@ -3667,8 +3777,12 @@ function wantsGraphPan(event) {
   return event.button === 1 || (event.button === 0 && event.altKey);
 }
 
+function isNodeConnectionGesture(event) {
+  return event.button === 0 && event.detail >= 2;
+}
+
 function startNodeDrag(event, note, group) {
-  if (event.button !== 0 || state.pendingNode) return;
+  if (event.button !== 0) return;
   event.preventDefault();
   event.stopPropagation();
   closeGraphCreatePopover();
@@ -3701,7 +3815,7 @@ function startNodeDrag(event, note, group) {
 }
 
 function startMarqueeSelection(event) {
-  if (event.button !== 0 || state.pendingNode) return;
+  if (event.button !== 0) return;
   event.preventDefault();
   closeGraphCreatePopover();
 
@@ -3722,33 +3836,19 @@ function startMarqueeSelection(event) {
   els.graph.setPointerCapture(event.pointerId);
 }
 
-function startPendingRope(event, group) {
-  if (event.button !== 0 || !state.pendingNode) return;
-  event.preventDefault();
-  event.stopPropagation();
-
-  const start = state.positions.get(PENDING_PATH);
-  const current = eventToGraphPoint(event);
-  state.activeInteraction = {
-    type: "rope",
-    mode: "pending",
-    pointerId: event.pointerId,
-    sourcePath: PENDING_PATH,
-    start,
-    current,
-    targetPath: null,
-    startX: event.clientX,
-    startY: event.clientY,
-    moved: true
-  };
-  group.classList.add("ropeSource");
-  ensureRopeElement();
-  updateRopePath(start, current);
-  els.graph.setPointerCapture(event.pointerId);
+function startLooseRope(event, note, group) {
+  if (event.button !== 0 || !isLooseHierarchyNote(note)) return;
+  startNodeRope(event, note, group, getNodeRopeMode(note));
 }
 
-function startLooseRope(event, note, group) {
-  if (event.button !== 0 || state.pendingNode || !isLooseHierarchyNote(note)) return;
+function startArmedRope(event, note, group) {
+  if (event.button !== 0 || !state.armedRope || state.armedRope.sourcePath !== note.path) return;
+  const mode = state.armedRope.mode || getNodeRopeMode(note);
+  clearArmedRope();
+  startNodeRope(event, note, group, mode);
+}
+
+function startNodeRope(event, note, group, mode) {
   event.preventDefault();
   event.stopPropagation();
   closeGraphCreatePopover();
@@ -3758,7 +3858,7 @@ function startLooseRope(event, note, group) {
 
   state.activeInteraction = {
     type: "rope",
-    mode: "connect",
+    mode,
     pointerId: event.pointerId,
     sourcePath: note.path,
     start,
@@ -3770,6 +3870,33 @@ function startLooseRope(event, note, group) {
   };
   group.classList.add("ropeSource");
   els.graph.setPointerCapture(event.pointerId);
+  setStatus(mode === "connect" ? "Drag to a note to set it as parent" : "Drag to a note to add a body link");
+}
+
+function armNodeRope(note) {
+  if (!note) return;
+  clearArmedRope();
+  const mode = getNodeRopeMode(note);
+  state.armedRope = {
+    sourcePath: note.path,
+    mode
+  };
+  const group = state.nodeElements.get(note.path);
+  if (group) group.classList.add("ropeArmed");
+  void selectNote(note.path);
+  setStatus(mode === "connect"
+    ? `Drag from ${note.title} to a note to set it as parent`
+    : `Drag from ${note.title} to a note to add a body link`);
+}
+
+function clearArmedRope(statusMessage = "") {
+  const path = state.armedRope && state.armedRope.sourcePath;
+  if (path) {
+    const group = state.nodeElements.get(path);
+    if (group) group.classList.remove("ropeArmed");
+  }
+  state.armedRope = null;
+  if (statusMessage) setStatus(statusMessage);
 }
 
 function queueInteraction(event) {
@@ -3876,7 +4003,7 @@ function continueInteraction(event) {
     const point = getInteractionGraphPoint(event);
     const distance = Math.hypot(event.clientX - interaction.startX, event.clientY - interaction.startY);
     if (distance > 3) interaction.moved = true;
-    if (!interaction.moved && interaction.mode === "connect") return;
+    if (!interaction.moved) return;
 
     interaction.current = point;
     const target = findRopeTarget(point, interaction.sourcePath);
@@ -3926,26 +4053,28 @@ async function endInteraction(event) {
   }
 
   if (interaction.type === "rope") {
-    const parent = state.byPath.get(interaction.targetPath) || null;
-    const child = state.byPath.get(interaction.sourcePath) || null;
-    const wasClick = interaction.mode === "connect" && !interaction.moved;
+    const target = state.byPath.get(interaction.targetPath) || null;
+    const source = state.byPath.get(interaction.sourcePath) || null;
+    const wasClick = !interaction.moved;
 
     if (wasClick) {
       state.activeInteraction = null;
       clearRopeSource(interaction);
       clearRopeTarget();
-      if (child) await selectNote(child.path);
+      if (source) await selectNote(source.path);
       return;
     }
 
-    if (parent) {
+    if (target) {
       state.activeInteraction = null;
       clearRopeSource(interaction);
       clearRopeTarget();
-      if (interaction.mode === "connect" && child) {
-        await connectLooseNoteToParent(child, parent);
-      } else {
-        await createNoteFromPending(parent);
+      if (source) {
+        if (interaction.mode === "reference") {
+          await connectNoteReference(source, target);
+        } else {
+          await connectLooseNoteToParent(source, target);
+        }
       }
       return;
     }
@@ -3954,7 +4083,7 @@ async function endInteraction(event) {
     state.activeInteraction = null;
     clearRopeSource(interaction);
     clearRopeTarget();
-    setStatus("Drop the rope on a parent node");
+    setStatus(interaction.mode === "reference" ? "Drop the rope on a note" : "Drop the rope on a parent node");
     return;
   }
 
@@ -4000,6 +4129,12 @@ function cancelInteraction() {
   state.activeInteraction = null;
   els.graph.classList.remove("isPanning", "isSelecting", "isDraggingNodes");
   clearRopeTarget();
+}
+
+function onDocumentPointerDown(event) {
+  if (!state.armedRope) return;
+  if (els.graph.contains(event.target)) return;
+  clearArmedRope("Connection canceled");
 }
 
 function releaseGraphPointer(pointerId) {
@@ -4096,7 +4231,7 @@ function pathsInRect(rect) {
 function ensureRopeElement() {
   if (state.ropeElement) return state.ropeElement;
   const rope = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  rope.setAttribute("class", "pendingRope");
+  rope.setAttribute("class", "connectionRope");
   rope.setAttribute("aria-hidden", "true");
   els.graphCanvas.appendChild(rope);
   state.ropeElement = rope;
@@ -4135,7 +4270,7 @@ function animateRopeBack(interaction) {
 }
 
 function findRopeTarget(point, sourcePath = "") {
-  const excludedPaths = new Set([sourcePath, PENDING_PATH].filter(Boolean));
+  const excludedPaths = new Set([sourcePath].filter(Boolean));
 
   if (state.spatialIndex) {
     return queryNearestSpatialNote(point, HIT_RADIUS + 14, excludedPaths);
@@ -4221,7 +4356,7 @@ function closeGraphCreatePopover() {
   state.pendingCreatePoint = null;
 }
 
-async function createPendingGraphNode(event) {
+async function createGraphNoteFromPopover(event) {
   event.preventDefault();
   const title = els.graphNewTitle.value.trim();
   if (!title || !state.pendingCreatePoint) return;
@@ -4234,38 +4369,26 @@ async function createPendingGraphNode(event) {
     await createFirstNote(title, position);
     return;
   }
-  state.pendingNode = {
-    title,
-    position
-  };
   closeGraphCreatePopover();
-  renderGraph({ preserveView: true });
-  setStatus("Drag the purple rope to a parent node");
+  await createLooseGraphNote(title, position);
 }
 
-async function createNoteFromPending(parent) {
-  if (!state.pendingNode || !hasWritableWorkspace()) return;
+async function createLooseGraphNote(title, position) {
+  if (!title || !hasWritableWorkspace()) return false;
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+  }
 
-  const title = state.pendingNode.title;
-  const parentPlan = getParentConnectionPlan(parent, null);
-  const level = parentPlan.level + 1;
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level,
-    parent,
+    level: 0,
+    parent: null,
     body: `# ${title}\n`
   });
 
   try {
-    if (parentPlan.raw !== parent.raw) {
-      await invokeNative("write_note", {
-        notesPath: state.notesPath,
-        path: parent.path,
-        raw: parentPlan.raw
-      });
-    }
-
     await invokeNative("create_note", {
       notesPath: state.notesPath,
       path,
@@ -4273,29 +4396,31 @@ async function createNoteFromPending(parent) {
     });
 
     const note = parseNote(path, raw);
-    if (parentPlan.raw !== parent.raw) {
-      replaceNoteInState(parseNote(parent.path, parentPlan.raw));
-    }
     state.notes.push(note);
     state.notes.sort((a, b) => compareText(a.path, b.path));
     state.selectedPath = note.path;
     state.selectedPaths = new Set([note.path]);
     state.dirty = false;
-    state.manualPositions[path] = state.pendingNode.position;
-    state.pendingNode = null;
+    state.manualPositions[path] = {
+      x: round(position.x),
+      y: round(position.y)
+    };
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
     await updateManifestFile();
-    renderSelectedNote("Note created");
+    renderSelectedNote("Loose note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
     await savePositionPatch(positionPatchForPaths([path]));
     updateSourceStatus();
     renderValidationStatus();
+    saveActiveWorkspaceState();
+    return true;
   } catch (error) {
     setStatus("Could not create note");
     console.error(error);
+    return false;
   }
 }
 
@@ -4315,9 +4440,12 @@ async function connectLooseNoteToParent(child, parent) {
   }
 
   const parentPlan = getParentConnectionPlan(parent, child);
+  const nextChildLevel = parentPlan.level + 1;
+  const currentChildLevel = Number.isFinite(child.level) ? child.level : 0;
+  const levelDelta = nextChildLevel - currentChildLevel;
   const childRaw = composeRaw(child, child.body, {
     title: child.title,
-    level: parentPlan.level + 1,
+    level: nextChildLevel,
     parentRef: `[[${parent.basename}]]`
   });
 
@@ -4327,6 +4455,18 @@ async function connectLooseNoteToParent(child, parent) {
   }
   if (childRaw !== child.raw) {
     writes.push({ path: child.path, raw: childRaw });
+  }
+  if (levelDelta !== 0) {
+    for (const descendant of collectDescendants(child)) {
+      const level = Number.isFinite(descendant.level) ? descendant.level + levelDelta : levelDelta;
+      const raw = composeRaw(descendant, descendant.body, {
+        ...frontmatterValuesForNote(descendant),
+        level
+      });
+      if (raw !== descendant.raw) {
+        writes.push({ path: descendant.path, raw });
+      }
+    }
   }
 
   if (!writes.length) {
@@ -4365,6 +4505,82 @@ async function connectLooseNoteToParent(child, parent) {
     console.error(error);
     return false;
   }
+}
+
+async function connectNoteReference(source, target) {
+  if (!source || !target || source.path === target.path || !hasWritableWorkspace()) return false;
+
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+    source = state.byPath.get(source.path);
+    target = state.byPath.get(target.path);
+    if (!source || !target) return false;
+  }
+
+  if (hasBodyReference(source, target)) {
+    state.selectedPath = source.path;
+    state.selectedPaths = new Set([source.path]);
+    renderSelectedNote(`${source.title} already links to ${target.title}`);
+    renderGraph({ preserveView: true });
+    saveActiveWorkspaceState();
+    return true;
+  }
+
+  const body = appendBodyReference(source.body, target);
+  const raw = composeRaw(source, body, frontmatterValuesForNote(source));
+
+  try {
+    await invokeNative("write_note", {
+      notesPath: state.notesPath,
+      path: source.path,
+      raw
+    });
+
+    replaceNoteInState(parseNote(source.path, raw));
+    state.notes.sort((a, b) => compareText(a.path, b.path));
+    state.selectedPath = source.path;
+    state.selectedPaths = new Set([source.path]);
+    state.dirty = false;
+    rebuildIndex();
+    state.validation = validateNotes();
+    state.manualPositions = pruneStoredPositions(state.manualPositions);
+    renderSelectedNote(`Linked ${source.title} to ${target.title}`);
+    renderNewNoteParents();
+    renderGraph({ preserveView: true });
+    updateSourceStatus();
+    renderValidationStatus();
+    saveActiveWorkspaceState();
+    return true;
+  } catch (error) {
+    setStatus("Could not add body link");
+    console.error(error);
+    return false;
+  }
+}
+
+function hasBodyReference(source, target) {
+  return source.bodyRefs.some((ref) => {
+    const note = resolveWikiNote(ref.ref);
+    return Boolean(note && note.path === target.path);
+  });
+}
+
+function appendBodyReference(body, target) {
+  const ref = `[[${target.basename}]]`;
+  const trimmed = String(body || "").replace(/\s+$/g, "");
+  return `${trimmed}${trimmed ? "\n\n" : ""}${ref}\n`;
+}
+
+function frontmatterValuesForNote(note) {
+  const parentRef = note.parentNote
+    ? `[[${note.parentNote.basename}]]`
+    : cleanWikiRef(note.parentRef);
+  return {
+    title: note.title,
+    level: Number.isFinite(note.level) ? note.level : 0,
+    parentRef: parentRef ? (parentRef.startsWith("[[") ? parentRef : `[[${parentRef}]]`) : null
+  };
 }
 
 function replaceNoteInState(note) {

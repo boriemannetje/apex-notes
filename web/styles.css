@@ -908,7 +908,7 @@ body.graphFullscreen .editorPane {
   stroke-linecap: round;
 }
 
-.pendingRope {
+.connectionRope {
   fill: none;
   stroke: var(--purple);
   stroke-width: 2;
@@ -929,7 +929,7 @@ body.graphFullscreen .editorPane {
   pointer-events: none;
 }
 
-.pendingRope.returning {
+.connectionRope.returning {
   transition: d 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -1016,10 +1016,17 @@ body.graphFullscreen .editorPane {
   stroke-dasharray: 4 4;
 }
 
-.looseNode.ropeSource .nodeDot {
+.node.ropeArmed {
+  cursor: crosshair;
+}
+
+.node.ropeArmed .nodeDot,
+.node.ropeSource .nodeDot {
   fill: var(--purple-soft);
   stroke: var(--purple);
   stroke-width: 2.5;
+  stroke-dasharray: 4 4;
+  filter: drop-shadow(0 0 4px rgba(184, 140, 255, 0.32));
 }
 
 .node.selected .nodeLabel,
@@ -1037,15 +1044,6 @@ body.graphFullscreen .editorPane {
   opacity: 1;
   visibility: visible;
   pointer-events: none;
-}
-
-.pendingNode .nodeDot {
-  fill: var(--purple-soft);
-  stroke: var(--purple);
-}
-
-.pendingNode .nodeLabel {
-  fill: var(--purple);
 }
 
 .ropeTarget .nodeDot {
