@@ -1042,10 +1042,6 @@ body.graphFullscreen .editorPane {
   font-weight: 720;
 }
 
-.looseNode .nodeDot {
-  stroke-dasharray: 4 4;
-}
-
 .node.ropeArmed {
   cursor: crosshair;
 }
@@ -1055,7 +1051,6 @@ body.graphFullscreen .editorPane {
   fill: var(--purple-soft);
   stroke: var(--purple);
   stroke-width: 2.5;
-  stroke-dasharray: 4 4;
   filter: drop-shadow(0 0 4px rgba(184, 140, 255, 0.32));
 }
 
