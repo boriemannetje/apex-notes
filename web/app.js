@@ -2726,7 +2726,10 @@ function renderGraph({ preserveView } = { preserveView: true }) {
 
   for (const referenceEdge of getRenderableReferenceEdges(notes)) {
     const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    edge.setAttribute("class", `edge referenceEdge${referenceEdge.dimmed ? " dimmed" : ""}`);
+    edge.setAttribute(
+      "class",
+      `edge referenceEdge${referenceEdge.dimmed ? " dimmed" : ""}${isReferenceEdgeSelected(referenceEdge, state.selectedPaths) ? " selectedReferenceEdge" : ""}`
+    );
     edge.setAttribute("aria-hidden", "true");
     edge.style.setProperty("--level-color", getLevelColor(referenceEdge.level));
     fragment.appendChild(edge);
@@ -2844,7 +2847,8 @@ function addIncidentGraphEdge(path, edge) {
 function updateGraphSelection(previousPaths, nextPaths) {
   const previous = previousPaths instanceof Set ? previousPaths : new Set([previousPaths].filter(Boolean));
   const next = nextPaths instanceof Set ? nextPaths : new Set([nextPaths].filter(Boolean));
-  for (const path of new Set([...previous, ...next])) {
+  const changedPaths = new Set([...previous, ...next]);
+  for (const path of changedPaths) {
     const group = state.nodeElements.get(path);
     if (!group) continue;
     const isSelected = next.has(path);
@@ -2855,6 +2859,23 @@ function updateGraphSelection(previousPaths, nextPaths) {
       dot.setAttribute("r", String(getNodeSize(path).radius));
     }
   }
+  updateReferenceEdgeSelection(changedPaths, next);
+}
+
+function updateReferenceEdgeSelection(changedPaths, selectedPaths = state.selectedPaths) {
+  const edges = new Set();
+  for (const path of changedPaths) {
+    for (const edge of state.edgeElementsByPath.get(path) || []) {
+      if (edge.type === "reference") edges.add(edge);
+    }
+  }
+  for (const edge of edges) {
+    edge.path.classList.toggle("selectedReferenceEdge", isReferenceEdgeSelected(edge, selectedPaths));
+  }
+}
+
+function isReferenceEdgeSelected(edge, selectedPaths = state.selectedPaths) {
+  return Boolean(edge && (selectedPaths.has(edge.from) || selectedPaths.has(edge.to)));
 }
 
 function applyGraphDimming() {
