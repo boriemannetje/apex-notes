@@ -759,8 +759,42 @@ body.noWorkspace .launchScreen {
 }
 
 .zoomControls #resetViewButton {
+  position: relative;
   width: 34px;
   padding: 0;
+}
+
+.zoomControls #resetViewButton::after {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  z-index: 40;
+  padding: 2px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--muted);
+  content: attr(data-hover-label);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-2px);
+  transition:
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
+  white-space: nowrap;
+}
+
+.zoomControls #resetViewButton:hover::after,
+.zoomControls #resetViewButton:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.zoomControls #resetViewButton:disabled::after {
+  display: none;
 }
 
 .zoomControls #fullscreenGraphButton {
