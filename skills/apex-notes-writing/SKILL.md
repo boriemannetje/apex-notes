@@ -1,15 +1,29 @@
 ---
 name: apex-notes-writing
-description: Use when creating, editing, tagging, or connecting notes for Apex Notes, a Markdown hierarchy app that stores notes under notes/. Enforces required frontmatter, optional parent hierarchy edges, unbounded depth levels, contextual dotted reference links, manifest updates, and the rule that body links are not hierarchy.
+description: Use when creating, editing, importing, deleting, or connecting notes for Apex Notes, a Markdown hierarchy app. Enforces required frontmatter, optional parent hierarchy edges, unbounded depth levels, contextual dotted reference links, manifest updates, and the rule that body links are not hierarchy.
 ---
 
 # Apex Notes Writing
 
 ## Scope
 
-Use this skill whenever writing or changing Markdown notes in a `notes/` folder managed by this app.
+Use this skill whenever writing or changing Markdown notes in a folder managed by this app.
 
-The source of truth is the Markdown files in `notes/`. When a note has a `parent`, the app derives hierarchy from that frontmatter edge and derives the note's true depth from that parent tree. Notes without parents may intentionally exist as loose notes or roots of independent hierarchies.
+The source of truth is the Markdown files in the opened notes folder. In this repository, the bundled `notes/` folder is only neutral sample data for the seed preview. When a note has a `parent`, the app derives hierarchy from that frontmatter edge and derives the note's true depth from that parent tree. Notes without parents may intentionally exist as loose notes or roots of independent hierarchies.
+
+## App Interaction Semantics
+
+These UI gestures reflect the same data model this skill should preserve:
+
+- Click a node to open it.
+- Shift-click a node to add it to or remove it from the current selection.
+- Shift-drag empty graph space to rectangle-select nodes.
+- Dragging a selected node moves the selected group; dragging an unselected node moves only that node.
+- Double-click empty graph space to create a loose note.
+- Double-click a node to arm a connection rope, then drag from that node to a target node.
+- Rope-dragging loose or incomplete notes creates/repairs a `parent` edge; rope-dragging already connected notes adds a contextual body link.
+- Dragging a loose node directly only moves it. It does not connect it.
+- Pasting text into the graph creates a note, and dropping Markdown files imports notes.
 
 ## Required Frontmatter
 
@@ -90,11 +104,11 @@ When adding a note:
 3. Set `parent` to the immediate parent, or to `null` when intentionally loose/root.
 4. Write concise body text with an H1 matching the title when useful.
 5. Add body links only for contextual references.
-6. Update `notes/manifest.json` with the new path relative to `notes/`.
+6. Update `manifest.json` with the new path relative to the opened notes folder.
 
 When deleting a note:
 
-1. Remove it from `notes/manifest.json`.
+1. Remove it from `manifest.json`.
 2. Check for children that use it as `parent` and re-parent them only if the user asked for that structural change.
 
 When editing a note:
@@ -144,7 +158,7 @@ Before finishing, confirm:
 - Parentless notes are intentional loose/root notes, not accidental omissions.
 - Each connected child has one immediate parent.
 - No body link is being used as the hierarchy edge.
-- `notes/manifest.json` changed only if note files were added or deleted.
+- `manifest.json` changed only if note files were added or deleted.
 and verify:
 
 Build hierarchy edges from `parent` frontmatter only, derive levels for connected trees, then verify and repair cached levels plus manifest connectivity.

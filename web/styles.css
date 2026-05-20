@@ -1326,7 +1326,7 @@ h2 {
 }
 
 .graphHelpDialog {
-  width: min(540px, calc(100vw - 28px));
+  width: min(620px, calc(100vw - 28px));
 }
 
 .deleteConfirmDialog {
@@ -1360,17 +1360,56 @@ h2 {
   color: var(--muted);
 }
 
-.interactionList {
+.interactionGuide {
   display: grid;
-  gap: 9px;
-  margin: 0;
-  padding-left: 20px;
-  color: var(--muted);
-  line-height: 1.45;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
-.interactionList li::marker {
+.interactionGroup {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface-2) 78%, transparent);
+}
+
+.interactionGroup h3 {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
   color: var(--fg);
+}
+
+.interactionGroup ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.42;
+}
+
+.interactionGroup li::marker {
+  color: var(--fg);
+}
+
+.interactionGroup kbd {
+  display: inline-block;
+  min-width: 1.35em;
+  padding: 1px 5px;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 0.78em;
+  line-height: 1.35;
+  text-align: center;
+  vertical-align: 0.08em;
 }
 
 .newNoteDialog label {
@@ -1535,6 +1574,10 @@ h2 {
 }
 
 @media (max-width: 520px) {
+  .interactionGuide {
+    grid-template-columns: 1fr;
+  }
+
   .topbar {
     grid-template-columns: 1fr;
     padding: 8px;

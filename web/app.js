@@ -3056,9 +3056,9 @@ function graphNodeTitle(note, { loose = false, nodeSize = getNodeSize(note.path)
     return `${note.title} - ${connectionSummary}. Drag from this node to connect.`;
   }
   if (loose) {
-    return `${note.title} - ${connectionSummary}. Loose note. Click to open, drag to move, double-click to connect.`;
+    return `${note.title} - ${connectionSummary}. Loose note. Click to open, Shift-click to select, drag to move, double-click to connect.`;
   }
-  return `${note.title} - ${connectionSummary}. Click to open, drag to move.`;
+  return `${note.title} - ${connectionSummary}. Click to open, Shift-click to select, drag to move.`;
 }
 
 function appendNodeLabel(group, title, className, nodeSize = getNodeSize(group.dataset.path)) {
@@ -4023,7 +4023,11 @@ function startPan(event) {
 }
 
 function shouldStartMarqueeSelection(event) {
-  return event.button === 0 && (event.shiftKey || event.metaKey || event.ctrlKey);
+  return event.button === 0 && event.shiftKey;
+}
+
+function isAdditiveSelectionEvent(event) {
+  return event.shiftKey;
 }
 
 function wantsGraphPan(event) {
@@ -4041,7 +4045,9 @@ function startNodeDrag(event, note, group) {
   closeGraphCreatePopover();
 
   const point = eventToGraphPoint(event);
-  const dragPaths = state.selectedPaths.has(note.path) ? [...state.selectedPaths] : [note.path];
+  const baseSelection = new Set(state.selectedPaths);
+  const additiveSelection = isAdditiveSelectionEvent(event);
+  const dragPaths = baseSelection.has(note.path) ? [...baseSelection] : [note.path];
   const initialPositions = new Map();
   for (const path of dragPaths) {
     const position = state.positions.get(path);
@@ -4060,6 +4066,8 @@ function startNodeDrag(event, note, group) {
     startY: event.clientY,
     startPoint: point,
     initialPositions,
+    additiveSelection,
+    baseSelection,
     moved: false
   };
   group.classList.add("dragging");
@@ -4081,7 +4089,7 @@ function startMarqueeSelection(event) {
     startX: event.clientX,
     startY: event.clientY,
     moved: false,
-    additive: event.metaKey || event.ctrlKey,
+    additive: isAdditiveSelectionEvent(event),
     baseSelection: new Set(state.selectedPaths),
     previewSelection: new Set(state.selectedPaths)
   };
@@ -4273,8 +4281,17 @@ async function endInteraction(event) {
       void savePositionPatch(positionPatchForPaths(interaction.paths));
     }
     if (!interaction.moved) {
-      if (state.selectedPaths.size > 1 && state.selectedPaths.has(interaction.primaryPath)) {
-        renderCurrentSelection(selectionStatus(state.selectedPaths.size));
+      if (interaction.additiveSelection) {
+        const nextSelection = new Set(interaction.baseSelection || state.selectedPaths);
+        if (nextSelection.has(interaction.primaryPath)) {
+          nextSelection.delete(interaction.primaryPath);
+        } else {
+          nextSelection.add(interaction.primaryPath);
+        }
+        await setGraphSelection(nextSelection, {
+          openSingle: false,
+          statusMessage: selectionStatus(nextSelection.size)
+        });
       } else {
         await selectNote(interaction.primaryPath);
       }

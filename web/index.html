@@ -196,16 +196,42 @@
     <dialog id="graphHelpDialog" class="newNoteDialog graphHelpDialog" aria-labelledby="graphHelpDialogTitle">
       <div class="dialogBody">
         <h2 id="graphHelpDialogTitle">Graph interactions</h2>
-        <ul class="interactionList">
-          <li>Click empty graph space in an empty folder to create the first note.</li>
-          <li>Double-click empty graph space to create a loose note.</li>
-          <li>Drag a dashed loose node onto another node to connect it as a child.</li>
-          <li>Double-click a node to arm a connection rope, then drag from it; click anywhere else to cancel.</li>
-          <li>Click a node to open it. Shift-drag, Command-drag, or Control-drag empty space to select several nodes.</li>
-          <li>Drag selected nodes to move them. Press Backspace or Delete to move selected notes to Trash.</li>
-          <li>Copy, cut, and paste selected nodes. Paste text into the graph to create a note, or drop Markdown files to import them.</li>
-          <li>Scroll to zoom. Alt-drag or middle-drag to pan. Use Fit to center the graph in view.</li>
-        </ul>
+        <div class="interactionGuide">
+          <section class="interactionGroup" aria-labelledby="interactionCreateTitle">
+            <h3 id="interactionCreateTitle">Create</h3>
+            <ul>
+              <li>Click empty graph space in an empty folder to create the first note.</li>
+              <li>Double-click empty graph space to create a loose note.</li>
+              <li>Paste text into the graph to create a note, or drop Markdown files to import them.</li>
+            </ul>
+          </section>
+          <section class="interactionGroup" aria-labelledby="interactionSelectTitle">
+            <h3 id="interactionSelectTitle">Select and move</h3>
+            <ul>
+              <li>Click a node to open it.</li>
+              <li><kbd>Shift</kbd>-click a node to add or remove it from the selection.</li>
+              <li><kbd>Shift</kbd>-drag empty graph space to select a rectangle.</li>
+              <li>Drag selected nodes to move them together.</li>
+            </ul>
+          </section>
+          <section class="interactionGroup" aria-labelledby="interactionConnectTitle">
+            <h3 id="interactionConnectTitle">Connect</h3>
+            <ul>
+              <li>Double-click a node to arm a connection rope, then drag from it to a target node.</li>
+              <li>Loose or incomplete nodes become children; connected nodes add body links.</li>
+              <li>Click away from an armed rope to cancel.</li>
+            </ul>
+          </section>
+          <section class="interactionGroup" aria-labelledby="interactionManageTitle">
+            <h3 id="interactionManageTitle">Manage view</h3>
+            <ul>
+              <li>Drag empty graph space to pan. Scroll to zoom.</li>
+              <li><kbd>Alt</kbd>-drag or middle-drag also pans.</li>
+              <li>Use Fit to center the graph in view.</li>
+              <li>Copy, cut, and paste selected nodes. Press Backspace or Delete to move selected notes to Trash.</li>
+            </ul>
+          </section>
+        </div>
         <div class="dialogActions">
           <button id="closeGraphHelpButton" type="button">Close</button>
         </div>
