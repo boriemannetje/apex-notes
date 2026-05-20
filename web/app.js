@@ -16,6 +16,7 @@ import {
   getLabelVisibilityPolicy,
   prepareLabelVisibilityCache
 } from "./labelVisibility.js";
+import { connectionCountToNodeScale } from "./nodeSizing.js";
 import { createSearchIndex } from "./searchIndex.js";
 import {
   cleanWikiRef,
@@ -61,8 +62,13 @@ ${apexNotesWritingSkill.trim()}`;
 const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 2.2;
 const DOT_RADIUS = 7;
-const SELECTED_DOT_RADIUS = 12;
 const HIT_RADIUS = 22;
+const NODE_LABEL_FONT_SIZE = 12.5;
+const NODE_LABEL_LINE_HEIGHT = 15;
+const NODE_LABEL_Y = 30;
+const NODE_BOUND_X = 92;
+const NODE_BOUND_TOP = 42;
+const NODE_BOUND_BOTTOM = 62;
 const LEVEL_GAP = 138;
 const NODE_GAP = 168;
 const GRAPH_PAD = 96;
@@ -124,6 +130,7 @@ const state = {
   manualPositions: {},
   autoPositions: new Map(),
   positions: new Map(),
+  nodeSizes: new Map(),
   nodeElements: new Map(),
   edgeElements: [],
   edgeElementsByPath: new Map(),
@@ -819,6 +826,7 @@ function startEmpty() {
   state.manualPositions = {};
   state.autoPositions = new Map();
   state.positions = new Map();
+  state.nodeSizes = new Map();
   state.nodeElements = new Map();
   state.edgeElements = [];
   state.edgeElementsByPath = new Map();
@@ -1465,6 +1473,7 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.armedRope = null;
   state.autoPositions = new Map();
   state.positions = new Map();
+  state.nodeSizes = new Map();
   state.nodeElements = new Map();
   state.edgeElements = [];
   state.edgeElementsByPath = new Map();
@@ -2675,6 +2684,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
 
   const notes = getRenderableNotes();
   state.positions = buildPositions(notes);
+  state.nodeSizes = buildNodeSizes(notes);
   state.graphBounds = getGraphBounds(state.positions);
   state.spatialIndex = buildSpatialIndex(notes);
   state.labelVisibilityKey = "";
@@ -2842,7 +2852,7 @@ function updateGraphSelection(previousPaths, nextPaths) {
     group.setAttribute("aria-pressed", String(isSelected));
     const dot = group.querySelector(".nodeDot");
     if (dot) {
-      dot.setAttribute("r", String(isSelected ? SELECTED_DOT_RADIUS : DOT_RADIUS));
+      dot.setAttribute("r", String(getNodeSize(path).radius));
     }
   }
 }
@@ -2972,42 +2982,46 @@ function renderGraphNode(canvas, note) {
   const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
   const classes = ["node"];
   const loose = isLooseHierarchyNote(note);
+  const nodeSize = getNodeSize(note.path);
   if (state.selectedPaths.has(note.path)) classes.push("selected");
   if (isDimmed(note)) classes.push("dimmed");
   if (loose) classes.push("looseNode");
   if (state.armedRope && state.armedRope.sourcePath === note.path) classes.push("ropeArmed");
   group.setAttribute("class", classes.join(" "));
   group.style.setProperty("--level-color", getLevelColor(note.level));
+  group.style.setProperty("--node-scale", String(nodeSize.scale));
   group.setAttribute("tabindex", "0");
   group.setAttribute("role", "button");
   group.setAttribute("aria-pressed", String(state.selectedPaths.has(note.path)));
-  group.setAttribute("aria-label", graphNodeAriaLabel(note, { loose }));
+  group.setAttribute("aria-label", graphNodeAriaLabel(note, { loose, nodeSize }));
   group.setAttribute(
     "title",
-    graphNodeTitle(note, { loose })
+    graphNodeTitle(note, { loose, nodeSize })
   );
   group.setAttribute("data-path", note.path);
+  group.setAttribute("data-connection-count", String(nodeSize.connectionCount));
 
   const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
   hit.setAttribute("class", "nodeHit");
-  hit.setAttribute("r", String(HIT_RADIUS));
+  hit.setAttribute("r", String(nodeSize.hitRadius));
   group.appendChild(hit);
 
   const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
   dot.setAttribute("class", "nodeDot");
-  dot.setAttribute("r", String(state.selectedPaths.has(note.path) ? SELECTED_DOT_RADIUS : DOT_RADIUS));
+  dot.setAttribute("r", String(nodeSize.radius));
   group.appendChild(dot);
 
   if (shouldRenderInitialNodeLabel(note)) {
-    appendNodeLabel(group, note.title, "nodeLabel");
+    appendNodeLabel(group, note.title, "nodeLabel", nodeSize);
   }
   canvas.appendChild(group);
   state.nodeElements.set(note.path, group);
 }
 
-function graphNodeAriaLabel(note, { loose = false } = {}) {
+function graphNodeAriaLabel(note, { loose = false, nodeSize = getNodeSize(note.path) } = {}) {
   const parts = [note.title];
   parts.push(Number.isFinite(note.level) ? `level ${note.level}` : "no level");
+  parts.push(`${nodeSize.connectionCount} connection${nodeSize.connectionCount === 1 ? "" : "s"}`);
   if (loose) parts.push("loose note");
   if (state.armedRope && state.armedRope.sourcePath === note.path) parts.push("connection ready");
   if (state.selectedPaths.has(note.path)) parts.push("selected");
@@ -3015,26 +3029,28 @@ function graphNodeAriaLabel(note, { loose = false } = {}) {
   return parts.join(", ");
 }
 
-function graphNodeTitle(note, { loose = false } = {}) {
+function graphNodeTitle(note, { loose = false, nodeSize = getNodeSize(note.path) } = {}) {
+  const connectionSummary = `${nodeSize.connectionCount} connection${nodeSize.connectionCount === 1 ? "" : "s"}`;
   if (state.armedRope && state.armedRope.sourcePath === note.path) {
-    return `${note.title} - drag from this node to connect.`;
+    return `${note.title} - ${connectionSummary}. Drag from this node to connect.`;
   }
   if (loose) {
-    return `${note.title} - loose note. Click to open, drag to move, double-click to connect.`;
+    return `${note.title} - ${connectionSummary}. Loose note. Click to open, drag to move, double-click to connect.`;
   }
-  return `${note.title} - click to open, drag to move.`;
+  return `${note.title} - ${connectionSummary}. Click to open, drag to move.`;
 }
 
-function appendNodeLabel(group, title, className) {
+function appendNodeLabel(group, title, className, nodeSize = getNodeSize(group.dataset.path)) {
   const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
   label.setAttribute("class", className);
   label.setAttribute("text-anchor", "middle");
-  label.setAttribute("y", "30");
+  label.setAttribute("y", String(round(NODE_LABEL_Y * nodeSize.scale)));
+  label.style.fontSize = `${round(NODE_LABEL_FONT_SIZE * nodeSize.scale)}px`;
   const lines = wrapTitle(title);
   lines.forEach((line, index) => {
     const tspan = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
     tspan.setAttribute("x", "0");
-    tspan.setAttribute("dy", index === 0 ? "0" : "15");
+    tspan.setAttribute("dy", index === 0 ? "0" : String(round(NODE_LABEL_LINE_HEIGHT * nodeSize.scale)));
     tspan.textContent = line;
     label.appendChild(tspan);
   });
@@ -3050,12 +3066,45 @@ function ensureGraphNodeLabel(group, path) {
   if (group.querySelector(".nodeLabel")) return;
   const note = state.byPath.get(path);
   if (!note) return;
-  appendNodeLabel(group, note.title, "nodeLabel");
+  appendNodeLabel(group, note.title, "nodeLabel", getNodeSize(path));
 }
 
 function removeGraphNodeLabel(group) {
   const label = group.querySelector(".nodeLabel");
   if (label) label.remove();
+}
+
+function buildNodeSizes(notes) {
+  const sizes = new Map();
+
+  for (const note of notes) {
+    const connectionCount = getNodeConnectionCount(note);
+    const scale = connectionCountToNodeScale(connectionCount);
+    const radius = round(DOT_RADIUS * scale);
+    sizes.set(note.path, {
+      connectionCount,
+      scale: round(scale),
+      radius,
+      hitRadius: round(Math.max(HIT_RADIUS, radius + 10))
+    });
+  }
+
+  return sizes;
+}
+
+function getNodeConnectionCount(note) {
+  const stats = state.labelStats.get(note.path);
+  const count = stats ? Number(stats.uniqueNeighborCount) : 0;
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+function getNodeSize(path) {
+  return state.nodeSizes.get(path) || {
+    connectionCount: 0,
+    scale: 1,
+    radius: DOT_RADIUS,
+    hitRadius: HIT_RADIUS
+  };
 }
 
 function buildPositions(notes) {
@@ -3245,12 +3294,13 @@ function getGraphBounds(positions) {
   let minY = Infinity;
   let maxY = -Infinity;
 
-  for (const position of positions.values()) {
+  for (const [path, position] of positions.entries()) {
+    const nodeSize = getNodeSize(path);
     count += 1;
-    minX = Math.min(minX, position.x - 92);
-    maxX = Math.max(maxX, position.x + 92);
-    minY = Math.min(minY, position.y - 42);
-    maxY = Math.max(maxY, position.y + 62);
+    minX = Math.min(minX, position.x - NODE_BOUND_X * nodeSize.scale);
+    maxX = Math.max(maxX, position.x + NODE_BOUND_X * nodeSize.scale);
+    minY = Math.min(minY, position.y - NODE_BOUND_TOP * nodeSize.scale);
+    maxY = Math.max(maxY, position.y + NODE_BOUND_BOTTOM * nodeSize.scale);
   }
 
   if (!count) {
@@ -3428,28 +3478,35 @@ function updateGraphEdgeGeometry({ path, from, to, type }) {
   const fromPosition = state.positions.get(from);
   const toPosition = state.positions.get(to);
   if (!fromPosition || !toPosition) return;
-  path.setAttribute("d", type === "reference" ? referenceEdgePath(fromPosition, toPosition) : edgePath(fromPosition, toPosition));
+  const fromRadius = getNodeSize(from).radius;
+  const toRadius = getNodeSize(to).radius;
+  path.setAttribute(
+    "d",
+    type === "reference"
+      ? referenceEdgePath(fromPosition, toPosition, fromRadius, toRadius)
+      : edgePath(fromPosition, toPosition, fromRadius, toRadius)
+  );
 }
 
-function edgePath(from, to) {
+function edgePath(from, to, fromRadius = DOT_RADIUS, toRadius = DOT_RADIUS) {
   const midY = from.y + (to.y - from.y) / 2;
   return [
-    `M ${round(from.x)} ${round(from.y + DOT_RADIUS + 3)}`,
+    `M ${round(from.x)} ${round(from.y + fromRadius + 3)}`,
     `C ${round(from.x)} ${round(midY)}`,
     `${round(to.x)} ${round(midY)}`,
-    `${round(to.x)} ${round(to.y - DOT_RADIUS - 3)}`
+    `${round(to.x)} ${round(to.y - toRadius - 3)}`
   ].join(" ");
 }
 
-function referenceEdgePath(from, to) {
+function referenceEdgePath(from, to, fromRadius = DOT_RADIUS, toRadius = DOT_RADIUS) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const distance = Math.max(1, Math.hypot(dx, dy));
   const normalX = -dy / distance;
   const normalY = dx / distance;
   const lift = clamp(distance * 0.18, 30, 92);
-  const start = endpointToward(from, to, DOT_RADIUS + 9);
-  const end = endpointToward(to, from, DOT_RADIUS + 9);
+  const start = endpointToward(from, to, fromRadius + 9);
+  const end = endpointToward(to, from, toRadius + 9);
   const control = {
     x: (from.x + to.x) / 2 + normalX * lift,
     y: (from.y + to.y) / 2 + normalY * lift
@@ -3587,12 +3644,13 @@ function buildApproxLabelRectangles(notes) {
   for (const note of notes) {
     const position = state.positions.get(note.path);
     if (!position) continue;
+    const nodeSize = getNodeSize(note.path);
     const lines = wrapTitle(note.title);
-    const width = Math.max(44, ...lines.map((line) => line.length * 7.2));
-    const height = Math.max(18, lines.length * 15);
+    const width = Math.max(44 * nodeSize.scale, ...lines.map((line) => line.length * 7.2 * nodeSize.scale));
+    const height = Math.max(18 * nodeSize.scale, lines.length * NODE_LABEL_LINE_HEIGHT * nodeSize.scale);
     rectangles.set(note.path, {
       left: position.x - width / 2,
-      top: position.y + 22,
+      top: position.y + (NODE_LABEL_Y - NODE_LABEL_FONT_SIZE) * nodeSize.scale,
       width,
       height
     });
