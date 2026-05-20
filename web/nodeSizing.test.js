@@ -17,7 +17,7 @@ test("connection scale grows linearly to 2.8x at 20 connections", () => {
   assert.equal(connectionCountToNodeScale(20), 2.8);
 });
 
-test("connection scale approaches but never reaches 3x after 20 connections", () => {
+test("connection scale approaches but never reaches 5.5x after 20 connections", () => {
   const atTwentyOne = connectionCountToNodeScale(21);
   const atForty = connectionCountToNodeScale(40);
   const atHundred = connectionCountToNodeScale(100);
