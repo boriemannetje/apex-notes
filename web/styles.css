@@ -983,10 +983,6 @@ body.graphFullscreen .editorPane {
   cursor: grabbing;
 }
 
-.looseNode {
-  cursor: crosshair;
-}
-
 .nodeHit {
   fill: transparent;
   stroke: transparent;

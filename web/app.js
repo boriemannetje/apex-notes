@@ -3953,6 +3953,7 @@ function startGraphPointerDown(event) {
         state.suppressGraphCreateUntil = Date.now() + 650;
         return;
       }
+      // Loose and connected nodes share drag behavior; double-click arms rope mode.
       startNodeDrag(event, note, group);
       return;
     }
