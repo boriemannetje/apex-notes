@@ -15,6 +15,8 @@ Use this when preparing a public Apex Notes release.
 npm run build:web
 cargo check --manifest-path src-tauri/Cargo.toml
 npm run build
+codesign --verify --deep --strict --verbose=2 "src-tauri/target/release/bundle/macos/Apex Notes.app"
+hdiutil verify "src-tauri/target/release/bundle/dmg/Apex Notes_<version>_aarch64.dmg"
 ```
 
 For UI, workspace, parser, or filesystem changes, also smoke test the built app with a small synthetic notes folder.
@@ -22,7 +24,8 @@ For UI, workspace, parser, or filesystem changes, also smoke test the built app 
 ## Package
 
 - Use the generated Tauri release artifacts from `src-tauri/target/release/bundle/`.
-- Rename uploaded release assets predictably, for example `apex-notes-0.1.2-macos-arm64.dmg`.
+- If macOS signature verification fails, re-sign the generated app bundle before creating or uploading the DMG.
+- Rename uploaded release assets predictably, for example `apex-notes-<version>-macos-arm64.dmg`.
 - Include the writing-agent skill as a release asset if it changed.
 - Do not commit generated bundles back into the repository.
 
