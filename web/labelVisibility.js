@@ -481,17 +481,13 @@ function getChildPaths(note, resolvePath) {
 function getReferencePaths(note, resolvePath) {
   const values = [];
 
-  if (Array.isArray(note.bodyRefNotes)) {
+  if (Array.isArray(note.bodyRefNotes) && note.bodyRefNotes.length) {
     for (const ref of note.bodyRefNotes) {
       values.push(ref && ref.note ? ref.note : ref);
     }
-  }
-
-  if (Array.isArray(note.bodyRefs)) {
+  } else if (Array.isArray(note.bodyRefs) && note.bodyRefs.length) {
     values.push(...note.bodyRefs.map((ref) => (ref && ref.ref ? ref.ref : ref)));
-  }
-
-  if (typeof note.body === "string") {
+  } else if (typeof note.body === "string") {
     values.push(...parseWikiRefs(note.body).map((ref) => ref.ref));
   }
 
@@ -621,23 +617,45 @@ function isIterable(value) {
 function computePageRank(paths, stats, options = {}) {
   const damping = Number.isFinite(Number(options.pageRankDamping)) ? Number(options.pageRankDamping) : 0.85;
   const iterations = Number.isFinite(Number(options.pageRankIterations)) ? Number(options.pageRankIterations) : 20;
-  const baseScore = paths.length ? (1 - damping) / paths.length : 0;
-  const ranks = new Map(paths.map((path) => [path, paths.length ? 1 / paths.length : 0]));
+  const pathCount = paths.length;
+  const baseScore = pathCount ? (1 - damping) / pathCount : 0;
+  const ranks = new Map(paths.map((path) => [path, pathCount ? 1 / pathCount : 0]));
   const pathSet = new Set(paths);
+  const adjacency = new Map(paths.map((path) => {
+    const entry = stats.get(path);
+    const outgoing = [];
+
+    if (entry && entry.outgoingPaths) {
+      for (const target of entry.outgoingPaths) {
+        if (pathSet.has(target)) outgoing.push(target);
+      }
+    }
+
+    return [path, outgoing];
+  }));
 
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     const next = new Map(paths.map((path) => [path, baseScore]));
+    let danglingRank = 0;
+
     for (const path of paths) {
-      const entry = stats.get(path);
-      const outgoing = entry ? [...entry.outgoingPaths || []].filter((target) => pathSet.has(target)) : [];
+      const outgoing = adjacency.get(path) || [];
+      const rank = ranks.get(path) || 0;
+
       if (!outgoing.length) {
-        const share = damping * (ranks.get(path) || 0) / Math.max(1, paths.length);
-        for (const target of paths) next.set(target, (next.get(target) || 0) + share);
+        danglingRank += rank;
         continue;
       }
-      const share = damping * (ranks.get(path) || 0) / outgoing.length;
+
+      const share = damping * rank / outgoing.length;
       for (const target of outgoing) next.set(target, (next.get(target) || 0) + share);
     }
+
+    if (danglingRank) {
+      const share = damping * danglingRank / Math.max(1, pathCount);
+      for (const target of paths) next.set(target, (next.get(target) || 0) + share);
+    }
+
     ranks.clear();
     for (const [path, rank] of next) ranks.set(path, rank);
   }

@@ -69,7 +69,7 @@ test("supports multiple parentless roots and loose notes as valid forest entries
   assert.deepEqual(index.children.get("alpha.md"), ["alpha-child.md"]);
   assert.equal(index.V.get("loose.md").derivedLevel, 0);
   assert.equal(index.V.get("loose.md").level, 0);
-  assert(!index.validation.some((issue) => issue.type === ISSUE_TYPES.ROOT_COUNT));
+  assert(!index.validation.some((issue) => issue.type === "root-count"));
   assert(!index.validation.some((issue) => issue.type === ISSUE_TYPES.DISCONNECTED));
 });
 
@@ -82,7 +82,29 @@ test("reports duplicate aliases and cycles without throwing away vertices", () =
   assert.equal(index.V.size, 2);
   assert.deepEqual(index.duplicateAliases.get("same"), ["a.md", "b.md"]);
   assert(index.validation.some((issue) => issue.type === ISSUE_TYPES.CYCLE));
-  assert(!index.validation.some((issue) => issue.type === ISSUE_TYPES.ROOT_COUNT));
+  assert(!index.validation.some((issue) => issue.type === "root-count"));
+});
+
+test("derives levels and validates deep parent chains in linear time", () => {
+  const notes = [];
+  const count = 5000;
+
+  for (let index = 0; index < count; index += 1) {
+    notes.push(note(
+      `note-${index}.md`,
+      `Note ${index}`,
+      index,
+      index === 0 ? null : `[[note-${index - 1}]]`,
+      ""
+    ));
+  }
+
+  const index = createGraphIndex(notes);
+
+  assert.equal(index.V.size, count);
+  assert.equal(index.derivedLevels.get("note-0.md"), 0);
+  assert.equal(index.derivedLevels.get("note-4999.md"), 4999);
+  assert.equal(index.validation.length, 0);
 });
 
 function note(path, title, level, parentRef, body) {

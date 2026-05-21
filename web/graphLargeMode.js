@@ -46,73 +46,6 @@ export function selectLargeModeReferenceEdges(referenceEdges = [], context = {},
   return selectedEdges;
 }
 
-export function computeWrappedLevelMetadata(notes = [], options = {}) {
-  options = options || {};
-
-  const maxNodesPerSubrow = toPositiveCount(options.maxNodesPerSubrow, LARGE_GRAPH_CONFIG.maxNodesPerSubrow);
-  const levelsByNumber = new Map();
-
-  for (const note of notes || []) {
-    const level = toLevelNumber(note && note.level);
-    if (!levelsByNumber.has(level)) levelsByNumber.set(level, []);
-    levelsByNumber.get(level).push(note);
-  }
-
-  const levelNumbers = [...levelsByNumber.keys()].sort((a, b) => a - b);
-  const levels = [];
-  const rows = [];
-  let maxLevelCount = 0;
-  let maxSubrowCount = 0;
-
-  levelNumbers.forEach((level, levelIndex) => {
-    const levelNotes = levelsByNumber.get(level) || [];
-    const subrows = [];
-    const startRowIndex = rows.length;
-
-    maxLevelCount = Math.max(maxLevelCount, levelNotes.length);
-
-    for (let startIndex = 0; startIndex < levelNotes.length; startIndex += maxNodesPerSubrow) {
-      const subrowNotes = levelNotes.slice(startIndex, startIndex + maxNodesPerSubrow);
-      const subrow = {
-        level,
-        levelIndex,
-        subrowIndex: subrows.length,
-        rowIndex: rows.length,
-        startIndex,
-        endIndex: startIndex + subrowNotes.length - 1,
-        count: subrowNotes.length,
-        notes: subrowNotes
-      };
-
-      subrows.push(subrow);
-      rows.push(subrow);
-    }
-
-    maxSubrowCount = Math.max(maxSubrowCount, subrows.length);
-    levels.push({
-      level,
-      levelIndex,
-      rowIndex: startRowIndex,
-      startRowIndex,
-      endRowIndex: rows.length - 1,
-      count: levelNotes.length,
-      subrowCount: subrows.length,
-      notes: levelNotes,
-      subrows
-    });
-  });
-
-  return {
-    maxNodesPerSubrow,
-    levelCount: levels.length,
-    totalRows: rows.length,
-    maxLevelCount,
-    maxSubrowCount,
-    levels,
-    rows
-  };
-}
-
 function collectAnchorPaths(context) {
   const paths = new Set();
   addPathValue(paths, context.selectedPath);
@@ -174,9 +107,4 @@ function toCount(value) {
 function toPositiveCount(value, fallback) {
   const count = Number(value);
   return Number.isFinite(count) && count > 0 ? Math.floor(count) : fallback;
-}
-
-function toLevelNumber(value) {
-  const level = Number(value);
-  return Number.isFinite(level) ? level : 0;
 }

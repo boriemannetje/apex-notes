@@ -49,7 +49,7 @@ import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 const LEVEL_COLORS = ["#f1eee6", "#9fc5ff", "#a9d6ac", "#e8d188", "#ffb6d1", "#f2b380", "#7fd6df", "#c7b89a"];
 const STORAGE_PREFIX = "hamkg-layout-v2";
 const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
-- check for pre existing hyrachy, sometimes only a few files don't have the correct formatting
+- check for pre-existing hierarchy, sometimes only a few files don't have the correct formatting
 - Build sensible hierarchy edges from the notes in this folder following the note writing skill.
 - Parentless level 0 notes are allowed as loose notes or roots of independent hierarchies.
 - When a note is connected to a parent, the parent must be one level above it.
@@ -85,9 +85,7 @@ const POSITIONING_OPTIONS = {
   looseColumns: 3,
   precision: 2
 };
-const PERF_ENABLED =
-  window.location.search.includes("perf=1") ||
-  window.localStorage.getItem("apex-notes-perf") === "1";
+const PERF_ENABLED = isPerfEnabled();
 
 const editorEditable = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
@@ -269,6 +267,15 @@ function scheduleWikiLinkRefresh() {
     wikiLinkRefreshTimer = 0;
     refreshEditorDecorations();
   }, 140);
+}
+
+function isPerfEnabled() {
+  if (window.location.search.includes("perf=1")) return true;
+  try {
+    return window.localStorage.getItem("apex-notes-perf") === "1";
+  } catch {
+    return false;
+  }
 }
 
 let deleteConfirmResolver = null;
@@ -2065,12 +2072,6 @@ function parseFrontmatter(raw) {
   return { entries, values };
 }
 
-function resolveParent(note) {
-  const ref = cleanWikiRef(note.parentRef);
-  if (!ref) return null;
-  return resolveWikiNote(ref);
-}
-
 function resolveWikiNote(ref) {
   if (state.graphIndex) {
     const path = state.graphIndex.resolvePath(ref);
@@ -2340,8 +2341,8 @@ function collectDescendants(parent) {
   const stack = [...(parent.children || [])];
   const seen = new Set([parent.path]);
 
-  while (stack.length) {
-    const note = stack.shift();
+  for (let index = 0; index < stack.length; index += 1) {
+    const note = stack[index];
     if (!note || seen.has(note.path)) continue;
     seen.add(note.path);
     descendants.push(note);
@@ -3278,34 +3279,6 @@ function absolutePosition(position) {
     x: round(position.x),
     y: round(position.y)
   };
-}
-
-function buildSquareGridPositions(notes) {
-  const positions = new Map();
-
-  const count = notes.length;
-  if (!count) return positions;
-
-  const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
-  const colMax = columns;
-  const contentWidth = GRAPH_PAD * 2 + Math.max(0, colMax - 1) * NODE_GAP;
-
-  for (let index = 0; index < count; index += 1) {
-    const note = notes[index];
-    const row = Math.floor(index / columns);
-    const column = index % columns;
-    const remainingInRow = Math.min(columns, count - row * columns);
-    const startX = (contentWidth - Math.max(0, remainingInRow - 1) * NODE_GAP) / 2;
-    const x = startX + column * NODE_GAP;
-    const y = GRAPH_PAD + row * LEVEL_GAP;
-
-    positions.set(note.path, {
-      x,
-      y
-    });
-  }
-
-  return positions;
 }
 
 function getGraphBounds(positions) {

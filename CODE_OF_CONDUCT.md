@@ -6,4 +6,4 @@ Be respectful, assume good intent, and focus criticism on ideas and code rather 
 
 Project maintainers may remove comments, close issues, or block participants who make the project harder for others to use or contribute to.
 
-To report conduct concerns privately, email `boris@starboat.app` with a short description and links or screenshots when relevant.
+written by Codex, approved by borvibe

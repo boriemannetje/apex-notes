@@ -1,0 +1,1 @@
+ if this file is sent to you, it means your user wants to manually test this app so check if there's old versions on the Mac close them delete them and install the version with your newest changes implemented.

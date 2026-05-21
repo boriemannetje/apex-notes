@@ -220,10 +220,6 @@ export function createSearchIndex(notes = [], options = {}) {
   return new SearchIndex(notes, options);
 }
 
-export function searchNotes(notes = [], query = "", options = {}) {
-  return createSearchIndex(notes, options.indexOptions || options).search(query, options);
-}
-
 export function tokenizeSearchText(value) {
   return normalizeSearchText(value)
     .split(/[^a-z0-9]+/u)

@@ -126,23 +126,32 @@ function buildHierarchy(items, index) {
   }
   roots.sort(compareItems);
 
-  const visit = (item, level, visiting) => {
-    if (visiting.has(item.path)) return;
-    if (validPaths.has(item.path)) return;
-
-    visiting.add(item.path);
-    validPaths.add(item.path);
-    item.derivedLevel = level;
-    item.children = childrenByParent.get(item.path) || [];
-
-    for (const child of item.children) {
-      visit(child, level + 1, visiting);
-    }
-    visiting.delete(item.path);
-  };
-
   for (const root of roots) {
-    visit(root, 0, new Set());
+    const visiting = new Set();
+    const stack = [{ item: root, level: 0, exiting: false }];
+
+    while (stack.length) {
+      const frame = stack.pop();
+      const { item, level, exiting } = frame;
+      if (!item) continue;
+
+      if (exiting) {
+        visiting.delete(item.path);
+        continue;
+      }
+
+      if (visiting.has(item.path) || validPaths.has(item.path)) continue;
+
+      visiting.add(item.path);
+      validPaths.add(item.path);
+      item.derivedLevel = level;
+      item.children = childrenByParent.get(item.path) || [];
+      stack.push({ item, level, exiting: true });
+
+      for (let index = item.children.length - 1; index >= 0; index -= 1) {
+        stack.push({ item: item.children[index], level: level + 1, exiting: false });
+      }
+    }
   }
 
   return {
@@ -183,47 +192,53 @@ function layoutHierarchyForest(hierarchy, settings) {
   let cursor = 0;
 
   for (const root of hierarchy.roots) {
-    const subtree = layoutSubtree(root, settings);
-    const shift = cursor - subtree.minX;
-
-    for (const point of subtree.points) {
-      positions.set(point.path, {
-        x: point.x + shift,
-        y: point.level * settings.levelGap
-      });
-    }
-
-    cursor += subtree.width + settings.rootGap;
+    const metrics = buildSubtreeMetrics(root, settings);
+    const rootMetrics = metrics.get(root.path) || leafSubtreeMetrics();
+    appendSubtreePositions(root, cursor - rootMetrics.minX, metrics, positions, settings);
+    cursor += rootMetrics.width + settings.rootGap;
   }
 
   return positions;
 }
 
-function layoutSubtree(item, settings) {
+function buildSubtreeMetrics(item, settings) {
+  const layouts = new Map();
+  const stack = [{ item, visited: false }];
+
+  while (stack.length) {
+    const frame = stack.pop();
+    if (!frame.item) continue;
+
+    if (frame.visited) {
+      layouts.set(frame.item.path, createSubtreeMetrics(frame.item, settings, layouts));
+      continue;
+    }
+
+    stack.push({ item: frame.item, visited: true });
+    for (let index = frame.item.children.length - 1; index >= 0; index -= 1) {
+      stack.push({ item: frame.item.children[index], visited: false });
+    }
+  }
+
+  return layouts;
+}
+
+function createSubtreeMetrics(item, settings, layouts) {
   if (!item.children.length) {
-    return {
-      rootX: 0,
-      minX: 0,
-      maxX: 0,
-      width: 0,
-      points: [{ path: item.path, x: 0, level: item.derivedLevel }]
-    };
+    return leafSubtreeMetrics();
   }
 
   let cursor = 0;
   const childLayouts = [];
 
   for (const child of item.children) {
-    const layout = layoutSubtree(child, settings);
+    const layout = layouts.get(child.path) || leafSubtreeMetrics();
     const shift = childLayouts.length ? cursor + settings.subtreeGap - layout.minX : -layout.minX;
     const shifted = {
+      child,
       rootX: layout.rootX + shift,
       minX: layout.minX + shift,
-      maxX: layout.maxX + shift,
-      points: layout.points.map((point) => ({
-        ...point,
-        x: point.x + shift
-      }))
+      maxX: layout.maxX + shift
     };
 
     childLayouts.push(shifted);
@@ -233,17 +248,15 @@ function layoutSubtree(item, settings) {
   const first = childLayouts[0];
   const last = childLayouts[childLayouts.length - 1];
   const rootX = (first.rootX + last.rootX) / 2;
-  const points = [{ path: item.path, x: 0, level: item.derivedLevel }];
+  const childOffsets = [];
   let minX = 0;
   let maxX = 0;
 
   for (const childLayout of childLayouts) {
-    for (const point of childLayout.points) {
-      const x = point.x - rootX;
-      points.push({ path: point.path, x, level: point.level });
-      minX = Math.min(minX, x);
-      maxX = Math.max(maxX, x);
-    }
+    const offsetX = childLayout.rootX - rootX;
+    childOffsets.push({ item: childLayout.child, offsetX });
+    minX = Math.min(minX, childLayout.minX - rootX);
+    maxX = Math.max(maxX, childLayout.maxX - rootX);
   }
 
   return {
@@ -251,8 +264,39 @@ function layoutSubtree(item, settings) {
     minX,
     maxX,
     width: maxX - minX,
-    points
+    childOffsets
   };
+}
+
+function leafSubtreeMetrics() {
+  return {
+    rootX: 0,
+    minX: 0,
+    maxX: 0,
+    width: 0,
+    childOffsets: []
+  };
+}
+
+function appendSubtreePositions(root, rootX, metrics, positions, settings) {
+  const stack = [{ item: root, x: rootX }];
+
+  while (stack.length) {
+    const { item, x } = stack.pop();
+    positions.set(item.path, {
+      x,
+      y: item.derivedLevel * settings.levelGap
+    });
+
+    const layout = metrics.get(item.path) || leafSubtreeMetrics();
+    for (let index = layout.childOffsets.length - 1; index >= 0; index -= 1) {
+      const childOffset = layout.childOffsets[index];
+      stack.push({
+        item: childOffset.item,
+        x: x + childOffset.offsetX
+      });
+    }
+  }
 }
 
 function relaxReferencePositions(positions, hierarchy, references, settings) {
@@ -337,10 +381,10 @@ function buildReferenceAdjacency(graph, items, index, hierarchyPairs) {
   }
 
   for (const item of items) {
-    for (const ref of item.note.bodyRefNotes || []) {
-      add(item.path, resolveEndpoint(ref.note ?? ref.path ?? ref.ref, index));
-    }
-    for (const ref of item.note.bodyRefs || []) {
+    const refs = Array.isArray(item.note.bodyRefNotes)
+      ? item.note.bodyRefNotes
+      : (item.note.bodyRefs || []);
+    for (const ref of refs) {
       add(item.path, resolveEndpoint(ref.note ?? ref.path ?? ref.ref, index));
     }
   }
@@ -360,11 +404,18 @@ function collectGraphEdges(graph) {
 
 function collectHierarchyItems(roots) {
   const items = [];
-  const visit = (item) => {
+  const stack = [...roots].reverse();
+
+  while (stack.length) {
+    const item = stack.pop();
+    if (!item) continue;
     items.push(item);
-    for (const child of item.children) visit(child);
-  };
-  for (const root of roots) visit(root);
+
+    for (let index = item.children.length - 1; index >= 0; index -= 1) {
+      stack.push(item.children[index]);
+    }
+  }
+
   return items;
 }
 

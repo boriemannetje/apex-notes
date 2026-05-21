@@ -117,6 +117,31 @@ test("reference relaxation changes x only and keeps hierarchy levels fixed", () 
   assert(relaxed.get("left-leaf.md").x > base.get("left-leaf.md").x);
 });
 
+test("handles deep hierarchies without recursive layout pressure", () => {
+  const notes = [];
+  const count = 2000;
+
+  for (let index = 0; index < count; index += 1) {
+    notes.push(note(
+      `note-${index}.md`,
+      `Note ${index}`,
+      index,
+      index === 0 ? null : `[[note-${index - 1}]]`
+    ));
+  }
+
+  const layout = buildGraphLayout({}, notes, {
+    levelGap: 5,
+    nodeGap: 20,
+    subtreeGap: 20,
+    collisionGap: 20
+  });
+
+  assert.equal(layout.size, count);
+  assert.equal(layout.get("note-0.md").y, 0);
+  assert.equal(layout.get("note-1999.md").y, 9995);
+});
+
 function note(path, title, level, parent) {
   return {
     path,

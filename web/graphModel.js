@@ -1,7 +1,6 @@
-import { cleanWikiRef, getNoteAliasKeys, normalizeKey, parseWikiRefs, slugify } from "./noteRefs.js";
+import { cleanWikiRef, getNoteAliasKeys, normalizeKey, parseWikiTarget, slugify } from "./noteRefs.js";
 
 export const ISSUE_TYPES = Object.freeze({
-  ROOT_COUNT: "root-count",
   MISSING_PARENT: "missing-parent",
   CYCLE: "cycle",
   DISCONNECTED: "disconnected",
@@ -190,8 +189,8 @@ export function deriveLevels(V, parents, children) {
   const roots = getRootPaths(V);
   const queue = roots.map((path) => [path, 0]);
 
-  while (queue.length) {
-    const [path, level] = queue.shift();
+  for (let index = 0; index < queue.length; index += 1) {
+    const [path, level] = queue[index];
     if (levels.has(path)) continue;
     levels.set(path, level);
 
@@ -350,7 +349,7 @@ function parseWikiRefsWithMultiplicity(text) {
   let match;
 
   while ((match = regex.exec(String(text || ""))) !== null) {
-    const parsed = parseWikiRefs(match[0])[0];
+    const parsed = parseWikiTarget(match[1]);
     if (parsed && parsed.ref) refs.push(parsed);
   }
 
@@ -360,8 +359,8 @@ function parseWikiRefsWithMultiplicity(text) {
 function normalizeRef(ref) {
   if (!ref) return null;
   if (typeof ref === "string") {
-    const parsed = parseWikiRefs(`[[${ref}]]`)[0];
-    return parsed || { ref, label: ref };
+    const parsed = parseWikiTarget(ref);
+    return parsed.ref ? parsed : { ref, label: ref };
   }
   if (ref.ref) return { ...ref, ref: cleanWikiRef(ref.ref) || ref.ref };
   if (ref.path || ref.id) {
@@ -402,14 +401,20 @@ function incrementMap(map, key) {
 function findCycles(V, parents) {
   const issues = [];
   const emitted = new Set();
+  const resolved = new Set();
 
   for (const path of V.keys()) {
+    if (resolved.has(path)) continue;
+
+    const stack = [];
     const seenAt = new Map();
     let current = path;
 
-    while (current) {
+    while (current && V.has(current)) {
+      if (resolved.has(current)) break;
+
       if (seenAt.has(current)) {
-        const cycle = [...seenAt.keys()].slice(seenAt.get(current));
+        const cycle = stack.slice(seenAt.get(current));
         const key = [...cycle].sort().join("|");
         if (!emitted.has(key)) {
           emitted.add(key);
@@ -421,8 +426,14 @@ function findCycles(V, parents) {
         }
         break;
       }
-      seenAt.set(current, seenAt.size);
+
+      seenAt.set(current, stack.length);
+      stack.push(current);
       current = parents.get(current);
+    }
+
+    for (const resolvedPath of stack) {
+      resolved.add(resolvedPath);
     }
   }
 
@@ -430,7 +441,7 @@ function findCycles(V, parents) {
 }
 
 function pairKey(a, b) {
-  return [a, b].sort().join("<->");
+  return a < b ? `${a}<->${b}` : `${b}<->${a}`;
 }
 
 function unique(values) {

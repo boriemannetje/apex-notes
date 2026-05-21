@@ -283,25 +283,6 @@ fn write_manifest_blocking(notes_path: String, paths: Vec<String>) -> Result<(),
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn write_layout(
-    notes_path: String,
-    positions: HashMap<String, NotePosition>,
-) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || write_layout_blocking(notes_path, positions))
-        .await
-        .map_err(to_error)?
-}
-
-fn write_layout_blocking(
-    notes_path: String,
-    positions: HashMap<String, NotePosition>,
-) -> Result<(), String> {
-    let notes_root = require_existing_dir(notes_path, "Notes path is not a folder")?;
-    validate_position_paths(&notes_root, positions.keys())?;
-    write_layout_file(&notes_root, &positions).map_err(to_error)
-}
-
-#[tauri::command(rename_all = "camelCase")]
 async fn write_layout_patch(
     notes_path: String,
     updates: HashMap<String, Option<NotePosition>>,
@@ -328,22 +309,6 @@ fn write_layout_patch_blocking(
     }
 
     write_layout_file(&notes_root, &positions).map_err(to_error)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn trash_note(notes_path: String, path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || trash_note_blocking(notes_path, path))
-        .await
-        .map_err(to_error)?
-}
-
-fn trash_note_blocking(notes_path: String, path: String) -> Result<(), String> {
-    let notes_root = require_existing_dir(notes_path, "Notes path is not a folder")?;
-    let file_path = safe_markdown_child_path(&notes_root, &path)?;
-    if !file_path.is_file() {
-        return Err("Note does not exist".into());
-    }
-    trash::delete(file_path).map_err(to_error)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -432,9 +397,7 @@ pub fn run() {
             create_note,
             create_notes,
             write_manifest,
-            write_layout,
             write_layout_patch,
-            trash_note,
             trash_notes,
             read_recent_projects,
             remember_recent_project,
@@ -716,16 +679,6 @@ fn require_existing_dir(path: String, message: &str) -> Result<PathBuf, String> 
         return Err(message.into());
     }
     path.canonicalize().map_err(to_error)
-}
-
-fn validate_position_paths<'a>(
-    notes_root: &Path,
-    paths: impl Iterator<Item = &'a String>,
-) -> Result<(), String> {
-    for path in paths {
-        safe_markdown_child_path(notes_root, path)?;
-    }
-    Ok(())
 }
 
 fn write_manifest_file(notes_root: &Path, paths: &[String]) -> std::io::Result<()> {

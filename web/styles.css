@@ -1014,11 +1014,7 @@ body.graphFullscreen .editorPane {
 }
 
 .node.label-hidden .nodeLabel,
-.node.labelHidden .nodeLabel,
-.nodeLabel.label-hidden,
-.nodeLabel.labelHidden,
-.nodeLabel.isLabelHidden,
-.nodeLabel.is-hidden {
+.nodeLabel.label-hidden {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -1064,12 +1060,8 @@ body.graphFullscreen .editorPane {
 .node.hovered .nodeLabel,
 .node.focused .nodeLabel,
 .node.search-matched .nodeLabel,
-.node.searchMatched .nodeLabel,
 .node.label-visible .nodeLabel,
-.node.labelVisible .nodeLabel,
-.nodeLabel.label-visible,
-.nodeLabel.labelVisible,
-.nodeLabel.is-visible {
+.nodeLabel.label-visible {
   opacity: 1;
   visibility: visible;
   pointer-events: none;

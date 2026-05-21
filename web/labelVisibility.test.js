@@ -15,6 +15,19 @@ test("link stats count unique hierarchy and contextual neighbors", () => {
   assert.equal(stats.get("leaf.md").uniqueNeighborCount, 2);
 });
 
+test("link stats use parsed body references when available", () => {
+  const stats = computeNoteLinkStats([
+    {
+      ...note("root.md", "Root", 0, null, ""),
+      bodyRefs: [{ ref: "leaf" }]
+    },
+    note("leaf.md", "Leaf", 1, null, "")
+  ]);
+
+  assert.equal(stats.get("root.md").referenceOutCount, 1);
+  assert.equal(stats.get("leaf.md").referenceInCount, 1);
+});
+
 function note(path, title, level, parentRef, body) {
   return {
     path,
