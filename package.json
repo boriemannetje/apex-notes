@@ -1,6 +1,6 @@
 {
   "name": "apex-notes",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "build:web": "esbuild web/app.js --bundle --format=iife --loader:.md=text --outfile=web/app.bundle.js",
@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.1",
-    "esbuild": "^0.28.0"
+    "esbuild": "^0.28.0",
+    "playwright": "^1.60.0"
   }
 }
