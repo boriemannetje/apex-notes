@@ -12,9 +12,9 @@ Use this when preparing a public Apex Notes release.
 ## Validate
 
 ```sh
-npm run build:web
+npm test
 cargo check --manifest-path src-tauri/Cargo.toml
-npm run build
+APPLE_SIGNING_IDENTITY="Developer ID Application: <name> (<team>)" npm run package:mac
 codesign --verify --deep --strict --verbose=2 "src-tauri/target/release/bundle/macos/Apex Notes.app"
 hdiutil verify "src-tauri/target/release/bundle/dmg/Apex Notes_<version>_aarch64.dmg"
 xcrun stapler validate "src-tauri/target/release/bundle/dmg/Apex Notes_<version>_aarch64.dmg"
@@ -27,6 +27,8 @@ For UI, workspace, parser, or filesystem changes, also smoke test the built app 
 
 - Use the generated Tauri release artifacts from `src-tauri/target/release/bundle/`.
 - Public macOS downloads must be signed with a Developer ID Application certificate, notarized with Apple, and stapled before upload. An Apple Development signature can pass `codesign` but still fail Gatekeeper for downloaded apps.
+- `npm run package:mac` rebuilds the Tauri app, signs the `.app`, regenerates the DMG from the signed app, and verifies the mounted app from the DMG. Do not upload a raw `tauri build` DMG.
+- `APEX_NOTES_ALLOW_ADHOC=1 npm run package:mac` is only for local install-script smoke tests; do not use ad-hoc artifacts for public releases.
 - If macOS signature verification fails, re-sign the generated app bundle before creating the DMG.
 - Rename uploaded release assets predictably, for example `apex-notes-<version>-macos-arm64.dmg`.
 - Include the writing-agent skill as a release asset if it changed.
