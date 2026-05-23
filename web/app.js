@@ -62,6 +62,9 @@ Full Apex Notes writing skill, copied from skills/apex-notes-writing/SKILL.md:
 ${apexNotesWritingSkill.trim()}`;
 const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 2.2;
+const SEARCH_FLY_TO_MIN_ZOOM = 1.65;
+const SEARCH_FLY_TO_ZOOM_FACTOR = 1.55;
+const SEARCH_FLY_TO_DURATION_MS = 460;
 const DOT_RADIUS = 7;
 const HIT_RADIUS = 22;
 const NODE_LABEL_FONT_SIZE = 12.5;
@@ -122,6 +125,7 @@ const state = {
   liveSyncToken: 0,
   graphRenderFrame: 0,
   queuedGraphRender: null,
+  viewAnimationFrame: 0,
   filter: "",
   searchResults: [],
   searchOpen: false,
@@ -827,6 +831,7 @@ function startEmpty() {
   state.saveToken += 1;
   state.fileSignatures = new Map();
   cancelQueuedGraphRender();
+  cancelGraphViewAnimation();
   if (state.saveTimer) {
     window.clearTimeout(state.saveTimer);
     state.saveTimer = null;
@@ -1451,6 +1456,7 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   closeGraphProjectLauncher();
   closeGraphCreatePopover();
   cancelQueuedGraphRender();
+  cancelGraphViewAnimation();
   cancelLabelVisibilityRefresh();
   cancelQueuedInteraction();
   if (state.saveTimer) {
@@ -3644,7 +3650,7 @@ async function chooseSearchResult(path) {
   closeSearchResults();
   els.searchInput.blur();
   await selectNote(path);
-  centerGraphOnPath(path);
+  flyToGraphPath(path);
 }
 
 function onSearchFocusOut() {
@@ -3833,6 +3839,7 @@ function zoomAtCenter(factor) {
 }
 
 function zoomAtPoint(clientX, clientY, factor) {
+  cancelGraphViewAnimation();
   const previousScale = state.view.scale;
   const point = clientToSvgPoint(clientX, clientY);
   const nextScale = clamp(state.view.scale * factor, MIN_ZOOM, MAX_ZOOM);
@@ -3859,6 +3866,7 @@ function fitGraphViewFromControl() {
 }
 
 function fitGraphView(animate = true) {
+  cancelGraphViewAnimation();
   if (!isValidGraphBounds(state.graphBounds) || !els.graphCanvas) return false;
   const viewport = measureGraphViewport();
   if (!viewport) {
@@ -3886,15 +3894,23 @@ function fitGraphView(animate = true) {
   return true;
 }
 
-function centerGraphOnPath(path, animate = true) {
+function flyToGraphPath(path) {
   const position = state.positions.get(path);
   const viewport = measureGraphViewport();
   if (!position || !viewport) return false;
 
-  state.view.x = viewport.width / 2 - position.x * state.view.scale;
-  state.view.y = viewport.height / 2 - position.y * state.view.scale;
-  applyViewTransform(animate);
-  return true;
+  const targetScale = clamp(
+    Math.max(state.view.scale * SEARCH_FLY_TO_ZOOM_FACTOR, SEARCH_FLY_TO_MIN_ZOOM),
+    MIN_ZOOM,
+    MAX_ZOOM
+  );
+  return animateGraphViewTo({
+    x: viewport.width / 2 - position.x * targetScale,
+    y: viewport.height / 2 - position.y * targetScale,
+    scale: targetScale
+  }, {
+    duration: SEARCH_FLY_TO_DURATION_MS
+  });
 }
 
 function isValidGraphBounds(bounds) {
@@ -3918,6 +3934,69 @@ function applyViewTransform(animate = false) {
     `translate(${round(state.view.x)} ${round(state.view.y)}) scale(${round(state.view.scale)})`
   );
   finishPerfMeasure(perf);
+}
+
+function animateGraphViewTo(targetView, { duration = 360 } = {}) {
+  if (!targetView || !els.graphCanvas) return false;
+
+  cancelGraphViewAnimation();
+  const fromView = { ...state.view };
+  const previousScale = fromView.scale;
+  const target = {
+    x: Number(targetView.x),
+    y: Number(targetView.y),
+    scale: Number(targetView.scale)
+  };
+  if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || !Number.isFinite(target.scale)) {
+    return false;
+  }
+
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  if (reducedMotion || duration <= 0) {
+    state.view = target;
+    applyViewTransform(false);
+    refreshLabelsAfterZoom(previousScale);
+    return true;
+  }
+
+  const start = performance.now();
+  const step = (time) => {
+    const progress = clamp((time - start) / duration, 0, 1);
+    const eased = easeInOutCubic(progress);
+    state.view.x = lerp(fromView.x, target.x, eased);
+    state.view.y = lerp(fromView.y, target.y, eased);
+    state.view.scale = lerp(fromView.scale, target.scale, eased);
+    applyViewTransform(false);
+
+    if (progress < 1) {
+      state.viewAnimationFrame = window.requestAnimationFrame(step);
+      return;
+    }
+
+    state.viewAnimationFrame = 0;
+    state.view = target;
+    applyViewTransform(false);
+    refreshLabelsAfterZoom(previousScale);
+  };
+
+  state.viewAnimationFrame = window.requestAnimationFrame(step);
+  return true;
+}
+
+function cancelGraphViewAnimation() {
+  if (!state.viewAnimationFrame) return;
+  window.cancelAnimationFrame(state.viewAnimationFrame);
+  state.viewAnimationFrame = 0;
+}
+
+function easeInOutCubic(value) {
+  return value < 0.5
+    ? 4 * value * value * value
+    : 1 - Math.pow(-2 * value + 2, 3) / 2;
+}
+
+function lerp(start, end, amount) {
+  return start + (end - start) * amount;
 }
 
 function syncFitViewButton() {
@@ -4019,6 +4098,7 @@ function focusGraph() {
 
 function startGraphPointerDown(event) {
   if (event.button !== 0 && event.button !== 1) return;
+  cancelGraphViewAnimation();
   focusGraph();
   state.lastGraphPoint = eventToGraphPoint(event);
 
