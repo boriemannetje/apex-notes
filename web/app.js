@@ -64,7 +64,7 @@ const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 2.2;
 const SEARCH_FLY_TO_MIN_ZOOM = 1.65;
 const SEARCH_FLY_TO_ZOOM_FACTOR = 1.55;
-const SEARCH_FLY_TO_DURATION_MS = 460;
+const GRAPH_FLY_TO_DURATION_MS = 460;
 const DOT_RADIUS = 7;
 const HIT_RADIUS = 22;
 const NODE_LABEL_FONT_SIZE = 12.5;
@@ -3886,10 +3886,19 @@ function fitGraphView(animate = true) {
   );
   if (!Number.isFinite(scale)) return false;
 
-  state.view.scale = scale;
-  state.view.x = viewportWidth / 2 - (state.graphBounds.minX + state.graphBounds.width / 2) * scale;
-  state.view.y = viewportHeight / 2 - (state.graphBounds.minY + state.graphBounds.height / 2) * scale;
-  applyViewTransform(animate);
+  const targetView = {
+    x: viewportWidth / 2 - (state.graphBounds.minX + state.graphBounds.width / 2) * scale,
+    y: viewportHeight / 2 - (state.graphBounds.minY + state.graphBounds.height / 2) * scale,
+    scale
+  };
+  if (animate) {
+    return animateGraphViewTo(targetView, {
+      duration: GRAPH_FLY_TO_DURATION_MS
+    });
+  }
+
+  state.view = targetView;
+  applyViewTransform(false);
   refreshLabelsAfterZoom(previousScale);
   return true;
 }
@@ -3909,7 +3918,7 @@ function flyToGraphPath(path) {
     y: viewport.height / 2 - position.y * targetScale,
     scale: targetScale
   }, {
-    duration: SEARCH_FLY_TO_DURATION_MS
+    duration: GRAPH_FLY_TO_DURATION_MS
   });
 }
 
