@@ -18,6 +18,7 @@ import {
 } from "./labelVisibility.js";
 import { connectionCountToNodeScale } from "./nodeSizing.js";
 import { createSearchIndex } from "./searchIndex.js";
+import { buildSearchResults } from "./searchResults.js";
 import {
   cleanWikiRef,
   getNoteAliasKeys,
@@ -122,6 +123,9 @@ const state = {
   graphRenderFrame: 0,
   queuedGraphRender: null,
   filter: "",
+  searchResults: [],
+  searchOpen: false,
+  searchActiveIndex: -1,
   searchMatchedPaths: new Set(),
   validation: [],
   layoutKey: "",
@@ -195,8 +199,10 @@ const els = {
   graphHelpButton: document.querySelector("#graphHelpButton"),
   graphHelpDialog: document.querySelector("#graphHelpDialog"),
   closeGraphHelpButton: document.querySelector("#closeGraphHelpButton"),
+  searchField: document.querySelector(".searchField"),
   searchFieldIcon: document.querySelector("#searchFieldIcon"),
   searchInput: document.querySelector("#searchInput"),
+  searchResults: document.querySelector("#searchResults"),
   openFolderButton: document.querySelector("#openFolderButton"),
   createFolderButton: document.querySelector("#createFolderButton"),
   newNoteButton: document.querySelector("#newNoteButton"),
@@ -450,12 +456,14 @@ function bindEvents() {
   els.graphCreatePopover.addEventListener("submit", createGraphNoteFromPopover);
   els.cancelGraphCreateButton.addEventListener("click", closeGraphCreatePopover);
 
-  els.searchInput.addEventListener("input", () => {
-    setSearchFilter(els.searchInput.value);
-    applyGraphDimming();
-    scheduleLabelVisibilityRefresh({ force: true });
-    scheduleLargeGraphRefresh();
-  });
+  els.searchInput.addEventListener("focus", openSearchResults);
+  els.searchInput.addEventListener("click", openSearchResults);
+  els.searchInput.addEventListener("input", onSearchInput);
+  els.searchInput.addEventListener("keydown", onSearchKeydown);
+  els.searchResults.addEventListener("pointerdown", (event) => event.preventDefault());
+  els.searchResults.addEventListener("click", onSearchResultsClick);
+  els.searchField.addEventListener("focusout", onSearchFocusOut);
+  document.addEventListener("pointerdown", onDocumentSearchPointerDown);
 
   els.graph.addEventListener("wheel", onGraphWheel, { passive: false });
   els.graph.addEventListener("dblclick", onGraphDoubleClick);
@@ -825,6 +833,9 @@ function startEmpty() {
     state.saveTimer = null;
   }
   state.filter = "";
+  state.searchResults = [];
+  state.searchOpen = false;
+  state.searchActiveIndex = -1;
   state.searchMatchedPaths = new Set();
   state.validation = [];
   state.layoutKey = "";
@@ -858,6 +869,7 @@ function startEmpty() {
   cancelQueuedInteraction();
   state.graphViewport = null;
   els.searchInput.value = "";
+  renderSearchResults();
   renderSelectedNote("Open or create a folder");
   renderNewNoteParents();
   renderGraph({ preserveView: false });
@@ -1462,6 +1474,10 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.saveToken += 1;
   state.fileSignatures = cloneFileSignatures(workspace.fileSignatures);
   state.filter = workspace.filter || "";
+  state.searchResults = [];
+  state.searchOpen = false;
+  state.searchActiveIndex = -1;
+  state.searchMatchedPaths = new Set();
   state.layoutKey = workspace.layoutKey || buildLayoutKey(state.source, state.rootPath, state.workspaceName);
   state.manualPositions = pruneStoredPositions(
     workspace.manualPositions,
@@ -1498,6 +1514,8 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   normalizeSelectionAfterNotesChanged();
 
   els.searchInput.value = state.filter;
+  updateSearchResults();
+  renderSearchResults();
   renderCurrentSelection(statusMessage);
   renderNewNoteParents();
   renderLaunchScreen();
@@ -1752,7 +1770,7 @@ function rebuildIndex() {
     }
   );
   state.searchIndex = createSearchIndex(state.notes);
-  updateSearchMatchedPaths();
+  updateSearchResults();
   state.labelStats = computeNoteLinkStats(state.sortedNotes);
   state.labelVisibilityCache = prepareLabelVisibilityCache(state.sortedNotes, state.labelStats);
   state.labelVisibility = null;
@@ -2564,12 +2582,6 @@ async function autosaveSelectedNote() {
       renderValidationStatus();
     } else {
       patchBodyOnlyNote(note, updated);
-      if (state.filter) {
-        updateSearchMatchedPaths();
-        applyGraphDimming();
-        scheduleLabelVisibilityRefresh({ force: true });
-        scheduleLargeGraphRefresh();
-      }
     }
 
     updateSourceStatus();
@@ -2633,6 +2645,7 @@ function patchBodyOnlyNote(note, updated) {
   note.bodyRefs = updated.bodyRefs;
   note.searchText = updated.searchText;
   state.searchIndex = createSearchIndex(state.notes);
+  updateSearchResults();
 }
 
 function createNoteRaw({ title, level, parent, body }) {
@@ -3519,12 +3532,11 @@ function endpointToward(from, to, offset) {
 }
 
 function isDimmed(note) {
-  if (!state.filter) return false;
-  return !state.searchMatchedPaths.has(note.path);
+  return false;
 }
 
 function isSearchMatched(note) {
-  return Boolean(state.filter && state.searchMatchedPaths.has(note.path));
+  return false;
 }
 
 function getSearchMatchedPaths() {
@@ -3532,32 +3544,160 @@ function getSearchMatchedPaths() {
 }
 
 function setSearchFilter(value) {
-  state.filter = String(value || "").trim().toLowerCase();
-  updateSearchMatchedPaths();
+  state.filter = String(value || "").trim();
+  state.searchActiveIndex = -1;
+  updateSearchResults();
 }
 
-function updateSearchMatchedPaths() {
-  if (!state.filter) {
-    state.searchMatchedPaths = new Set();
+function updateSearchResults() {
+  state.searchMatchedPaths = new Set();
+  state.searchResults = buildSearchResults(state.notes, state.searchIndex, state.filter, {
+    limit: 12
+  });
+  if (state.searchActiveIndex >= state.searchResults.length) {
+    state.searchActiveIndex = state.searchResults.length ? state.searchResults.length - 1 : -1;
+  }
+  if (state.searchOpen) renderSearchResults();
+}
+
+function onSearchInput() {
+  setSearchFilter(els.searchInput.value);
+  openSearchResults();
+}
+
+function openSearchResults() {
+  if (!state.searchOpen) {
+    state.searchOpen = true;
+  }
+  updateSearchResults();
+  renderSearchResults();
+}
+
+function closeSearchResults() {
+  if (!state.searchOpen && els.searchResults.hidden) return;
+  state.searchOpen = false;
+  state.searchActiveIndex = -1;
+  renderSearchResults();
+}
+
+function renderSearchResults() {
+  els.searchInput.setAttribute("aria-expanded", String(state.searchOpen));
+  els.searchInput.removeAttribute("aria-activedescendant");
+
+  if (!state.searchOpen) {
+    els.searchResults.hidden = true;
+    els.searchResults.replaceChildren();
     return;
   }
 
-  const matches = new Set(
-    (state.searchIndex ? state.searchIndex.search(state.filter, {
-      limit: Math.max(1, state.notes.length),
-      minScore: 0,
-      includeTrigramFallback: true,
-      alwaysIncludeTrigram: true
-    }) : [])
-      .map((result) => result.path)
-  );
+  els.searchResults.hidden = false;
+  const fragment = document.createDocumentFragment();
 
-  if (state.filter.length < 3 || !matches.size) {
-    for (const note of state.notes) {
-      if (note.searchText.includes(state.filter)) matches.add(note.path);
-    }
+  if (!state.notes.length) {
+    fragment.appendChild(renderSearchEmpty("Open a folder to search notes"));
+  } else if (!state.searchResults.length) {
+    fragment.appendChild(renderSearchEmpty("No matching notes"));
+  } else {
+    state.searchResults.forEach((result, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.id = `searchResult-${index}`;
+      button.className = "searchResultButton";
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(index === state.searchActiveIndex));
+      button.dataset.searchResultPath = result.path;
+
+      const title = document.createElement("span");
+      title.className = "searchResultTitle";
+      title.textContent = result.title;
+      button.appendChild(title);
+
+      const path = document.createElement("span");
+      path.className = "searchResultPath";
+      path.textContent = result.path;
+      button.appendChild(path);
+
+      if (index === state.searchActiveIndex) {
+        els.searchInput.setAttribute("aria-activedescendant", button.id);
+      }
+      fragment.appendChild(button);
+    });
   }
-  state.searchMatchedPaths = matches;
+
+  els.searchResults.replaceChildren(fragment);
+}
+
+function renderSearchEmpty(message) {
+  const empty = document.createElement("div");
+  empty.className = "searchResultsEmpty";
+  empty.setAttribute("role", "option");
+  empty.setAttribute("aria-disabled", "true");
+  empty.textContent = message;
+  return empty;
+}
+
+function onSearchKeydown(event) {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (!state.searchOpen) openSearchResults();
+    moveSearchActive(1);
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!state.searchOpen) openSearchResults();
+    moveSearchActive(-1);
+    return;
+  }
+
+  if (event.key === "Enter" && state.searchOpen) {
+    const result = state.searchResults[state.searchActiveIndex] || state.searchResults[0];
+    if (!result) return;
+    event.preventDefault();
+    void chooseSearchResult(result.path);
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSearchResults();
+    els.searchInput.blur();
+  }
+}
+
+function moveSearchActive(delta) {
+  if (!state.searchResults.length) return;
+  const current = state.searchActiveIndex < 0
+    ? (delta > 0 ? -1 : 0)
+    : state.searchActiveIndex;
+  state.searchActiveIndex = (current + delta + state.searchResults.length) % state.searchResults.length;
+  renderSearchResults();
+}
+
+function onSearchResultsClick(event) {
+  const resultButton = event.target.closest("[data-search-result-path]");
+  if (!resultButton || !els.searchResults.contains(resultButton)) return;
+  void chooseSearchResult(resultButton.dataset.searchResultPath);
+}
+
+async function chooseSearchResult(path) {
+  if (!path || !state.byPath.has(path)) return;
+  closeSearchResults();
+  els.searchInput.blur();
+  await selectNote(path);
+  centerGraphOnPath(path);
+}
+
+function onSearchFocusOut() {
+  window.setTimeout(() => {
+    if (!els.searchField.contains(document.activeElement)) closeSearchResults();
+  }, 0);
+}
+
+function onDocumentSearchPointerDown(event) {
+  if (els.searchField.contains(event.target)) return;
+  closeSearchResults();
 }
 
 function scheduleLabelVisibilityRefresh({ force = false } = {}) {
@@ -3664,8 +3804,7 @@ function getLabelVisibilityKey() {
     state.selectedPath || "",
     [...state.selectedPaths].sort(compareText).join("\u001f"),
     state.hoveredPath || "",
-    state.focusedPath || "",
-    state.filter
+    state.focusedPath || ""
   ].join("|");
 }
 
@@ -3787,6 +3926,17 @@ function fitGraphView(animate = true) {
   state.view.y = viewportHeight / 2 - (state.graphBounds.minY + state.graphBounds.height / 2) * scale;
   applyViewTransform(animate);
   refreshLabelsAfterZoom(previousScale);
+  return true;
+}
+
+function centerGraphOnPath(path, animate = true) {
+  const position = state.positions.get(path);
+  const viewport = measureGraphViewport();
+  if (!position || !viewport) return false;
+
+  state.view.x = viewport.width / 2 - position.x * state.view.scale;
+  state.view.y = viewport.height / 2 - position.y * state.view.scale;
+  applyViewTransform(animate);
   return true;
 }
 

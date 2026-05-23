@@ -16,10 +16,11 @@
         <div class="brand">Apex Notes</div>
         <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interaction help" title="Graph interaction help"></button>
       </div>
-      <label class="searchField" title="Search titles, paths, and note text">
+      <div class="searchField" title="Search titles, paths, and note text">
         <span id="searchFieldIcon" class="searchFieldIcon" aria-hidden="true"></span>
-        <input id="searchInput" class="search" type="search" placeholder="Search notes" aria-label="Search notes">
-      </label>
+        <input id="searchInput" class="search" type="search" placeholder="Search notes" aria-label="Search notes" aria-haspopup="listbox" aria-expanded="false" aria-controls="searchResults" autocomplete="off" spellcheck="false">
+        <div id="searchResults" class="searchResults" role="listbox" aria-label="Search results" hidden></div>
+      </div>
       <button id="newNoteButton" type="button" aria-label="Create a new note" title="Create a new note">New note</button>
       <button id="openFolderButton" type="button" aria-label="Open a local notes folder" title="Open a local notes folder">Open folder</button>
       <button id="createFolderButton" type="button" aria-label="Create a new notes folder" title="Create a new notes folder">Create folder</button>
