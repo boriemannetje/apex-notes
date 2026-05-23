@@ -126,7 +126,6 @@ const state = {
   searchResults: [],
   searchOpen: false,
   searchActiveIndex: -1,
-  searchMatchedPaths: new Set(),
   validation: [],
   layoutKey: "",
   manualPositions: {},
@@ -836,7 +835,6 @@ function startEmpty() {
   state.searchResults = [];
   state.searchOpen = false;
   state.searchActiveIndex = -1;
-  state.searchMatchedPaths = new Set();
   state.validation = [];
   state.layoutKey = "";
   state.graphHasHierarchy = true;
@@ -1477,7 +1475,6 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.searchResults = [];
   state.searchOpen = false;
   state.searchActiveIndex = -1;
-  state.searchMatchedPaths = new Set();
   state.layoutKey = workspace.layoutKey || buildLayoutKey(state.source, state.rootPath, state.workspaceName);
   state.manualPositions = pruneStoredPositions(
     workspace.manualPositions,
@@ -2731,7 +2728,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   for (const note of notes) {
     if (!hasValidHierarchyEdge(note)) continue;
     const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    edge.setAttribute("class", `edge hierarchyEdge${isDimmed(note) || isDimmed(note.parentNote) ? " dimmed" : ""}`);
+    edge.setAttribute("class", "edge hierarchyEdge");
     edge.setAttribute("aria-hidden", "true");
     edge.style.setProperty("--level-color", getLevelColor(note.level));
     fragment.appendChild(edge);
@@ -2742,7 +2739,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
     const edge = document.createElementNS("http://www.w3.org/2000/svg", "path");
     edge.setAttribute(
       "class",
-      `edge referenceEdge${referenceEdge.dimmed ? " dimmed" : ""}${isReferenceEdgeSelected(referenceEdge, state.selectedPaths) ? " selectedReferenceEdge" : ""}`
+      `edge referenceEdge${isReferenceEdgeSelected(referenceEdge, state.selectedPaths) ? " selectedReferenceEdge" : ""}`
     );
     edge.setAttribute("aria-hidden", "true");
     edge.style.setProperty("--level-color", getLevelColor(referenceEdge.level));
@@ -2892,22 +2889,6 @@ function isReferenceEdgeSelected(edge, selectedPaths = state.selectedPaths) {
   return Boolean(edge && (selectedPaths.has(edge.from) || selectedPaths.has(edge.to)));
 }
 
-function applyGraphDimming() {
-  for (const [path, group] of state.nodeElements.entries()) {
-    const note = state.byPath.get(path);
-    if (note) {
-      group.classList.toggle("dimmed", isDimmed(note));
-      group.classList.toggle("search-matched", isSearchMatched(note));
-    }
-  }
-
-  for (const edge of state.edgeElements) {
-    const from = state.byPath.get(edge.from);
-    const to = state.byPath.get(edge.to);
-    edge.path.classList.toggle("dimmed", Boolean((from && isDimmed(from)) || (to && isDimmed(to))));
-  }
-}
-
 function getRenderableNotes() {
   return state.sortedNotes;
 }
@@ -2990,8 +2971,7 @@ function getRenderableReferenceEdges(notes) {
         selectedPath: state.selectedPath,
         selectedPaths: state.selectedPaths,
         hoveredPath: state.hoveredPath,
-        focusedPath: state.focusedPath,
-        searchMatchedPaths: getSearchMatchedPaths()
+        focusedPath: state.focusedPath
       },
       {
         maxEdgeCount: LARGE_GRAPH_CONFIG.referenceEdgeLimit
@@ -2999,14 +2979,7 @@ function getRenderableReferenceEdges(notes) {
     );
   }
 
-  return edges.map((edge) => {
-    const from = state.byPath.get(edge.from);
-    const to = state.byPath.get(edge.to);
-    return {
-      ...edge,
-      dimmed: Boolean((from && isDimmed(from)) || (to && isDimmed(to)))
-    };
-  });
+  return edges;
 }
 
 function undirectedPairKey(a, b) {
@@ -3019,7 +2992,6 @@ function renderGraphNode(canvas, note) {
   const loose = isLooseHierarchyNote(note);
   const nodeSize = getNodeSize(note.path);
   if (state.selectedPaths.has(note.path)) classes.push("selected");
-  if (isDimmed(note)) classes.push("dimmed");
   if (loose) classes.push("looseNode");
   if (state.armedRope && state.armedRope.sourcePath === note.path) classes.push("ropeArmed");
   group.setAttribute("class", classes.join(" "));
@@ -3060,7 +3032,6 @@ function graphNodeAriaLabel(note, { loose = false, nodeSize = getNodeSize(note.p
   if (loose) parts.push("loose note");
   if (state.armedRope && state.armedRope.sourcePath === note.path) parts.push("connection ready");
   if (state.selectedPaths.has(note.path)) parts.push("selected");
-  if (isSearchMatched(note)) parts.push("search match");
   return parts.join(", ");
 }
 
@@ -3531,18 +3502,6 @@ function endpointToward(from, to, offset) {
   };
 }
 
-function isDimmed(note) {
-  return false;
-}
-
-function isSearchMatched(note) {
-  return false;
-}
-
-function getSearchMatchedPaths() {
-  return state.searchMatchedPaths;
-}
-
 function setSearchFilter(value) {
   state.filter = String(value || "").trim();
   state.searchActiveIndex = -1;
@@ -3550,7 +3509,6 @@ function setSearchFilter(value) {
 }
 
 function updateSearchResults() {
-  state.searchMatchedPaths = new Set();
   state.searchResults = buildSearchResults(state.notes, state.searchIndex, state.filter, {
     limit: 12
   });
@@ -3767,7 +3725,6 @@ function computeLargeGraphLabelVisibility() {
     selectedPaths: state.selectedPaths,
     hoveredPath: state.hoveredPath,
     focusedPath: state.focusedPath,
-    searchMatchedPaths: getSearchMatchedPaths(),
     labelRectangles: buildApproxLabelRectangles(state.sortedNotes),
     labelOverlapPadding: 6
   });

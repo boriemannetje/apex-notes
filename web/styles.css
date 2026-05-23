@@ -1128,7 +1128,6 @@ body.graphFullscreen .editorPane {
 .node:focus-visible .nodeLabel,
 .node.hovered .nodeLabel,
 .node.focused .nodeLabel,
-.node.search-matched .nodeLabel,
 .node.label-visible .nodeLabel,
 .nodeLabel.label-visible {
   opacity: 1;
@@ -1139,26 +1138,6 @@ body.graphFullscreen .editorPane {
 .ropeTarget .nodeDot {
   fill: var(--level-color, var(--fg));
   stroke-width: 3;
-}
-
-.node {
-  transition: opacity 150ms ease;
-}
-
-.node.dimmed {
-  opacity: 0.22;
-}
-
-.edge.dimmed {
-  opacity: 0.14;
-}
-
-.hierarchyEdge.dimmed {
-  opacity: 1;
-}
-
-.referenceEdge.dimmed {
-  opacity: 0.11;
 }
 
 .referenceEdge.selectedReferenceEdge {
