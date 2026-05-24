@@ -112,6 +112,52 @@ test("workspace chrome supports rename and fullscreen without losing the graph",
   await page.close();
 });
 
+test("editor resize separator supports pointer drag, persistence, and keyboard control", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  const initial = await workspaceMetrics(page);
+  await dragEditorResizeHandle(page, -160);
+  const widened = await workspaceMetrics(page);
+  assert(widened.editorPane.width > initial.editorPane.width + 120);
+  assert(widened.graphPane.width < initial.graphPane.width - 120);
+  assert(widened.graph.width > 0);
+  assert(widened.graph.height > 0);
+
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  const restored = await workspaceMetrics(page);
+  assert(Math.abs(restored.editorPane.width - widened.editorPane.width) <= 2);
+
+  const handle = page.locator("#editorResizeHandle");
+  await handle.focus();
+  await page.keyboard.press("ArrowRight");
+  const narrowedByKey = await workspaceMetrics(page);
+  assert(narrowedByKey.editorPane.width < restored.editorPane.width);
+
+  await page.keyboard.press("Home");
+  const minimum = await workspaceMetrics(page);
+  assert(Math.abs(minimum.editorPane.width - 344) <= 2);
+  assert.equal(await handle.getAttribute("aria-valuenow"), "344");
+
+  await page.keyboard.press("End");
+  const maximum = await workspaceMetrics(page);
+  assert(maximum.editorPane.width > minimum.editorPane.width);
+  assert.equal(
+    Math.round(maximum.editorPane.width),
+    Number(await handle.getAttribute("aria-valuemax"))
+  );
+  assert(maximum.graph.width > 0);
+  assert(maximum.graph.height > 0);
+
+  await page.close();
+});
+
 async function newMockedTauriPage() {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.addInitScript((seedWorkspace) => {
@@ -231,7 +277,22 @@ function sampleWorkspace() {
 }
 
 async function assertMainWorkspaceGeometry(page) {
-  const metrics = await page.evaluate(() => {
+  const metrics = await workspaceMetrics(page);
+
+  assert.equal(metrics.bodyClass, "");
+  assert(metrics.tabs.height >= 36);
+  assert.equal(metrics.tabs.y, 0);
+  assert(metrics.topbar.y >= metrics.tabs.height);
+  assert(metrics.graphPane.width > 800);
+  assert(metrics.resizeHandle.width >= 8);
+  assert(metrics.editorPane.width > 360);
+  assert(metrics.graph.height > 500);
+  assert(metrics.search.width >= 300);
+  assert(metrics.newNote.width >= 90);
+}
+
+async function workspaceMetrics(page) {
+  return page.evaluate(() => {
     const box = (selector) => {
       const rect = document.querySelector(selector)?.getBoundingClientRect();
       return rect ? {
@@ -247,22 +308,26 @@ async function assertMainWorkspaceGeometry(page) {
       tabs: box("#workspaceTabs"),
       topbar: box(".topbar"),
       graphPane: box(".graphPane"),
+      resizeHandle: box("#editorResizeHandle"),
       editorPane: box(".editorPane"),
       graph: box("#graph"),
       search: box(".searchField"),
       newNote: box("#newNoteButton")
     };
   });
+}
 
-  assert.equal(metrics.bodyClass, "");
-  assert(metrics.tabs.height >= 36);
-  assert.equal(metrics.tabs.y, 0);
-  assert(metrics.topbar.y >= metrics.tabs.height);
-  assert(metrics.graphPane.width > 800);
-  assert(metrics.editorPane.width > 360);
-  assert(metrics.graph.height > 500);
-  assert(metrics.search.width >= 300);
-  assert(metrics.newNote.width >= 90);
+async function dragEditorResizeHandle(page, deltaX) {
+  const handle = page.locator("#editorResizeHandle");
+  const box = await handle.boundingBox();
+  assert(box);
+  const startX = box.x + box.width / 2;
+  const startY = box.y + box.height / 2;
+
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + deltaX, startY, { steps: 8 });
+  await page.mouse.up();
 }
 
 async function assertGraphNode(page, path) {

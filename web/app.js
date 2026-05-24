@@ -49,6 +49,11 @@ import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
 const LEVEL_COLORS = ["#f1eee6", "#9fc5ff", "#a9d6ac", "#e8d188", "#ffb6d1", "#f2b380", "#7fd6df", "#c7b89a"];
 const STORAGE_PREFIX = "hamkg-layout-v2";
+const EDITOR_PANE_WIDTH_STORAGE_KEY = "apex-notes-editor-pane-width";
+const MIN_EDITOR_PANE_WIDTH = 344;
+const MIN_GRAPH_PANE_WIDTH = 320;
+const EDITOR_PANE_WIDTH_STEP = 24;
+const EDITOR_PANE_WIDTH_LARGE_STEP = 96;
 const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
 - check for pre-existing hierarchy, sometimes only a few files don't have the correct formatting
 - Build sensible hierarchy edges from the notes in this folder following the note writing skill.
@@ -178,12 +183,15 @@ const state = {
   graphFullscreenFallback: false,
   graphProjectLauncherOpen: false,
   renamingWorkspaceId: null,
-  workspaceRenameDraft: ""
+  workspaceRenameDraft: "",
+  editorPaneWidth: null,
+  editorResizeDrag: null
 };
 
 let suppressWorkspaceRenameCommit = false;
 
 const els = {
+  layout: document.querySelector(".layout"),
   launchScreen: document.querySelector("#launchScreen"),
   launchOpenProjectButton: document.querySelector("#launchOpenProjectButton"),
   launchCreateProjectButton: document.querySelector("#launchCreateProjectButton"),
@@ -202,6 +210,7 @@ const els = {
   graphPane: document.querySelector(".graphPane"),
   graphScroller: document.querySelector("#graphScroller"),
   graphCanvas: null,
+  editorResizeHandle: document.querySelector("#editorResizeHandle"),
   graphHelpButton: document.querySelector("#graphHelpButton"),
   graphHelpDialog: document.querySelector("#graphHelpDialog"),
   closeGraphHelpButton: document.querySelector("#closeGraphHelpButton"),
@@ -210,6 +219,7 @@ const els = {
   searchInput: document.querySelector("#searchInput"),
   searchResults: document.querySelector("#searchResults"),
   newNoteButton: document.querySelector("#newNoteButton"),
+  editorPane: document.querySelector(".editorPane"),
   editor: document.querySelector("#editor"),
   noteTitle: document.querySelector("#noteTitle"),
   notePath: document.querySelector("#notePath"),
@@ -336,6 +346,7 @@ class WikiLinkWidget extends WidgetType {
 
 initializeEditor();
 initializeIcons();
+initializeEditorPaneWidth();
 bindEvents();
 startEmpty();
 void hydrateRecentProjects();
@@ -414,6 +425,143 @@ function initializeEditor() {
   });
 }
 
+function initializeEditorPaneWidth() {
+  const storedWidth = readStoredEditorPaneWidth();
+  if (storedWidth !== null) {
+    applyEditorPaneWidth(storedWidth, { persist: false, render: false });
+  } else {
+    updateEditorResizeHandleAttributes(getCurrentEditorPaneWidth());
+  }
+}
+
+function readStoredEditorPaneWidth() {
+  try {
+    const raw = window.localStorage.getItem(EDITOR_PANE_WIDTH_STORAGE_KEY);
+    if (!raw) return null;
+    const width = Number.parseFloat(raw);
+    return Number.isFinite(width) ? width : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredEditorPaneWidth(width) {
+  try {
+    window.localStorage.setItem(EDITOR_PANE_WIDTH_STORAGE_KEY, String(Math.round(width)));
+  } catch {
+    // Ignore storage failures; resizing still works for the current session.
+  }
+}
+
+function getEditorPaneMaxWidth() {
+  const layoutWidth = els.layout?.getBoundingClientRect().width || window.innerWidth || 0;
+  const handleWidth = els.editorResizeHandle?.getBoundingClientRect().width || 8;
+  const maxWidth = Math.floor(layoutWidth - handleWidth - MIN_GRAPH_PANE_WIDTH);
+  return Math.max(MIN_EDITOR_PANE_WIDTH, maxWidth);
+}
+
+function clampEditorPaneWidth(width) {
+  const maxWidth = getEditorPaneMaxWidth();
+  if (!Number.isFinite(width)) return MIN_EDITOR_PANE_WIDTH;
+  return Math.round(Math.min(maxWidth, Math.max(MIN_EDITOR_PANE_WIDTH, width)));
+}
+
+function getDefaultEditorPaneWidth() {
+  const layoutWidth = els.layout?.getBoundingClientRect().width || window.innerWidth || 0;
+  return clampEditorPaneWidth(layoutWidth * 0.34);
+}
+
+function getCurrentEditorPaneWidth() {
+  const currentWidth = els.editorPane?.getBoundingClientRect().width || 0;
+  if (currentWidth > 0) return currentWidth;
+  if (state.editorPaneWidth !== null) return state.editorPaneWidth;
+  return getDefaultEditorPaneWidth();
+}
+
+function updateEditorResizeHandleAttributes(width) {
+  const maxWidth = getEditorPaneMaxWidth();
+  const nextWidth = clampEditorPaneWidth(width);
+  els.editorResizeHandle.setAttribute("aria-valuemin", String(MIN_EDITOR_PANE_WIDTH));
+  els.editorResizeHandle.setAttribute("aria-valuemax", String(maxWidth));
+  els.editorResizeHandle.setAttribute("aria-valuenow", String(nextWidth));
+}
+
+function applyEditorPaneWidth(width, { persist = true, render = true } = {}) {
+  const nextWidth = clampEditorPaneWidth(width);
+  state.editorPaneWidth = nextWidth;
+  els.layout.style.setProperty("--editor-pane-width", `${nextWidth}px`);
+  updateEditorResizeHandleAttributes(nextWidth);
+  if (persist) {
+    writeStoredEditorPaneWidth(nextWidth);
+  }
+  if (render) {
+    scheduleResizeRender();
+  }
+  return nextWidth;
+}
+
+function syncEditorPaneWidthForViewport() {
+  if (state.editorPaneWidth !== null) {
+    applyEditorPaneWidth(state.editorPaneWidth, { persist: true, render: false });
+    return;
+  }
+  updateEditorResizeHandleAttributes(getCurrentEditorPaneWidth());
+}
+
+function startEditorResize(event) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  const startWidth = getCurrentEditorPaneWidth();
+  state.editorResizeDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startWidth
+  };
+  els.editorResizeHandle.setPointerCapture(event.pointerId);
+  els.editorResizeHandle.classList.add("isDragging");
+  document.body.classList.add("isResizingEditor");
+  updateEditorResizeHandleAttributes(startWidth);
+}
+
+function onEditorResizePointerMove(event) {
+  const drag = state.editorResizeDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  event.preventDefault();
+  applyEditorPaneWidth(drag.startWidth + drag.startX - event.clientX);
+}
+
+function endEditorResize(event) {
+  const drag = state.editorResizeDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  state.editorResizeDrag = null;
+  if (els.editorResizeHandle.hasPointerCapture(event.pointerId)) {
+    els.editorResizeHandle.releasePointerCapture(event.pointerId);
+  }
+  els.editorResizeHandle.classList.remove("isDragging");
+  document.body.classList.remove("isResizingEditor");
+  syncEditorPaneWidthForViewport();
+}
+
+function onEditorResizeKeydown(event) {
+  const currentWidth = getCurrentEditorPaneWidth();
+  const step = event.shiftKey ? EDITOR_PANE_WIDTH_LARGE_STEP : EDITOR_PANE_WIDTH_STEP;
+  let nextWidth = null;
+
+  if (event.key === "ArrowLeft") {
+    nextWidth = currentWidth + step;
+  } else if (event.key === "ArrowRight") {
+    nextWidth = currentWidth - step;
+  } else if (event.key === "Home") {
+    nextWidth = MIN_EDITOR_PANE_WIDTH;
+  } else if (event.key === "End") {
+    nextWidth = getEditorPaneMaxWidth();
+  }
+
+  if (nextWidth === null) return;
+  event.preventDefault();
+  applyEditorPaneWidth(nextWidth);
+}
+
 function bindEvents() {
   els.graphHelpButton.addEventListener("click", openGraphHelpDialog);
   els.closeGraphHelpButton.addEventListener("click", closeGraphHelpDialog);
@@ -454,6 +602,11 @@ function bindEvents() {
   els.deleteNoteButton.addEventListener("click", deleteSelectedNote);
   els.graphCreatePopover.addEventListener("submit", createGraphNoteFromPopover);
   els.cancelGraphCreateButton.addEventListener("click", closeGraphCreatePopover);
+  els.editorResizeHandle.addEventListener("pointerdown", startEditorResize);
+  els.editorResizeHandle.addEventListener("pointermove", onEditorResizePointerMove);
+  els.editorResizeHandle.addEventListener("pointerup", endEditorResize);
+  els.editorResizeHandle.addEventListener("pointercancel", endEditorResize);
+  els.editorResizeHandle.addEventListener("keydown", onEditorResizeKeydown);
 
   els.searchInput.addEventListener("focus", openSearchResults);
   els.searchInput.addEventListener("click", openSearchResults);
@@ -2911,6 +3064,7 @@ function scheduleResizeRender() {
   }
   resizeDebounceTimer = window.setTimeout(() => {
     resizeDebounceTimer = 0;
+    syncEditorPaneWidthForViewport();
     requestGraphRender({ preserveView: true });
   }, 120);
 }
@@ -5970,6 +6124,7 @@ function updateSourceStatus() {
   els.deleteNoteButton.title = canDelete ? "Move selection to Trash" : "Select notes to move to Trash";
   els.deleteNoteButton.setAttribute("aria-label", canDelete ? "Move selection to Trash" : "Select notes to move to Trash");
   syncFitViewButton();
+  syncEditorPaneWidthForViewport();
   updateHeaderNoteTitleEditable(isFolder && hasSelection);
   setEditorEditable(isFolder && hasSelection);
   renderWorkspaceTabs();
