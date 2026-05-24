@@ -56,9 +56,6 @@ function collectAnchorPaths(context) {
   addPathValue(paths, context.selectedPaths);
   addPathValue(paths, context.hoveredPaths);
   addPathValue(paths, context.focusedPaths);
-  addPathValue(paths, context.searchMatchedPaths);
-  addPathValue(paths, context.matchedPaths);
-  addPathValue(paths, context.searchMatchedNotes);
   return paths;
 }
 

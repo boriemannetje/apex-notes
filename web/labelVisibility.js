@@ -166,7 +166,6 @@ export function computeLabelScores(notes = [], options = {}) {
   const weightedRefsByPath = normalizeMetricSource(options.weightedRefs || options.weightedRefsByPath);
   const forcedPaths = normalizePathSet(options.forceVisiblePaths || options.forcedPaths);
   const selectedPaths = normalizePathSet(options.selectedPaths || options.selectedPath);
-  const searchMatchedPaths = normalizePathSet(options.searchMatchedPaths || options.searchMatchedPath);
   const hoveredPaths = normalizePathSet(options.hoveredPaths || options.hoveredPath);
   const maxHubScore = Math.max(1, ...noteList.map((item) => stats.get(item.path)?.hubScore || 0));
   const maxReferenceIn = Math.max(1, ...noteList.map((item) => stats.get(item.path)?.referenceInCount || 0));
@@ -180,7 +179,6 @@ export function computeLabelScores(notes = [], options = {}) {
     referenceIn: 0.15,
     forced: 100,
     selected: 10,
-    search: 8,
     hovered: 2,
     ...(options.weights || {})
   };
@@ -202,7 +200,6 @@ export function computeLabelScores(notes = [], options = {}) {
     const boost =
       (forcedPaths.has(item.path) ? weights.forced : 0) +
       (selectedPaths.has(item.path) ? weights.selected : 0) +
-      (searchMatchedPaths.has(item.path) ? weights.search : 0) +
       (hoveredPaths.has(item.path) ? weights.hovered : 0);
     const score =
       boost +
@@ -592,22 +589,8 @@ function getForcedVisiblePaths(noteList, resolvePath, options) {
   add(options.hoveredPaths);
   add(options.focusedPath);
   add(options.focusedPaths);
-  add(options.searchMatchedPath);
-  add(options.searchMatchedPaths);
-
-  const searchQuery = String(options.searchQuery || "").trim().toLowerCase();
-  if (searchQuery) {
-    for (const item of noteList) {
-      const searchText = getSearchText(item.note, item);
-      if (searchText.includes(searchQuery)) forced.add(item.path);
-    }
-  }
 
   return forced;
-}
-
-function getSearchText(note, item) {
-  return String(note.searchText || `${item.title} ${item.path}`).toLowerCase();
 }
 
 function isIterable(value) {
