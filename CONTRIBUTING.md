@@ -32,13 +32,6 @@ This starts the Tauri desktop app. Use `Open notes folder` or `Create folder` to
 
 ## Before A Pull Request
 
-Run:
-
-```sh
-npm run build:web
-cargo check --manifest-path src-tauri/Cargo.toml
-```
-
 Before opening or merging a pull request, run the full local gate when possible:
 
 ```sh
@@ -47,13 +40,16 @@ npm run test:pr
 
 Every pull request to `main` also runs the `PR Safety` GitHub Actions workflow. That workflow covers web unit tests, mocked Tauri browser smoke tests, Rust/Tauri tests, and a release Tauri build.
 
-For changes that affect release packaging, also run:
+If the full gate is too expensive for an early draft, run the relevant smaller checks and call that out in the PR:
 
 ```sh
+npm test
+npm run test:e2e
+cargo test --manifest-path src-tauri/Cargo.toml
 npm run build
 ```
 
-If you change Rust/Tauri filesystem behavior, include the `cargo check` result. If you change graph or editor behavior, include a short manual smoke test with a local notes folder.
+If you change Rust/Tauri filesystem behavior, include the Rust test result. If you change graph or editor behavior, include a short manual smoke test with a local notes folder.
 
 ## Notes Schema
 

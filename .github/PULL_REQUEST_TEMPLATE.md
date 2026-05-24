@@ -11,10 +11,7 @@ What changed?
 
 ## Testing
 
-- [ ] `npm test`
-- [ ] `npm run test:e2e`
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml`
-- [ ] `npm run build`
+- [ ] `npm run test:pr`, or noted below why the full gate was not run
 - [ ] Manual smoke test, if native folder or packaging behavior changed
 
 ## Notes
