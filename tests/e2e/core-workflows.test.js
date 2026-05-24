@@ -163,6 +163,14 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
   assert(maximum.graph.width > 0);
   assert(maximum.graph.height > 0);
 
+  await page.locator("#resetViewButton").click();
+  await page.waitForTimeout(650);
+  const fitted = await workspaceMetrics(page);
+  assert.equal(Math.round(fitted.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(fitted.graph.width), Math.round(initial.graph.width));
+  assert(fitted.nodeDots.left >= fitted.graphPane.x);
+  assert(fitted.nodeDots.right <= fitted.editorPane.x - 8);
+
   await page.close();
 });
 
@@ -310,6 +318,27 @@ async function workspaceMetrics(page) {
         height: rect.height
       } : null;
     };
+    const boxes = (selector) => Array.from(document.querySelectorAll(selector))
+      .map((element) => element.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    const bounds = (selector) => {
+      const rects = boxes(selector);
+      if (!rects.length) return null;
+      const left = Math.min(...rects.map((rect) => rect.left));
+      const top = Math.min(...rects.map((rect) => rect.top));
+      const right = Math.max(...rects.map((rect) => rect.right));
+      const bottom = Math.max(...rects.map((rect) => rect.bottom));
+      return {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+        left,
+        right,
+        top,
+        bottom
+      };
+    };
 
     return {
       bodyClass: document.body.className,
@@ -319,6 +348,7 @@ async function workspaceMetrics(page) {
       resizeHandle: box("#editorResizeHandle"),
       editorPane: box(".editorPane"),
       graph: box("#graph"),
+      nodeDots: bounds(".nodeDot"),
       search: box(".searchField"),
       newNote: box("#newNoteButton")
     };

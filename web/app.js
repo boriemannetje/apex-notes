@@ -3054,6 +3054,34 @@ function measureGraphViewport({ allowFallback = false } = {}) {
   return null;
 }
 
+function measureVisibleGraphViewport({ allowFallback = false } = {}) {
+  const viewport = measureGraphViewport({ allowFallback });
+  if (!viewport) return null;
+  const overlayWidth = getGraphOverlayWidth();
+  return {
+    width: Math.max(1, viewport.width - overlayWidth),
+    height: viewport.height
+  };
+}
+
+function getGraphOverlayWidth() {
+  if (document.body.classList.contains("graphFullscreen")) return 0;
+  if (!els.layout || !els.editorPane) return 0;
+  const editorStyle = window.getComputedStyle(els.editorPane);
+  if (editorStyle.display === "none" || editorStyle.visibility === "hidden") return 0;
+
+  const layoutRect = els.layout.getBoundingClientRect();
+  const editorRect = els.editorPane.getBoundingClientRect();
+  const handleRect = els.editorResizeHandle?.getBoundingClientRect();
+  if (layoutRect.width <= 0 || editorRect.width <= 0) return 0;
+
+  const overlayLeft = Math.min(
+    editorRect.left,
+    handleRect && handleRect.width > 0 ? handleRect.left : editorRect.left
+  );
+  return Math.max(0, layoutRect.right - Math.max(layoutRect.left, overlayLeft));
+}
+
 let resizeDebounceTimer = 0;
 function scheduleResizeRender() {
   if (resizeDebounceTimer) {
@@ -4072,7 +4100,7 @@ function onGraphWheel(event) {
 }
 
 function zoomAtCenter(factor) {
-  const viewport = measureGraphViewport();
+  const viewport = measureVisibleGraphViewport();
   const rect = els.graph.getBoundingClientRect();
   if (!viewport || rect.width <= 0 || rect.height <= 0) {
     requestGraphRender({ preserveView: true });
@@ -4112,7 +4140,7 @@ function fitGraphViewFromControl() {
 function fitGraphView(animate = true) {
   cancelGraphViewAnimation();
   if (!isValidGraphBounds(state.graphBounds) || !els.graphCanvas) return false;
-  const viewport = measureGraphViewport();
+  const viewport = measureVisibleGraphViewport();
   if (!viewport) {
     requestGraphRender({ preserveView: true });
     return false;
@@ -4149,7 +4177,7 @@ function fitGraphView(animate = true) {
 
 function flyToGraphPath(path) {
   const position = state.positions.get(path);
-  const viewport = measureGraphViewport();
+  const viewport = measureVisibleGraphViewport();
   if (!position || !viewport) return false;
 
   const targetScale = clamp(
@@ -5624,8 +5652,9 @@ function getPasteParent() {
 }
 
 function getViewportCenterGraphPoint() {
-  const viewportWidth = Math.max(320, els.graphScroller.clientWidth || 0);
-  const viewportHeight = Math.max(320, els.graphScroller.clientHeight || 0);
+  const viewport = measureVisibleGraphViewport({ allowFallback: true }) || { width: 320, height: 320 };
+  const viewportWidth = Math.max(320, viewport.width);
+  const viewportHeight = Math.max(320, viewport.height);
   return {
     x: round((viewportWidth / 2 - state.view.x) / state.view.scale),
     y: round((viewportHeight / 2 - state.view.y) / state.view.scale)
