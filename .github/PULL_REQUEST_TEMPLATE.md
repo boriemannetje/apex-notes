@@ -11,9 +11,11 @@ What changed?
 
 ## Testing
 
-- [ ] `npm run build:web`
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml`
-- [ ] Manual smoke test, if UI/workspace behavior changed
+- [ ] `npm test`
+- [ ] `npm run test:e2e`
+- [ ] `cargo test --manifest-path src-tauri/Cargo.toml`
+- [ ] `npm run build`
+- [ ] Manual smoke test, if native folder or packaging behavior changed
 
 ## Notes
 

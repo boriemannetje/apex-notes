@@ -39,6 +39,14 @@ npm run build:web
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
+Before opening or merging a pull request, run the full local gate when possible:
+
+```sh
+npm run test:pr
+```
+
+Every pull request to `main` also runs the `PR Safety` GitHub Actions workflow. That workflow covers web unit tests, mocked Tauri browser smoke tests, Rust/Tauri tests, and a release Tauri build.
+
 For changes that affect release packaging, also run:
 
 ```sh
