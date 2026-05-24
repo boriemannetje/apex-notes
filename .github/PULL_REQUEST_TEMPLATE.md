@@ -11,9 +11,8 @@ What changed?
 
 ## Testing
 
-- [ ] `npm run build:web`
-- [ ] `cargo check --manifest-path src-tauri/Cargo.toml`
-- [ ] Manual smoke test, if UI/workspace behavior changed
+- [ ] `npm run test:pr`, or noted below why the full gate was not run
+- [ ] Manual smoke test, if native folder or packaging behavior changed
 
 ## Notes
 

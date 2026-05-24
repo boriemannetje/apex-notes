@@ -11,6 +11,8 @@
     "dev": "tauri dev",
     "build": "npm run build:web:prod && tauri build",
     "test": "node --test web/*.test.js",
+    "test:e2e": "npm run build:web:prod && node --test tests/e2e/*.test.js",
+    "test:pr": "npm test && npm run test:e2e && cargo test --manifest-path src-tauri/Cargo.toml && npm run build",
     "tauri": "tauri"
   },
   "dependencies": {
