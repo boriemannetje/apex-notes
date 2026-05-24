@@ -168,8 +168,13 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
   const fitted = await workspaceMetrics(page);
   assert.equal(Math.round(fitted.graphPane.width), Math.round(initial.graphPane.width));
   assert.equal(Math.round(fitted.graph.width), Math.round(initial.graph.width));
-  assert(fitted.nodeDots.left >= fitted.graphPane.x);
-  assert(fitted.nodeDots.right <= fitted.editorPane.x - 8);
+  assert(fitted.nodeContent.left >= fitted.graphPane.x);
+  assert(fitted.nodeContent.top >= fitted.graph.y);
+  assert(fitted.nodeContent.right <= fitted.editorPane.x - 8);
+  assert(fitted.nodeContent.bottom <= fitted.graph.y + fitted.graph.height);
+  const visibleCenter = (fitted.graphPane.x + fitted.editorPane.x - 8) / 2;
+  const contentCenter = (fitted.nodeContent.left + fitted.nodeContent.right) / 2;
+  assert(Math.abs(contentCenter - visibleCenter) < 36);
 
   await page.close();
 });
@@ -349,6 +354,7 @@ async function workspaceMetrics(page) {
       editorPane: box(".editorPane"),
       graph: box("#graph"),
       nodeDots: bounds(".nodeDot"),
+      nodeContent: bounds(".nodeDot, .nodeLabel"),
       search: box(".searchField"),
       newNote: box("#newNoteButton")
     };

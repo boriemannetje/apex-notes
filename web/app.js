@@ -81,6 +81,7 @@ const NODE_BOUND_BOTTOM = 62;
 const LEVEL_GAP = 138;
 const NODE_GAP = 168;
 const GRAPH_PAD = 96;
+const FIT_VIEW_PADDING = 24;
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
@@ -348,6 +349,7 @@ initializeEditor();
 initializeIcons();
 initializeEditorPaneWidth();
 bindEvents();
+initializeGraphResizeObserver();
 startEmpty();
 void hydrateRecentProjects();
 
@@ -432,6 +434,14 @@ function initializeEditorPaneWidth() {
   } else {
     updateEditorResizeHandleAttributes(getCurrentEditorPaneWidth());
   }
+}
+
+function initializeGraphResizeObserver() {
+  if (!els.graphScroller || typeof ResizeObserver !== "function") return;
+  const observer = new ResizeObserver(() => {
+    scheduleResizeRender();
+  });
+  observer.observe(els.graphScroller);
 }
 
 function readStoredEditorPaneWidth() {
@@ -3059,6 +3069,8 @@ function measureVisibleGraphViewport({ allowFallback = false } = {}) {
   if (!viewport) return null;
   const overlayWidth = getGraphOverlayWidth();
   return {
+    left: 0,
+    top: 0,
     width: Math.max(1, viewport.width - overlayWidth),
     height: viewport.height
   };
@@ -3092,6 +3104,20 @@ function scheduleResizeRender() {
     syncEditorPaneWidthForViewport();
     requestGraphRender({ preserveView: true });
   }, 120);
+}
+
+function syncGraphViewportToLayout() {
+  const viewport = measureGraphViewport();
+  if (!viewport || !state.graphViewport) return false;
+  if (
+    Math.abs(viewport.width - state.graphViewport.width) <= 1 &&
+    Math.abs(viewport.height - state.graphViewport.height) <= 1
+  ) {
+    return false;
+  }
+
+  renderGraph({ preserveView: true });
+  return true;
 }
 
 function preserveGraphViewportCenter(previousViewport, nextViewport) {
@@ -3563,6 +3589,44 @@ function getGraphBounds(positions) {
     return { minX: 0, minY: 0, maxX: 1, maxY: 1, width: 1, height: 1 };
   }
 
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX,
+    height: maxY - minY
+  };
+}
+
+function getRenderedGraphContentBounds() {
+  if (!els.graph || !Number.isFinite(state.view.scale) || state.view.scale === 0) return null;
+  const elements = els.graph.querySelectorAll(".nodeDot, .nodeLabel");
+  let count = 0;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  for (const element of elements) {
+    const style = window.getComputedStyle(element);
+    const opacity = Number.parseFloat(style.opacity);
+    if (style.display === "none" || style.visibility === "hidden" || (Number.isFinite(opacity) && opacity === 0)) continue;
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+
+    const topLeft = clientPointToGraphCanvasPoint(rect.left, rect.top);
+    const bottomRight = clientPointToGraphCanvasPoint(rect.right, rect.bottom);
+    if (!topLeft || !bottomRight) continue;
+
+    count += 1;
+    minX = Math.min(minX, topLeft.x, bottomRight.x);
+    maxX = Math.max(maxX, topLeft.x, bottomRight.x);
+    minY = Math.min(minY, topLeft.y, bottomRight.y);
+    maxY = Math.max(maxY, topLeft.y, bottomRight.y);
+  }
+
+  if (!count) return null;
   return {
     minX,
     minY,
@@ -4107,7 +4171,7 @@ function zoomAtCenter(factor) {
     return;
   }
 
-  zoomAtPoint(rect.left + viewport.width / 2, rect.top + viewport.height / 2, factor);
+  zoomAtPoint(rect.left + viewport.left + viewport.width / 2, rect.top + viewport.top + viewport.height / 2, factor);
 }
 
 function zoomAtPoint(clientX, clientY, factor) {
@@ -4140,6 +4204,7 @@ function fitGraphViewFromControl() {
 function fitGraphView(animate = true) {
   cancelGraphViewAnimation();
   if (!isValidGraphBounds(state.graphBounds) || !els.graphCanvas) return false;
+  syncGraphViewportToLayout();
   const viewport = measureVisibleGraphViewport();
   if (!viewport) {
     requestGraphRender({ preserveView: true });
@@ -4147,20 +4212,20 @@ function fitGraphView(animate = true) {
   }
 
   const previousScale = state.view.scale;
-  const viewportWidth = viewport.width;
-  const viewportHeight = viewport.height;
-  const availableWidth = Math.max(1, viewportWidth - 72);
-  const availableHeight = Math.max(1, viewportHeight - 72);
+  const fitBounds = getRenderedGraphContentBounds() || state.graphBounds;
+  if (!isValidGraphBounds(fitBounds)) return false;
+  const availableWidth = Math.max(1, viewport.width - FIT_VIEW_PADDING * 2);
+  const availableHeight = Math.max(1, viewport.height - FIT_VIEW_PADDING * 2);
   const scale = clamp(
-    Math.min(1.08, availableWidth / state.graphBounds.width, availableHeight / state.graphBounds.height),
+    Math.min(1.08, availableWidth / fitBounds.width, availableHeight / fitBounds.height),
     MIN_ZOOM,
     MAX_ZOOM
   );
   if (!Number.isFinite(scale)) return false;
 
   const targetView = {
-    x: viewportWidth / 2 - (state.graphBounds.minX + state.graphBounds.width / 2) * scale,
-    y: viewportHeight / 2 - (state.graphBounds.minY + state.graphBounds.height / 2) * scale,
+    x: viewport.left + (viewport.width - fitBounds.width * scale) / 2 - fitBounds.minX * scale,
+    y: viewport.top + (viewport.height - fitBounds.height * scale) / 2 - fitBounds.minY * scale,
     scale
   };
   if (animate) {
@@ -4186,8 +4251,8 @@ function flyToGraphPath(path) {
     MAX_ZOOM
   );
   return animateGraphViewTo({
-    x: viewport.width / 2 - position.x * targetScale,
-    y: viewport.height / 2 - position.y * targetScale,
+    x: viewport.left + viewport.width / 2 - position.x * targetScale,
+    y: viewport.top + viewport.height / 2 - position.y * targetScale,
     scale: targetScale
   }, {
     duration: GRAPH_FLY_TO_DURATION_MS
@@ -5023,6 +5088,47 @@ function clearRopeTarget() {
 
 function eventToGraphPoint(event) {
   const point = clientToSvgPoint(event.clientX, event.clientY);
+  return svgPointToGraphPoint(point);
+}
+
+function clientPointToGraphPoint(clientX, clientY) {
+  const point = clientToSvgPoint(clientX, clientY);
+  return svgPointToGraphPoint(point);
+}
+
+function clientPointToGraphCanvasPoint(clientX, clientY) {
+  if (
+    !els.graph ||
+    !els.graphCanvas ||
+    typeof els.graph.createSVGPoint !== "function" ||
+    typeof els.graphCanvas.getScreenCTM !== "function"
+  ) {
+    return null;
+  }
+
+  const matrix = els.graphCanvas.getScreenCTM();
+  if (!matrix || typeof matrix.inverse !== "function") return null;
+
+  try {
+    const point = els.graph.createSVGPoint();
+    point.x = clientX;
+    point.y = clientY;
+    const transformed = point.matrixTransform(matrix.inverse());
+    if (Number.isFinite(transformed.x) && Number.isFinite(transformed.y)) {
+      return {
+        x: transformed.x,
+        y: transformed.y
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function svgPointToGraphPoint(point) {
+  if (!point || !Number.isFinite(state.view.scale) || state.view.scale === 0) return null;
   return {
     x: (point.x - state.view.x) / state.view.scale,
     y: (point.y - state.view.y) / state.view.scale
@@ -5653,11 +5759,13 @@ function getPasteParent() {
 
 function getViewportCenterGraphPoint() {
   const viewport = measureVisibleGraphViewport({ allowFallback: true }) || { width: 320, height: 320 };
+  const viewportLeft = Number.isFinite(viewport.left) ? viewport.left : 0;
+  const viewportTop = Number.isFinite(viewport.top) ? viewport.top : 0;
   const viewportWidth = Math.max(320, viewport.width);
   const viewportHeight = Math.max(320, viewport.height);
   return {
-    x: round((viewportWidth / 2 - state.view.x) / state.view.scale),
-    y: round((viewportHeight / 2 - state.view.y) / state.view.scale)
+    x: round((viewportLeft + viewportWidth / 2 - state.view.x) / state.view.scale),
+    y: round((viewportTop + viewportHeight / 2 - state.view.y) / state.view.scale)
   };
 }
 
