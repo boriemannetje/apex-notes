@@ -203,7 +203,7 @@ select:disabled {
   gap: 12px;
   align-items: center;
   min-height: 50px;
-  padding: 8px 12px;
+  padding: 8px calc(max(344px, var(--editor-pane-width, 34vw)) + 20px) 8px 12px;
   border-bottom: 1px solid var(--line-1);
   background: var(--bg);
 }
@@ -733,9 +733,11 @@ body.noWorkspace .launchScreen {
 }
 
 .layout {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) 8px minmax(344px, var(--editor-pane-width, 34vw));
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -754,7 +756,12 @@ body.noWorkspace .launchScreen {
 }
 
 .editorResizeHandle {
-  position: relative;
+  position: absolute;
+  top: 0;
+  right: max(344px, var(--editor-pane-width, 34vw));
+  bottom: 0;
+  z-index: 6;
+  width: 8px;
   cursor: col-resize;
   background: var(--bg);
   touch-action: none;
@@ -1176,8 +1183,15 @@ body.graphFullscreen .topbarActions {
 }
 
 .editorPane {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
   display: grid;
+  width: max(344px, var(--editor-pane-width, 34vw));
   grid-template-rows: auto minmax(0, 1fr) 34px;
+  border-left: 1px solid var(--line-1);
   background: var(--bg);
 }
 

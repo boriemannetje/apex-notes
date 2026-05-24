@@ -123,7 +123,10 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
   await dragEditorResizeHandle(page, -160);
   const widened = await workspaceMetrics(page);
   assert(widened.editorPane.width > initial.editorPane.width + 120);
-  assert(widened.graphPane.width < initial.graphPane.width - 120);
+  assert.equal(Math.round(widened.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(widened.graph.width), Math.round(initial.graph.width));
+  assert(widened.editorPane.x > widened.graphPane.x);
+  assert(widened.editorPane.x < widened.graphPane.x + widened.graphPane.width);
   assert(widened.graph.width > 0);
   assert(widened.graph.height > 0);
 
@@ -133,12 +136,15 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
 
   const restored = await workspaceMetrics(page);
   assert(Math.abs(restored.editorPane.width - widened.editorPane.width) <= 2);
+  assert.equal(Math.round(restored.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(restored.graph.width), Math.round(initial.graph.width));
 
   const handle = page.locator("#editorResizeHandle");
   await handle.focus();
   await page.keyboard.press("ArrowRight");
   const narrowedByKey = await workspaceMetrics(page);
   assert(narrowedByKey.editorPane.width < restored.editorPane.width);
+  assert.equal(Math.round(narrowedByKey.graph.width), Math.round(initial.graph.width));
 
   await page.keyboard.press("Home");
   const minimum = await workspaceMetrics(page);
@@ -152,6 +158,8 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
     Math.round(maximum.editorPane.width),
     Number(await handle.getAttribute("aria-valuemax"))
   );
+  assert.equal(Math.round(maximum.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(maximum.graph.width), Math.round(initial.graph.width));
   assert(maximum.graph.width > 0);
   assert(maximum.graph.height > 0);
 

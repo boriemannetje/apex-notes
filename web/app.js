@@ -428,7 +428,7 @@ function initializeEditor() {
 function initializeEditorPaneWidth() {
   const storedWidth = readStoredEditorPaneWidth();
   if (storedWidth !== null) {
-    applyEditorPaneWidth(storedWidth, { persist: false, render: false });
+    applyEditorPaneWidth(storedWidth, { persist: false });
   } else {
     updateEditorResizeHandleAttributes(getCurrentEditorPaneWidth());
   }
@@ -486,7 +486,7 @@ function updateEditorResizeHandleAttributes(width) {
   els.editorResizeHandle.setAttribute("aria-valuenow", String(nextWidth));
 }
 
-function applyEditorPaneWidth(width, { persist = true, render = true } = {}) {
+function applyEditorPaneWidth(width, { persist = true } = {}) {
   const nextWidth = clampEditorPaneWidth(width);
   state.editorPaneWidth = nextWidth;
   els.layout.style.setProperty("--editor-pane-width", `${nextWidth}px`);
@@ -494,15 +494,12 @@ function applyEditorPaneWidth(width, { persist = true, render = true } = {}) {
   if (persist) {
     writeStoredEditorPaneWidth(nextWidth);
   }
-  if (render) {
-    scheduleResizeRender();
-  }
   return nextWidth;
 }
 
 function syncEditorPaneWidthForViewport() {
   if (state.editorPaneWidth !== null) {
-    applyEditorPaneWidth(state.editorPaneWidth, { persist: true, render: false });
+    applyEditorPaneWidth(state.editorPaneWidth, { persist: true });
     return;
   }
   updateEditorResizeHandleAttributes(getCurrentEditorPaneWidth());
