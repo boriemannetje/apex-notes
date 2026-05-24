@@ -1,0 +1,73 @@
+name: PR Safety
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-safety-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web-unit-and-browser-smoke:
+    name: web unit + browser smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install browser runtime
+        run: npx playwright install --with-deps chromium
+
+      - name: Run web unit tests
+        run: npm test
+
+      - name: Run mocked Tauri browser smoke tests
+        run: npm run test:e2e
+
+      - name: Verify production web bundle
+        run: npm run build:web:prod
+
+  tauri-native:
+    name: tauri native test/build
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Rust/Tauri tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Tauri release bundle
+        run: npm run build
