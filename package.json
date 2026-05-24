@@ -1,6 +1,6 @@
 {
   "name": "apex-notes",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
   "scripts": {
     "build:web": "esbuild web/app.js --bundle --format=iife --loader:.md=text --outfile=web/app.bundle.js",
