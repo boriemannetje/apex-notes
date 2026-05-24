@@ -38,7 +38,7 @@ body {
 
 body {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
@@ -199,90 +199,29 @@ select:disabled {
 
 .topbar {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(160px, 300px) auto auto auto;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
   align-items: center;
-  min-height: 56px;
-  padding: 10px 12px;
+  min-height: 50px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--line-1);
   background: var(--bg);
 }
 
-.brandGroup {
+.topbarActions,
+.topbarControls {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 8px;
 }
 
-.brand {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 18px;
-  font-weight: 680;
-  letter-spacing: 0;
+.topbarControls {
+  justify-content: flex-end;
 }
 
-.helpButton {
-  flex: 0 0 auto;
-  width: 24px;
-  min-width: 24px;
-  height: 24px;
-  padding: 0;
-  border-radius: 50%;
-  color: var(--muted);
-}
-
-.helpButton svg {
-  width: 14px;
-  height: 14px;
-}
-
-.helpButton:hover,
-.helpButton:focus-visible {
-  border-color: var(--accent);
-  background: var(--surface);
-  color: var(--accent);
-}
-
-.graphTitle {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.graphWorkspaceName {
-  min-width: 4ch;
-  max-width: min(34vw, 420px);
-  height: auto;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  font-weight: inherit;
-  letter-spacing: inherit;
-}
-
-.graphWorkspaceName:disabled {
-  color: var(--fg);
-  opacity: 1;
-}
-
-.graphWorkspaceName:focus {
-  outline: none;
-}
-
-.graphWorkspaceName:focus-visible {
-  box-shadow: 0 2px 0 var(--accent);
-}
-
-.graphTitleSuffix {
-  flex: 0 0 auto;
+.statusRail {
+  display: none;
 }
 
 #noteTitle.editableTitle {
@@ -317,6 +256,11 @@ select:disabled {
   display: flex;
   min-width: 0;
   align-items: center;
+}
+
+.topbarActions .searchField {
+  flex: 0 1 360px;
+  width: min(360px, 100%);
 }
 
 .searchFieldIcon {
@@ -447,6 +391,10 @@ select:disabled {
   background: var(--bg);
 }
 
+.workspaceTab.renaming {
+  min-width: min(260px, 45vw);
+}
+
 .workspaceTab:not(.active):hover {
   background: var(--bg-raised);
 }
@@ -487,6 +435,24 @@ select:disabled {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.workspaceTabRename {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 34px 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.workspaceTabRename:focus,
+.workspaceTabRename:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px rgba(216, 239, 142, 0.3);
 }
 
 .workspaceTabDirty {
@@ -781,32 +747,15 @@ body.noWorkspace .launchScreen {
 
 .graphPane {
   display: grid;
-  grid-template-rows: 42px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   border-right: 1px solid var(--line-1);
   -webkit-user-select: none;
   user-select: none;
 }
 
-.paneHeader,
 .editorHeader,
 .status {
   border-bottom: 1px solid var(--line-1);
-}
-
-.paneHeader {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  padding: 0 12px;
-  background: var(--bg);
-}
-
-.paneStatus {
-  display: flex;
-  min-width: 0;
-  justify-content: flex-end;
-  gap: 12px;
 }
 
 .zoomControls {
@@ -870,6 +819,28 @@ body.noWorkspace .launchScreen {
   width: 34px;
   min-width: 34px;
   padding: 0;
+}
+
+.helpButton {
+  flex: 0 0 auto;
+  width: 34px;
+  min-width: 34px;
+  height: 30px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+}
+
+.helpButton svg {
+  width: 15px;
+  height: 15px;
+}
+
+.helpButton:hover,
+.helpButton:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-raised);
+  color: var(--accent);
 }
 
 .graphScroller {
@@ -978,16 +949,32 @@ body.graphFullscreen .graphPane,
   inset: 0;
   z-index: 20;
   display: grid;
-  grid-template-rows: 42px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   border: 0;
   background: var(--bg);
 }
 
-body.graphFullscreen .topbar,
 body.graphFullscreen .workspaceTabs,
 body.graphFullscreen .editorPane {
+  display: none;
+}
+
+body.graphFullscreen .topbar {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+  display: flex;
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+body.graphFullscreen .topbarActions {
   display: none;
 }
 

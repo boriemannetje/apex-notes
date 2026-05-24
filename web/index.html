@@ -11,22 +11,11 @@
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
-    <header class="topbar">
-      <div class="brandGroup">
-        <div class="brand">Apex Notes</div>
-        <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interaction help" title="Graph interaction help"></button>
-      </div>
-      <div class="searchField" title="Search titles, paths, and note text">
-        <span id="searchFieldIcon" class="searchFieldIcon" aria-hidden="true"></span>
-        <input id="searchInput" class="search" type="search" placeholder="Search notes" aria-label="Search notes" aria-haspopup="listbox" aria-expanded="false" aria-controls="searchResults" autocomplete="off" spellcheck="false">
-        <div id="searchResults" class="searchResults" role="listbox" aria-label="Search results" hidden></div>
-      </div>
-      <button id="newNoteButton" type="button" aria-label="Create a new note" title="Create a new note">New note</button>
-      <button id="openFolderButton" type="button" aria-label="Open a local notes folder" title="Open a local notes folder">Open folder</button>
-      <button id="createFolderButton" type="button" aria-label="Create a new notes folder" title="Create a new notes folder">Create folder</button>
-    </header>
-
     <nav id="workspaceTabs" class="workspaceTabs" aria-label="Open note folders" role="tablist"></nav>
+    <div class="statusRail" aria-live="polite">
+      <span id="validationStatus" class="muted"></span>
+      <span id="sourceStatus" class="muted"></span>
+    </div>
 
     <section id="launchScreen" class="launchScreen" aria-labelledby="launchTitle">
       <div class="launchInner">
@@ -61,22 +50,25 @@
 
     <main class="layout">
       <section class="graphPane" aria-label="Hierarchy graph">
-        <div class="paneHeader">
-          <label class="graphTitle">
-            <input id="graphWorkspaceName" class="graphWorkspaceName" type="text" value="Folder" autocomplete="off" spellcheck="false" aria-label="Current folder name" title="Rename current folder">
-            <span class="graphTitleSuffix">Graph</span>
-          </label>
-          <div class="paneStatus">
-            <span id="validationStatus" class="muted" aria-live="polite"></span>
-            <span id="sourceStatus" class="muted" aria-live="polite"></span>
+        <header class="topbar">
+          <div class="topbarActions">
+            <div class="searchField" title="Search titles, paths, and note text">
+              <span id="searchFieldIcon" class="searchFieldIcon" aria-hidden="true"></span>
+              <input id="searchInput" class="search" type="search" placeholder="Search notes" aria-label="Search notes" aria-haspopup="listbox" aria-expanded="false" aria-controls="searchResults" autocomplete="off" spellcheck="false">
+              <div id="searchResults" class="searchResults" role="listbox" aria-label="Search results" hidden></div>
+            </div>
+            <button id="newNoteButton" type="button" aria-label="Create a new note" title="Create a new note">New note</button>
           </div>
-          <div class="zoomControls" aria-label="Graph view controls">
-            <button id="zoomOutButton" type="button" aria-label="Zoom out" title="Zoom out"></button>
-            <button id="resetViewButton" type="button" aria-label="Fit graph to view" title="Fit graph to view" data-hover-label="Fit"></button>
-            <button id="zoomInButton" type="button" aria-label="Zoom in" title="Zoom in"></button>
-            <button id="fullscreenGraphButton" type="button" aria-label="Enter full screen graph" title="Enter full screen graph"></button>
+          <div class="topbarControls">
+            <div class="zoomControls" aria-label="Graph view controls">
+              <button id="zoomOutButton" type="button" aria-label="Zoom out" title="Zoom out"></button>
+              <button id="resetViewButton" type="button" aria-label="Fit graph to view" title="Fit graph to view" data-hover-label="Fit"></button>
+              <button id="zoomInButton" type="button" aria-label="Zoom in" title="Zoom in"></button>
+              <button id="fullscreenGraphButton" type="button" aria-label="Enter full screen graph" title="Enter full screen graph"></button>
+            </div>
+            <button id="graphHelpButton" class="helpButton" type="button" aria-label="Show graph interaction help" title="Graph interaction help"></button>
           </div>
-        </div>
+        </header>
         <div id="graphScroller" class="graphScroller">
           <section id="graphProjectLauncher" class="graphProjectLauncher" aria-labelledby="graphProjectTitle" hidden>
             <div class="graphProjectInner">

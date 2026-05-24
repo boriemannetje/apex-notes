@@ -176,8 +176,12 @@ const state = {
   graphBounds: null,
   graphViewport: null,
   graphFullscreenFallback: false,
-  graphProjectLauncherOpen: false
+  graphProjectLauncherOpen: false,
+  renamingWorkspaceId: null,
+  workspaceRenameDraft: ""
 };
+
+let suppressWorkspaceRenameCommit = false;
 
 const els = {
   launchScreen: document.querySelector("#launchScreen"),
@@ -194,7 +198,6 @@ const els = {
   graphLaunchStatus: document.querySelector("#graphLaunchStatus"),
   closeGraphProjectLauncherButton: document.querySelector("#closeGraphProjectLauncherButton"),
   workspaceTabs: document.querySelector("#workspaceTabs"),
-  graphWorkspaceName: document.querySelector("#graphWorkspaceName"),
   graph: document.querySelector("#graph"),
   graphPane: document.querySelector(".graphPane"),
   graphScroller: document.querySelector("#graphScroller"),
@@ -206,8 +209,6 @@ const els = {
   searchFieldIcon: document.querySelector("#searchFieldIcon"),
   searchInput: document.querySelector("#searchInput"),
   searchResults: document.querySelector("#searchResults"),
-  openFolderButton: document.querySelector("#openFolderButton"),
-  createFolderButton: document.querySelector("#createFolderButton"),
   newNoteButton: document.querySelector("#newNoteButton"),
   editor: document.querySelector("#editor"),
   noteTitle: document.querySelector("#noteTitle"),
@@ -342,8 +343,6 @@ void hydrateRecentProjects();
 function initializeIcons() {
   setButtonIcon(els.graphHelpButton, "help");
   setButtonIcon(els.newNoteButton, "newNote", "New note");
-  setButtonIcon(els.openFolderButton, "openProject", "Open folder");
-  setButtonIcon(els.createFolderButton, "createProject", "Create folder");
   setButtonIcon(els.launchOpenProjectButton, "openProject", "Open project");
   setButtonIcon(els.launchCreateProjectButton, "createProject", "Create project");
   setButtonIcon(els.graphOpenProjectButton, "openProject", "Open project");
@@ -418,8 +417,6 @@ function initializeEditor() {
 function bindEvents() {
   els.graphHelpButton.addEventListener("click", openGraphHelpDialog);
   els.closeGraphHelpButton.addEventListener("click", closeGraphHelpDialog);
-  els.openFolderButton.addEventListener("click", openNotesFolder);
-  els.createFolderButton.addEventListener("click", openCreateFolderDialog);
   els.launchOpenProjectButton.addEventListener("click", openNotesFolder);
   els.launchCreateProjectButton.addEventListener("click", openCreateFolderDialog);
   els.launchRecentList.addEventListener("click", onLaunchRecentClick);
@@ -428,11 +425,10 @@ function bindEvents() {
   els.graphRecentList.addEventListener("click", onLaunchRecentClick);
   els.closeGraphProjectLauncherButton.addEventListener("click", closeGraphProjectLauncher);
   els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
-  els.graphWorkspaceName.addEventListener("input", syncGraphWorkspaceNameSize);
-  els.graphWorkspaceName.addEventListener("blur", () => {
-    void renameActiveWorkspace();
-  });
-  els.graphWorkspaceName.addEventListener("keydown", onGraphWorkspaceNameKeydown);
+  els.workspaceTabs.addEventListener("dblclick", onWorkspaceTabsDoubleClick);
+  els.workspaceTabs.addEventListener("focusout", onWorkspaceTabsFocusOut);
+  els.workspaceTabs.addEventListener("input", onWorkspaceTabsInput);
+  els.workspaceTabs.addEventListener("keydown", onWorkspaceTabsKeydown);
   els.newNoteButton.addEventListener("click", openNewNoteDialog);
   els.zoomInButton.addEventListener("click", () => zoomAtCenter(1.18));
   els.zoomOutButton.addEventListener("click", () => zoomAtCenter(1 / 1.18));
@@ -566,12 +562,12 @@ function toggleGraphFullscreen() {
 function enterGraphFullscreen() {
   closeGraphCreatePopover();
   document.body.classList.add("graphFullscreen");
-  state.graphFullscreenFallback = !els.graphPane.requestFullscreen;
+  state.graphFullscreenFallback = !document.body.requestFullscreen;
   syncGraphFullscreenButton();
   requestGraphRender({ preserveView: true });
 
-  if (els.graphPane.requestFullscreen && !document.fullscreenElement) {
-    els.graphPane.requestFullscreen().catch(() => {
+  if (document.body.requestFullscreen && !document.fullscreenElement) {
+    document.body.requestFullscreen().catch(() => {
       state.graphFullscreenFallback = true;
       syncGraphFullscreenState();
     });
@@ -584,7 +580,7 @@ function exitGraphFullscreen() {
   syncGraphFullscreenButton();
   requestGraphRender({ preserveView: true });
 
-  if (document.fullscreenElement === els.graphPane && document.exitFullscreen) {
+  if (document.fullscreenElement && document.exitFullscreen) {
     document.exitFullscreen().catch(() => {
       syncGraphFullscreenState();
     });
@@ -592,12 +588,13 @@ function exitGraphFullscreen() {
 }
 
 function syncGraphFullscreenState() {
-  const isFullscreen = document.fullscreenElement === els.graphPane || (
+  const fullscreenElement = document.fullscreenElement;
+  const isFullscreen = fullscreenElement === document.body || fullscreenElement === els.graphPane || (
     state.graphFullscreenFallback &&
     document.body.classList.contains("graphFullscreen") &&
-    !document.fullscreenElement
+    !fullscreenElement
   );
-  if (document.fullscreenElement === els.graphPane) {
+  if (fullscreenElement === document.body || fullscreenElement === els.graphPane) {
     state.graphFullscreenFallback = false;
   }
   document.body.classList.toggle("graphFullscreen", isFullscreen);
@@ -617,32 +614,9 @@ function syncGraphFullscreenButton() {
 }
 
 function updateGraphTitle() {
-  const isEditingName = document.activeElement === els.graphWorkspaceName;
-  const workspaceName = state.workspaceName || "Folder";
-  const canRename = hasWritableWorkspace();
-  els.graphWorkspaceName.disabled = !canRename;
-  els.graphWorkspaceName.placeholder = workspaceName;
-  els.graphWorkspaceName.title = canRename ? "Rename current folder" : "Open or create a folder to rename it";
-  if (!isEditingName) {
-    els.graphWorkspaceName.value = workspaceName;
-  }
-  syncGraphWorkspaceNameSize();
-}
-
-function syncGraphWorkspaceNameSize() {
-  const value = els.graphWorkspaceName.value || els.graphWorkspaceName.placeholder || "Folder";
-  els.graphWorkspaceName.size = Math.max(4, Math.min(value.length, 34));
-}
-
-function onGraphWorkspaceNameKeydown(event) {
-  event.stopPropagation();
-  if (event.key === "Enter") {
-    event.preventDefault();
-    els.graphWorkspaceName.blur();
-  } else if (event.key === "Escape") {
-    event.preventDefault();
-    updateGraphTitle();
-    els.graphWorkspaceName.blur();
+  if (state.renamingWorkspaceId && state.renamingWorkspaceId !== state.activeWorkspaceId) {
+    state.renamingWorkspaceId = null;
+    state.workspaceRenameDraft = "";
   }
 }
 
@@ -738,20 +712,19 @@ function keepDisabledInfoClosed() {
   }
 }
 
-async function renameActiveWorkspace() {
+async function renameActiveWorkspace(requestedName) {
+  requestedName = normalizeHeaderTitleText(requestedName);
   if (!hasWritableWorkspace()) {
-    updateGraphTitle();
+    renderWorkspaceTabs();
     return;
   }
 
-  const requestedName = els.graphWorkspaceName.value.trim();
   if (!requestedName || requestedName === state.workspaceName) {
-    updateGraphTitle();
+    renderWorkspaceTabs();
     return;
   }
 
   const previousRootPath = state.rootPath;
-  els.graphWorkspaceName.disabled = true;
   stopLiveSync();
 
   try {
@@ -769,12 +742,46 @@ async function renameActiveWorkspace() {
     setNativeWorkspace(workspace, "Folder renamed", { previousRootPath });
   } catch (error) {
     setStatus(`Could not rename folder: ${String(error)}`);
-    updateGraphTitle();
+    renderWorkspaceTabs();
     startLiveSync();
   }
 }
 
+function startWorkspaceTabRename(workspaceId) {
+  if (!hasWritableWorkspace() || workspaceId !== state.activeWorkspaceId) return;
+  state.renamingWorkspaceId = workspaceId;
+  state.workspaceRenameDraft = state.workspaceName || "Folder";
+  renderWorkspaceTabs();
+  window.requestAnimationFrame(() => {
+    const input = els.workspaceTabs.querySelector("[data-rename-workspace]");
+    if (!input) return;
+    input.focus();
+    input.select();
+  });
+}
+
+function cancelWorkspaceTabRename() {
+  if (!state.renamingWorkspaceId) return;
+  state.renamingWorkspaceId = null;
+  state.workspaceRenameDraft = "";
+  renderWorkspaceTabs();
+}
+
+async function commitWorkspaceTabRename(input) {
+  const workspaceId = input?.dataset.renameWorkspace || "";
+  if (!workspaceId || state.renamingWorkspaceId !== workspaceId) return;
+  const requestedName = normalizeHeaderTitleText(input.value);
+  state.renamingWorkspaceId = null;
+  state.workspaceRenameDraft = "";
+  renderWorkspaceTabs();
+  await renameActiveWorkspace(requestedName);
+}
+
 function onWorkspaceTabsClick(event) {
+  if (event.target.closest("[data-rename-workspace]")) {
+    return;
+  }
+
   const openButton = event.target.closest("[data-open-workspace]");
   if (openButton) {
     event.preventDefault();
@@ -799,6 +806,51 @@ function onWorkspaceTabsClick(event) {
     }
     void switchWorkspaceTab(switchButton.dataset.switchWorkspace);
   }
+}
+
+function onWorkspaceTabsDoubleClick(event) {
+  if (event.target.closest("[data-close-workspace], [data-open-workspace], [data-rename-workspace]")) {
+    return;
+  }
+
+  const tab = event.target.closest(".workspaceTab.active");
+  if (!tab) return;
+  event.preventDefault();
+  startWorkspaceTabRename(tab.dataset.workspaceId);
+}
+
+function onWorkspaceTabsInput(event) {
+  const input = event.target.closest("[data-rename-workspace]");
+  if (!input || state.renamingWorkspaceId !== input.dataset.renameWorkspace) return;
+  state.workspaceRenameDraft = input.value;
+}
+
+function onWorkspaceTabsFocusOut(event) {
+  if (suppressWorkspaceRenameCommit) return;
+  const input = event.target.closest("[data-rename-workspace]");
+  if (!input) return;
+  void commitWorkspaceTabRename(input);
+}
+
+function onWorkspaceTabsKeydown(event) {
+  const renameInput = event.target.closest("[data-rename-workspace]");
+  if (renameInput) {
+    event.stopPropagation();
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void commitWorkspaceTabRename(renameInput);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelWorkspaceTabRename();
+    }
+    return;
+  }
+
+  if (event.key !== "F2") return;
+  const switchButton = event.target.closest("[data-switch-workspace]");
+  if (!switchButton || switchButton.dataset.switchWorkspace !== state.activeWorkspaceId) return;
+  event.preventDefault();
+  startWorkspaceTabRename(switchButton.dataset.switchWorkspace);
 }
 
 function onLaunchRecentClick(event) {
@@ -869,6 +921,8 @@ function startEmpty() {
   state.suppressGraphCreateUntil = 0;
   state.armedRope = null;
   state.activeInteraction = null;
+  state.renamingWorkspaceId = null;
+  state.workspaceRenameDraft = "";
   cancelQueuedInteraction();
   state.graphViewport = null;
   els.searchInput.value = "";
@@ -1511,6 +1565,8 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.labelVisibilityCache = null;
   state.labelVisibility = null;
   state.labelVisibilityKey = "";
+  state.renamingWorkspaceId = null;
+  state.workspaceRenameDraft = "";
 
   rebuildIndex();
   state.validation = validateNotes();
@@ -1575,40 +1631,64 @@ async function closeWorkspaceTab(workspaceId) {
 }
 
 function renderWorkspaceTabs() {
+  const activeRenameInput = document.activeElement?.closest?.("[data-rename-workspace]");
+  const shouldRestoreRenameFocus = Boolean(
+    activeRenameInput && state.renamingWorkspaceId === activeRenameInput.dataset.renameWorkspace
+  );
+  if (shouldRestoreRenameFocus) {
+    state.workspaceRenameDraft = activeRenameInput.value;
+  }
+
   const fragment = document.createDocumentFragment();
 
   for (const workspace of state.workspaces) {
     const isActive = workspace.id === state.activeWorkspaceId;
     const isDirty = isActive ? state.dirty : workspace.dirty;
+    const isRenaming = isActive && state.renamingWorkspaceId === workspace.id;
     const tab = document.createElement("div");
-    tab.className = `workspaceTab${isActive ? " active" : ""}`;
+    tab.className = `workspaceTab${isActive ? " active" : ""}${isRenaming ? " renaming" : ""}`;
+    tab.dataset.workspaceId = workspace.id;
     tab.setAttribute("role", "tab");
     tab.setAttribute("aria-selected", String(isActive));
     tab.title = workspace.rootPath || workspace.workspaceName || "Folder";
-
-    const switchButton = document.createElement("button");
-    switchButton.className = "workspaceTabMain";
-    switchButton.type = "button";
-    switchButton.dataset.switchWorkspace = workspace.id;
     const workspaceLabel = workspace.workspaceName || "Folder";
-    switchButton.setAttribute(
-      "aria-label",
-      `${isActive ? "Current folder" : "Switch to folder"}: ${workspaceLabel}${isDirty ? ", unsaved changes" : ""}`
-    );
-    switchButton.title = `${workspaceLabel}${isDirty ? " - unsaved changes" : ""}`;
 
-    const title = document.createElement("span");
-    title.className = "workspaceTabTitle";
-    title.textContent = workspaceLabel;
-    switchButton.appendChild(title);
+    if (isRenaming) {
+      const input = document.createElement("input");
+      input.className = "workspaceTabRename";
+      input.type = "text";
+      input.value = state.workspaceRenameDraft || workspaceLabel;
+      input.dataset.renameWorkspace = workspace.id;
+      input.setAttribute("aria-label", `Rename folder: ${workspaceLabel}`);
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      tab.appendChild(input);
+    } else {
+      const switchButton = document.createElement("button");
+      switchButton.className = "workspaceTabMain";
+      switchButton.type = "button";
+      switchButton.dataset.switchWorkspace = workspace.id;
+      switchButton.setAttribute(
+        "aria-label",
+        `${isActive ? "Current folder" : "Switch to folder"}: ${workspaceLabel}${isDirty ? ", unsaved changes" : ""}`
+      );
+      switchButton.title = `${workspaceLabel}${isDirty ? " - unsaved changes" : ""}`;
 
-    if (isDirty) {
-      const dirty = document.createElement("span");
-      dirty.className = "workspaceTabDirty";
-      dirty.textContent = "*";
-      dirty.setAttribute("aria-label", "Unsaved changes");
-      dirty.title = "Unsaved changes";
-      switchButton.appendChild(dirty);
+      const title = document.createElement("span");
+      title.className = "workspaceTabTitle";
+      title.textContent = workspaceLabel;
+      switchButton.appendChild(title);
+
+      if (isDirty) {
+        const dirty = document.createElement("span");
+        dirty.className = "workspaceTabDirty";
+        dirty.textContent = "*";
+        dirty.setAttribute("aria-label", "Unsaved changes");
+        dirty.title = "Unsaved changes";
+        switchButton.appendChild(dirty);
+      }
+
+      tab.appendChild(switchButton);
     }
 
     const closeButton = document.createElement("button");
@@ -1619,7 +1699,7 @@ function renderWorkspaceTabs() {
     closeButton.title = `Close ${workspace.workspaceName || "folder"}`;
     closeButton.appendChild(createIcon("close"));
 
-    tab.append(switchButton, closeButton);
+    tab.appendChild(closeButton);
     fragment.appendChild(tab);
   }
 
@@ -1634,7 +1714,20 @@ function renderWorkspaceTabs() {
     fragment.appendChild(addButton);
   }
 
-  els.workspaceTabs.replaceChildren(fragment);
+  suppressWorkspaceRenameCommit = true;
+  try {
+    els.workspaceTabs.replaceChildren(fragment);
+  } finally {
+    suppressWorkspaceRenameCommit = false;
+  }
+
+  if (shouldRestoreRenameFocus) {
+    const input = els.workspaceTabs.querySelector("[data-rename-workspace]");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  }
 }
 
 function rememberWorkspaceRecent(workspace, previousRootPath) {
