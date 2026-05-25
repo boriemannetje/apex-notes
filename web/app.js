@@ -2196,13 +2196,8 @@ function resolveWikiNote(ref) {
 
 function validateNotes() {
   const issues = [];
-  const titleCounts = new Map();
 
   for (const note of state.notes) {
-    const titleKey = normalizeKey(note.title);
-    if (!titleCounts.has(titleKey)) titleCounts.set(titleKey, []);
-    titleCounts.get(titleKey).push(note);
-
     if (!note.hasFrontmatter) {
       issues.push({ type: "frontmatter", note, message: `${note.title} is missing frontmatter` });
     }
@@ -2213,13 +2208,6 @@ function validateNotes() {
 
     if (!note.hasLevel) {
       issues.push({ type: "level", note, message: `${note.title} is missing a valid level` });
-    }
-  }
-
-  for (const matches of titleCounts.values()) {
-    if (matches.length < 2) continue;
-    for (const note of matches) {
-      issues.push({ type: "duplicate", note, message: `${note.title} title is duplicated` });
     }
   }
 
@@ -5714,7 +5702,7 @@ function renderValidationStatus() {
   if (!state.validation.length) {
     if (state.graphHasHierarchy) {
       els.validationStatus.textContent = "Valid";
-      els.validationStatus.title = "No broken parents, missing levels, or duplicate titles";
+      els.validationStatus.title = "No broken parents or missing levels";
       return;
     }
 

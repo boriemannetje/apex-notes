@@ -177,6 +177,9 @@ export function resolveNotePath(value, byPath, aliases) {
   if (!ref) return null;
   if (byPath.has(ref)) return ref;
 
+  const markdownPath = `${ref}.md`;
+  if (byPath.has(markdownPath)) return markdownPath;
+
   return (
     aliases.get(normalizeKey(ref)) ||
     aliases.get(normalizeKey(slugify(ref))) ||
@@ -208,21 +211,11 @@ export function validateGraph({
   children,
   E_tree,
   missingParentIssues = [],
-  duplicateAliases = new Map(),
   derivedLevels = new Map()
 }) {
   const issues = [];
 
   issues.push(...missingParentIssues);
-
-  for (const [alias, paths] of duplicateAliases) {
-    issues.push({
-      type: ISSUE_TYPES.DUPLICATE_ALIAS,
-      alias,
-      paths,
-      message: `Alias "${alias}" resolves to ${paths.length} notes`
-    });
-  }
 
   for (const issue of findCycles(V, parents)) {
     issues.push(issue);
