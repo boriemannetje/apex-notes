@@ -33,6 +33,7 @@ import {
   findLooseGridPositions,
   resolveStoredPosition as resolveStoredGraphPosition
 } from "./graphPositioning.js";
+import { getClampedPopoverPosition } from "./popoverPositioning.js";
 import {
   loadRecentProjects,
   normalizeRecentProjects,
@@ -5168,11 +5169,26 @@ async function openGraphCreatePopover(event) {
 
   event.preventDefault();
   state.pendingCreatePoint = eventToGraphPoint(event);
-  els.graphCreatePopover.style.left = `${Math.round(event.clientX)}px`;
-  els.graphCreatePopover.style.top = `${Math.round(event.clientY)}px`;
-  els.graphCreatePopover.hidden = false;
   els.graphNewTitle.value = "";
+  els.graphCreatePopover.style.left = "0px";
+  els.graphCreatePopover.style.top = "0px";
+  els.graphCreatePopover.hidden = false;
+  positionGraphCreatePopover(event.clientX, event.clientY);
   els.graphNewTitle.focus();
+}
+
+function positionGraphCreatePopover(clientX, clientY) {
+  const bounds = els.graphScroller.getBoundingClientRect();
+  const popover = els.graphCreatePopover;
+  popover.style.maxWidth = `${Math.max(1, Math.round(bounds.width - 24))}px`;
+  popover.style.maxHeight = `${Math.max(1, Math.round(bounds.height - 24))}px`;
+  const position = getClampedPopoverPosition(
+    { x: clientX, y: clientY },
+    popover.getBoundingClientRect(),
+    bounds
+  );
+  popover.style.left = `${position.left}px`;
+  popover.style.top = `${position.top}px`;
 }
 
 function closeGraphCreatePopover() {
