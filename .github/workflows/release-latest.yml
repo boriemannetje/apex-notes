@@ -1,4 +1,4 @@
-name: Publish Latest Release
+name: Publish Main Production
 
 on:
   push:
@@ -7,80 +7,30 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: release-latest-${{ github.ref }}
+  group: main-production-release
   cancel-in-progress: false
 
 jobs:
-  plan:
-    name: decide whether a release is needed
-    runs-on: ubuntu-latest
-    outputs:
-      needs_release: ${{ steps.release.outputs.needs_release }}
-      tag: ${{ steps.version.outputs.tag }}
-      version: ${{ steps.version.outputs.version }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Read package version
-        id: version
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-
-      - name: Check whether release already exists
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "needs_release=false" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG already exists; nothing to publish."
-          else
-            echo "needs_release=true" >> "$GITHUB_OUTPUT"
-            echo "Release $TAG does not exist yet; publish job will request release approval."
-          fi
-
   publish:
-    name: publish latest macOS release
-    needs: plan
-    if: needs.plan.outputs.needs_release == 'true' && github.repository == 'boriemannetje/apex-notes'
+    name: publish main production app
+    if: github.repository == 'boriemannetje/apex-notes'
     runs-on: macos-latest
     timeout-minutes: 45
-    environment:
-      name: release
-      url: https://github.com/boriemannetje/apex-notes/releases/tag/${{ needs.plan.outputs.tag }}
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout trusted main commit
+      - name: Checkout main commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
 
-      - name: Verify required Apple signing secrets
-        env:
-          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      - name: Read app version
+        id: version
         run: |
-          missing=0
-          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_TEAM_ID APPLE_ID APPLE_APP_SPECIFIC_PASSWORD; do
-            if [ -z "${!name}" ]; then
-              echo "::error::$name is required in the protected release environment."
-              missing=1
-            fi
-          done
-          exit "$missing"
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -94,68 +44,50 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install signing certificate
-        env:
-          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          certificate_path="$RUNNER_TEMP/developer-id.p12"
-          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
-
-          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
-          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
-          security list-keychain -d user -s "$keychain_path"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
-
-      - name: Run release validation
+      - name: Run production validation
         run: npm test && npm run test:e2e && cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build signed macOS package
+      - name: Build Terminal-installable macOS package
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APEX_NOTES_ALLOW_ADHOC: "1"
         run: npm run package:mac
 
-      - name: Notarize and staple DMG
+      - name: Prepare rolling production assets
         env:
-          VERSION: ${{ needs.plan.outputs.version }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          dmg_path="src-tauri/target/release/bundle/dmg/Apex Notes_${VERSION}_aarch64.dmg"
-          xcrun notarytool submit "$dmg_path" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-          xcrun stapler staple "$dmg_path"
-          xcrun stapler validate "$dmg_path"
-          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
-
-      - name: Prepare release assets
-        env:
-          VERSION: ${{ needs.plan.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p release-assets
           cp "src-tauri/target/release/bundle/dmg/Apex Notes_${VERSION}_aarch64.dmg" \
-            "release-assets/apex-notes-${VERSION}-macos-arm64.dmg"
+            "release-assets/apex-notes-main-macos-arm64.dmg"
           cp "skills/apex-notes-writing/SKILL.md" "release-assets/apex-notes-SKILL.md"
           (
             cd skills
             zip -r "../release-assets/apex-notes-writing-skill.zip" apex-notes-writing
           )
+          printf '%s\n' "$GITHUB_SHA" > release-assets/main-production-commit.txt
+          printf '%s\n' "$VERSION" > release-assets/main-production-version.txt
 
-      - name: Publish GitHub Release
+      - name: Move rolling production tag
+        run: |
+          git tag -f main-production "$GITHUB_SHA"
+          git push origin refs/tags/main-production --force
+
+      - name: Publish or update rolling production release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.plan.outputs.tag }}
-          VERSION: ${{ needs.plan.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$TAG" release-assets/* \
-            --target "$GITHUB_SHA" \
-            --title "Apex Notes ${VERSION}" \
-            --notes "Automated release from approved main commit ${GITHUB_SHA}."
+          if gh release view main-production >/dev/null 2>&1; then
+            gh release upload main-production release-assets/* --clobber
+            gh release edit main-production \
+              --target "$GITHUB_SHA" \
+              --title "Apex Notes main production" \
+              --notes "Production build from main at ${GITHUB_SHA}. App version: ${VERSION}." \
+              --latest
+          else
+            gh release create main-production release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "Apex Notes main production" \
+              --notes "Production build from main at ${GITHUB_SHA}. App version: ${VERSION}." \
+              --latest
+          fi

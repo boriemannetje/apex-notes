@@ -36,11 +36,11 @@ For UI, workspace, parser, or filesystem changes, also smoke test the built app 
 
 ## Publish
 
-- For routine releases, prefer the protected GitHub Actions flow in [release-automation.md](release-automation.md).
-- Create a GitHub Release with a short changelog, testing notes, and known limitations.
+- For routine production releases, push to `main` and let the rolling `main-production` GitHub Actions flow in [release-automation.md](release-automation.md) publish the build.
+- Create a separate versioned GitHub Release with a short changelog, testing notes, and known limitations only when you intentionally want a stable archive tag.
 - Mark security-sensitive fixes carefully and avoid exploit details until disclosure is appropriate.
-- The Netlify website installer reads GitHub `releases/latest`; only update the separate website/download page when its copy or install command changes.
-- Verify the public download link points at the new release.
+- The Netlify website installer reads the rolling GitHub `main-production` release; only update the separate website/download page when its copy or install command changes.
+- Verify the public download link points at the current `main-production` release.
 
 ## After Release
 
