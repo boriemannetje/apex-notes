@@ -185,6 +185,7 @@ const state = {
   graphBounds: null,
   graphViewport: null,
   graphFullscreenFallback: false,
+  editorFullscreenFallback: false,
   graphProjectLauncherOpen: false,
   renamingWorkspaceId: null,
   workspaceRenameDraft: "",
@@ -231,6 +232,7 @@ const els = {
   infoTitle: document.querySelector("#infoTitle"),
   infoParent: document.querySelector("#infoParent"),
   infoLevel: document.querySelector("#infoLevel"),
+  fullscreenEditorButton: document.querySelector("#fullscreenEditorButton"),
   deleteNoteButton: document.querySelector("#deleteNoteButton"),
   editorStatus: document.querySelector("#editorStatus"),
   sourceStatus: document.querySelector("#sourceStatus"),
@@ -369,6 +371,7 @@ function initializeIcons() {
   setButtonIcon(els.resetViewButton, "fit");
   setButtonIcon(els.zoomInButton, "zoomIn");
   setButtonIcon(els.fullscreenGraphButton, "fullscreenEnter");
+  setButtonIcon(els.fullscreenEditorButton, "fullscreenEnter");
   setButtonIcon(els.deleteNoteButton, "trash");
 }
 
@@ -648,6 +651,7 @@ function bindEvents() {
   els.noteInfo.addEventListener("toggle", keepDisabledInfoClosed);
   els.infoTitle.addEventListener("input", onInfoChanged);
   els.infoParent.addEventListener("change", onInfoChanged);
+  els.fullscreenEditorButton.addEventListener("click", toggleEditorFullscreen);
   els.deleteNoteButton.addEventListener("click", deleteSelectedNote);
   els.graphCreatePopover.addEventListener("submit", createGraphNoteFromPopover);
   els.cancelGraphCreateButton.addEventListener("click", closeGraphCreatePopover);
@@ -683,9 +687,14 @@ function bindEvents() {
   document.addEventListener("keydown", onDocumentKeydown);
   document.addEventListener("pointerdown", onDocumentPointerDown);
   window.addEventListener("resize", scheduleResizeRender);
-  document.addEventListener("fullscreenchange", syncGraphFullscreenState);
+  document.addEventListener("fullscreenchange", syncFullscreenState);
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      if (state.editorFullscreenFallback && document.body.classList.contains("editorFullscreen") && !document.fullscreenElement) {
+        event.preventDefault();
+        exitEditorFullscreen();
+        return;
+      }
       const isGraphCreateTarget = els.graphCreatePopover.contains(event.target);
       if (!isGraphCreateTarget && (isTextEntryTarget(event.target) || isAnyDialogOpen())) return;
 
@@ -761,8 +770,16 @@ function toggleGraphFullscreen() {
   enterGraphFullscreen();
 }
 
+function syncFullscreenState() {
+  syncGraphFullscreenState();
+  syncEditorFullscreenState();
+}
+
 function enterGraphFullscreen() {
   closeGraphCreatePopover();
+  document.body.classList.remove("editorFullscreen");
+  state.editorFullscreenFallback = false;
+  syncEditorFullscreenButton();
   document.body.classList.add("graphFullscreen");
   state.graphFullscreenFallback = !document.body.requestFullscreen;
   syncGraphFullscreenButton();
@@ -813,6 +830,76 @@ function syncGraphFullscreenButton() {
   );
   els.fullscreenGraphButton.title = isFullscreen ? "Exit full screen graph" : "Enter full screen graph";
   els.fullscreenGraphButton.setAttribute("aria-pressed", String(isFullscreen));
+}
+
+function toggleEditorFullscreen() {
+  if (document.body.classList.contains("editorFullscreen")) {
+    exitEditorFullscreen();
+    return;
+  }
+
+  enterEditorFullscreen();
+}
+
+function enterEditorFullscreen() {
+  closeGraphCreatePopover();
+  document.body.classList.remove("graphFullscreen");
+  state.graphFullscreenFallback = false;
+  syncGraphFullscreenButton();
+  document.body.classList.add("editorFullscreen");
+  state.editorFullscreenFallback = !els.editorPane.requestFullscreen;
+  syncEditorFullscreenButton();
+  refreshEditorLayout();
+
+  if (els.editorPane.requestFullscreen && !document.fullscreenElement) {
+    els.editorPane.requestFullscreen().catch(() => {
+      state.editorFullscreenFallback = true;
+      syncEditorFullscreenState();
+    });
+  }
+}
+
+function exitEditorFullscreen() {
+  document.body.classList.remove("editorFullscreen");
+  state.editorFullscreenFallback = false;
+  syncEditorFullscreenButton();
+  refreshEditorLayout();
+
+  if (document.fullscreenElement === els.editorPane && document.exitFullscreen) {
+    document.exitFullscreen().catch(() => {
+      syncEditorFullscreenState();
+    });
+  }
+}
+
+function syncEditorFullscreenState() {
+  const fullscreenElement = document.fullscreenElement;
+  const isFullscreen = fullscreenElement === els.editorPane || (
+    state.editorFullscreenFallback &&
+    document.body.classList.contains("editorFullscreen") &&
+    !fullscreenElement
+  );
+  if (fullscreenElement === els.editorPane) {
+    state.editorFullscreenFallback = false;
+  }
+  document.body.classList.toggle("editorFullscreen", isFullscreen);
+  syncEditorFullscreenButton();
+  refreshEditorLayout();
+}
+
+function syncEditorFullscreenButton() {
+  const isFullscreen = document.body.classList.contains("editorFullscreen");
+  setButtonIcon(els.fullscreenEditorButton, isFullscreen ? "fullscreenExit" : "fullscreenEnter");
+  els.fullscreenEditorButton.setAttribute(
+    "aria-label",
+    isFullscreen ? "Exit full screen editor" : "Enter full screen editor"
+  );
+  els.fullscreenEditorButton.title = isFullscreen ? "Exit full screen editor" : "Enter full screen editor";
+  els.fullscreenEditorButton.setAttribute("aria-pressed", String(isFullscreen));
+}
+
+function refreshEditorLayout() {
+  state.editorView?.requestMeasure();
 }
 
 function updateGraphTitle() {
@@ -2992,9 +3079,10 @@ function renderGraph({ preserveView } = { preserveView: true }) {
 
   if (!notes.length) {
     els.graph.appendChild(canvas);
+    const visibleViewport = measureVisibleGraphViewport({ allowFallback: true }) || viewport;
     const empty = document.createElementNS("http://www.w3.org/2000/svg", "text");
     empty.setAttribute("class", "emptyGraphText");
-    empty.setAttribute("x", String(viewportWidth / 2));
+    empty.setAttribute("x", String(visibleViewport.left + visibleViewport.width / 2));
     empty.setAttribute("y", String(viewportHeight / 2));
     empty.textContent = hasEmptyWritableWorkspace()
       ? "Click the graph to create the first note"
