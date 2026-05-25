@@ -82,7 +82,26 @@ test("reports duplicate aliases and cycles without throwing away vertices", () =
   assert.equal(index.V.size, 2);
   assert.deepEqual(index.duplicateAliases.get("same"), ["a.md", "b.md"]);
   assert(index.validation.some((issue) => issue.type === ISSUE_TYPES.CYCLE));
+  assert(!index.validation.some((issue) => issue.type === ISSUE_TYPES.DUPLICATE_ALIAS));
   assert(!index.validation.some((issue) => issue.type === "root-count"));
+});
+
+test("resolves file-stem refs before ambiguous display title aliases", () => {
+  const index = createGraphIndex([
+    note("new-apex.md", "new apex", 0, null, ""),
+    note("branch.md", "Branch", 1, "[[new-apex]]", ""),
+    note("branch-2.md", "Branch", 1, "[[new-apex]]", ""),
+    note("branch-3.md", "Branchi", 2, "[[branch-2]]", "[[branch]]")
+  ]);
+
+  assert.deepEqual(index.duplicateAliases.get("branch").toSorted(), ["branch-2.md", "branch.md"]);
+  assert.equal(index.parents.get("branch-3.md"), "branch-2.md");
+  assert.equal(index.refsOut.get("branch-3.md").get("branch.md"), 1);
+  assert.deepEqual(
+    index.E_ref.map((edge) => [edge.from, edge.to, edge.weight]),
+    [["branch-3.md", "branch.md", 1]]
+  );
+  assert.equal(index.validation.length, 0);
 });
 
 test("derives levels and validates deep parent chains in linear time", () => {

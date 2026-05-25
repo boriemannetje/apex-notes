@@ -203,7 +203,7 @@ select:disabled {
   gap: 12px;
   align-items: center;
   min-height: 50px;
-  padding: 8px 12px;
+  padding: 8px calc(max(344px, var(--editor-pane-width, 34vw)) + 20px) 8px 12px;
   border-bottom: 1px solid var(--line-1);
   background: var(--bg);
 }
@@ -733,13 +733,16 @@ body.noWorkspace .launchScreen {
 }
 
 .layout {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(344px, 34vw);
+  grid-template-columns: minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
   background: var(--bg);
 }
 
 .graphPane,
+.editorResizeHandle,
 .editorPane {
   min-width: 0;
   min-height: 0;
@@ -748,7 +751,54 @@ body.noWorkspace .launchScreen {
 .graphPane {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  border-right: 1px solid var(--line-1);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.editorResizeHandle {
+  position: absolute;
+  top: 0;
+  right: max(344px, var(--editor-pane-width, 34vw));
+  bottom: 0;
+  z-index: 6;
+  width: 8px;
+  cursor: col-resize;
+  background: var(--bg);
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.editorResizeHandle::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: var(--line-1);
+  content: "";
+  transition:
+    background var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.editorResizeHandle:hover::before,
+.editorResizeHandle:focus-visible::before,
+.editorResizeHandle.isDragging::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(216, 239, 142, 0.16);
+}
+
+.editorResizeHandle:focus-visible {
+  outline: none;
+}
+
+body.isResizingEditor {
+  cursor: col-resize;
+}
+
+body.isResizingEditor,
+body.isResizingEditor * {
   -webkit-user-select: none;
   user-select: none;
 }
@@ -957,6 +1007,7 @@ body.graphFullscreen .graphPane,
 }
 
 body.graphFullscreen .workspaceTabs,
+body.graphFullscreen .editorResizeHandle,
 body.graphFullscreen .editorPane {
   display: none;
 }
@@ -1132,8 +1183,15 @@ body.graphFullscreen .topbarActions {
 }
 
 .editorPane {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
   display: grid;
+  width: max(344px, var(--editor-pane-width, 34vw));
   grid-template-rows: auto minmax(0, 1fr) 34px;
+  border-left: 1px solid var(--line-1);
   background: var(--bg);
 }
 
@@ -1503,7 +1561,7 @@ h2 {
   -webkit-backdrop-filter: blur(10px) saturate(140%);
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
   color: var(--fg);
-  transform: translate(10px, 10px);
+  overflow: auto;
 }
 
 .graphCreatePopover[hidden] {

@@ -112,6 +112,73 @@ test("workspace chrome supports rename and fullscreen without losing the graph",
   await page.close();
 });
 
+test("editor resize separator supports pointer drag, persistence, and keyboard control", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  const initial = await workspaceMetrics(page);
+  await dragEditorResizeHandle(page, -160);
+  const widened = await workspaceMetrics(page);
+  assert(widened.editorPane.width > initial.editorPane.width + 120);
+  assert.equal(Math.round(widened.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(widened.graph.width), Math.round(initial.graph.width));
+  assert(widened.editorPane.x > widened.graphPane.x);
+  assert(widened.editorPane.x < widened.graphPane.x + widened.graphPane.width);
+  assert(widened.graph.width > 0);
+  assert(widened.graph.height > 0);
+
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  const restored = await workspaceMetrics(page);
+  assert(Math.abs(restored.editorPane.width - widened.editorPane.width) <= 2);
+  assert.equal(Math.round(restored.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(restored.graph.width), Math.round(initial.graph.width));
+
+  const handle = page.locator("#editorResizeHandle");
+  await handle.focus();
+  await page.keyboard.press("ArrowRight");
+  const narrowedByKey = await workspaceMetrics(page);
+  assert(narrowedByKey.editorPane.width < restored.editorPane.width);
+  assert.equal(Math.round(narrowedByKey.graph.width), Math.round(initial.graph.width));
+
+  await page.keyboard.press("Home");
+  const minimum = await workspaceMetrics(page);
+  assert(Math.abs(minimum.editorPane.width - 344) <= 2);
+  assert.equal(await handle.getAttribute("aria-valuenow"), "344");
+
+  await page.keyboard.press("End");
+  const maximum = await workspaceMetrics(page);
+  assert(maximum.editorPane.width > minimum.editorPane.width);
+  assert.equal(
+    Math.round(maximum.editorPane.width),
+    Number(await handle.getAttribute("aria-valuemax"))
+  );
+  assert.equal(Math.round(maximum.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(maximum.graph.width), Math.round(initial.graph.width));
+  assert(maximum.graph.width > 0);
+  assert(maximum.graph.height > 0);
+
+  await page.locator("#resetViewButton").click();
+  await page.waitForTimeout(650);
+  const fitted = await workspaceMetrics(page);
+  assert.equal(Math.round(fitted.graphPane.width), Math.round(initial.graphPane.width));
+  assert.equal(Math.round(fitted.graph.width), Math.round(initial.graph.width));
+  assert(fitted.nodeContent.left >= fitted.graphPane.x);
+  assert(fitted.nodeContent.top >= fitted.graph.y);
+  assert(fitted.nodeContent.right <= fitted.editorPane.x - 8);
+  assert(fitted.nodeContent.bottom <= fitted.graph.y + fitted.graph.height);
+  const visibleCenter = (fitted.graphPane.x + fitted.editorPane.x - 8) / 2;
+  const contentCenter = (fitted.nodeContent.left + fitted.nodeContent.right) / 2;
+  assert(Math.abs(contentCenter - visibleCenter) < 36);
+
+  await page.close();
+});
+
 async function newMockedTauriPage() {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.addInitScript((seedWorkspace) => {
@@ -231,7 +298,22 @@ function sampleWorkspace() {
 }
 
 async function assertMainWorkspaceGeometry(page) {
-  const metrics = await page.evaluate(() => {
+  const metrics = await workspaceMetrics(page);
+
+  assert.equal(metrics.bodyClass, "");
+  assert(metrics.tabs.height >= 36);
+  assert.equal(metrics.tabs.y, 0);
+  assert(metrics.topbar.y >= metrics.tabs.height);
+  assert(metrics.graphPane.width > 800);
+  assert(metrics.resizeHandle.width >= 8);
+  assert(metrics.editorPane.width > 360);
+  assert(metrics.graph.height > 500);
+  assert(metrics.search.width >= 300);
+  assert(metrics.newNote.width >= 90);
+}
+
+async function workspaceMetrics(page) {
+  return page.evaluate(() => {
     const box = (selector) => {
       const rect = document.querySelector(selector)?.getBoundingClientRect();
       return rect ? {
@@ -241,28 +323,55 @@ async function assertMainWorkspaceGeometry(page) {
         height: rect.height
       } : null;
     };
+    const boxes = (selector) => Array.from(document.querySelectorAll(selector))
+      .map((element) => element.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0);
+    const bounds = (selector) => {
+      const rects = boxes(selector);
+      if (!rects.length) return null;
+      const left = Math.min(...rects.map((rect) => rect.left));
+      const top = Math.min(...rects.map((rect) => rect.top));
+      const right = Math.max(...rects.map((rect) => rect.right));
+      const bottom = Math.max(...rects.map((rect) => rect.bottom));
+      return {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+        left,
+        right,
+        top,
+        bottom
+      };
+    };
 
     return {
       bodyClass: document.body.className,
       tabs: box("#workspaceTabs"),
       topbar: box(".topbar"),
       graphPane: box(".graphPane"),
+      resizeHandle: box("#editorResizeHandle"),
       editorPane: box(".editorPane"),
       graph: box("#graph"),
+      nodeDots: bounds(".nodeDot"),
+      nodeContent: bounds(".nodeDot, .nodeLabel"),
       search: box(".searchField"),
       newNote: box("#newNoteButton")
     };
   });
+}
 
-  assert.equal(metrics.bodyClass, "");
-  assert(metrics.tabs.height >= 36);
-  assert.equal(metrics.tabs.y, 0);
-  assert(metrics.topbar.y >= metrics.tabs.height);
-  assert(metrics.graphPane.width > 800);
-  assert(metrics.editorPane.width > 360);
-  assert(metrics.graph.height > 500);
-  assert(metrics.search.width >= 300);
-  assert(metrics.newNote.width >= 90);
+async function dragEditorResizeHandle(page, deltaX) {
+  const handle = page.locator("#editorResizeHandle");
+  const box = await handle.boundingBox();
+  assert(box);
+  const startX = box.x + box.width / 2;
+  const startY = box.y + box.height / 2;
+
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + deltaX, startY, { steps: 8 });
+  await page.mouse.up();
 }
 
 async function assertGraphNode(page, path) {
