@@ -1,0 +1,148 @@
+name: Publish Latest Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-latest-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish latest macOS release
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read package version
+        id: version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether release already exists
+        id: existing_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists; skipping publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify required Apple signing secrets
+        if: steps.existing_release.outputs.exists == 'false'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          missing=0
+          for name in APPLE_CERTIFICATE_P12_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_TEAM_ID APPLE_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is required to publish the public macOS download."
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Set up Node
+        if: steps.existing_release.outputs.exists == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        if: steps.existing_release.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        if: steps.existing_release.outputs.exists == 'false'
+        run: npm ci
+
+      - name: Install signing certificate
+        if: steps.existing_release.outputs.exists == 'false'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
+
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychain -d user -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+
+      - name: Run release validation
+        if: steps.existing_release.outputs.exists == 'false'
+        run: npm test && npm run test:e2e && cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build signed macOS package
+        if: steps.existing_release.outputs.exists == 'false'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: npm run package:mac
+
+      - name: Notarize and staple DMG
+        if: steps.existing_release.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          dmg_path="src-tauri/target/release/bundle/dmg/Apex Notes_${VERSION}_aarch64.dmg"
+          xcrun notarytool submit "$dmg_path" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$dmg_path"
+          xcrun stapler validate "$dmg_path"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg_path"
+
+      - name: Prepare release assets
+        if: steps.existing_release.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p release-assets
+          cp "src-tauri/target/release/bundle/dmg/Apex Notes_${VERSION}_aarch64.dmg" \
+            "release-assets/apex-notes-${VERSION}-macos-arm64.dmg"
+          cp "skills/apex-notes-writing/SKILL.md" "release-assets/apex-notes-SKILL.md"
+          (
+            cd skills
+            zip -r "../release-assets/apex-notes-writing-skill.zip" apex-notes-writing
+          )
+
+      - name: Publish GitHub Release
+        if: steps.existing_release.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$TAG" release-assets/* \
+            --target "$GITHUB_SHA" \
+            --title "Apex Notes ${VERSION}" \
+            --notes "Automated release from main at ${GITHUB_SHA}."
