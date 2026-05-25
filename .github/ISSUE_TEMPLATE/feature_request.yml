@@ -1,0 +1,56 @@
+name: Feature request
+description: Suggest an improvement for Apex Notes.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. For broad redesigns, storage changes, or schema changes, please describe the workflow before proposing implementation details.
+
+  - type: textarea
+    id: request
+    attributes:
+      label: What would you like?
+      description: Describe the feature or change.
+      placeholder: I would like Apex Notes to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why does it matter?
+      description: What problem would this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: What are you trying to do in the app when this would help?
+      placeholder: When I am editing/organizing/searching...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: I would be willing to test this locally.
+          required: false
+        - label: This can be implemented without changing the note schema.
+          required: false
+        - label: This may need a note schema or migration discussion.
+          required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes or mockups
+      description: Add screenshots, sketches, examples, or related issues if useful.
+    validations:
+      required: false

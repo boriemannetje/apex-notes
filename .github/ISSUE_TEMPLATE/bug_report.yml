@@ -1,0 +1,89 @@
+name: Bug report
+description: Report something broken in Apex Notes.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Apex Notes. Please use synthetic notes only; do not upload private notes or personal vault contents.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and the user-visible behavior.
+      placeholder: The graph/editor did...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the smallest reliable sequence of actions.
+      placeholder: |
+        1. Open...
+        2. Click...
+        3. See...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: sample-data
+    attributes:
+      label: Minimal synthetic note set
+      description: If notes are needed to reproduce this, paste a tiny synthetic example.
+      render: markdown
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Apex Notes version
+      description: Find this in the app or release filename if possible.
+      placeholder: "0.1.9"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-source
+    attributes:
+      label: Install source
+      options:
+        - GitHub Releases
+        - Website
+        - Local build
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Add relevant errors, screenshots, or short notes about what you saw.
+    validations:
+      required: false
