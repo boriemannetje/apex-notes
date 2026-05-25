@@ -44,6 +44,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install browser runtime
+        run: npx playwright install chromium
+
       - name: Run production validation
         run: npm test && npm run test:e2e && cargo test --manifest-path src-tauri/Cargo.toml
 
