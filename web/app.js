@@ -51,8 +51,10 @@ import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 const LEVEL_COLORS = ["#f1eee6", "#9fc5ff", "#a9d6ac", "#e8d188", "#ffb6d1", "#f2b380", "#7fd6df", "#c7b89a"];
 const STORAGE_PREFIX = "hamkg-layout-v2";
 const EDITOR_PANE_WIDTH_STORAGE_KEY = "apex-notes-editor-pane-width";
-const MIN_EDITOR_PANE_WIDTH = 344;
+const MIN_EDITOR_PANE_WIDTH = 260;
+const ABSOLUTE_MIN_EDITOR_PANE_WIDTH = 220;
 const MIN_GRAPH_PANE_WIDTH = 320;
+const ABSOLUTE_MIN_GRAPH_PANE_WIDTH = 220;
 const EDITOR_PANE_WIDTH_STEP = 24;
 const EDITOR_PANE_WIDTH_LARGE_STEP = 96;
 const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
@@ -464,22 +466,61 @@ function writeStoredEditorPaneWidth(width) {
   }
 }
 
+function getLayoutWidth() {
+  return els.layout?.getBoundingClientRect().width || window.innerWidth || 0;
+}
+
+function getEditorResizeHandleWidth() {
+  return els.editorResizeHandle?.getBoundingClientRect().width || 8;
+}
+
+function getEditorPaneMinWidth(layoutWidth = getLayoutWidth()) {
+  if (!layoutWidth) return MIN_EDITOR_PANE_WIDTH;
+  const responsiveMin = Math.floor(layoutWidth * 0.34);
+  return Math.max(
+    ABSOLUTE_MIN_EDITOR_PANE_WIDTH,
+    Math.min(MIN_EDITOR_PANE_WIDTH, responsiveMin)
+  );
+}
+
+function getGraphPaneMinWidth(layoutWidth = getLayoutWidth()) {
+  if (!layoutWidth) return MIN_GRAPH_PANE_WIDTH;
+  const responsiveMin = Math.floor(layoutWidth * 0.42);
+  return Math.max(
+    ABSOLUTE_MIN_GRAPH_PANE_WIDTH,
+    Math.min(MIN_GRAPH_PANE_WIDTH, responsiveMin)
+  );
+}
+
+function getEditorPaneWidthBounds() {
+  const layoutWidth = getLayoutWidth();
+  const handleWidth = getEditorResizeHandleWidth();
+  const minWidth = getEditorPaneMinWidth(layoutWidth);
+  const graphMinWidth = getGraphPaneMinWidth(layoutWidth);
+  const maxWidth = Math.floor(layoutWidth - handleWidth - graphMinWidth);
+
+  return {
+    min: minWidth,
+    max: Math.max(minWidth, maxWidth)
+  };
+}
+
 function getEditorPaneMaxWidth() {
-  const layoutWidth = els.layout?.getBoundingClientRect().width || window.innerWidth || 0;
-  const handleWidth = els.editorResizeHandle?.getBoundingClientRect().width || 8;
-  const maxWidth = Math.floor(layoutWidth - handleWidth - MIN_GRAPH_PANE_WIDTH);
-  return Math.max(MIN_EDITOR_PANE_WIDTH, maxWidth);
+  return getEditorPaneWidthBounds().max;
+}
+
+function getEditorPaneKeyboardMinWidth() {
+  return getEditorPaneWidthBounds().min;
 }
 
 function clampEditorPaneWidth(width) {
-  const maxWidth = getEditorPaneMaxWidth();
-  if (!Number.isFinite(width)) return MIN_EDITOR_PANE_WIDTH;
-  return Math.round(Math.min(maxWidth, Math.max(MIN_EDITOR_PANE_WIDTH, width)));
+  const bounds = getEditorPaneWidthBounds();
+  if (!Number.isFinite(width)) return bounds.min;
+  return Math.round(Math.min(bounds.max, Math.max(bounds.min, width)));
 }
 
 function getDefaultEditorPaneWidth() {
-  const layoutWidth = els.layout?.getBoundingClientRect().width || window.innerWidth || 0;
-  return clampEditorPaneWidth(layoutWidth * 0.34);
+  return clampEditorPaneWidth(getLayoutWidth() * 0.34);
 }
 
 function getCurrentEditorPaneWidth() {
@@ -490,10 +531,10 @@ function getCurrentEditorPaneWidth() {
 }
 
 function updateEditorResizeHandleAttributes(width) {
-  const maxWidth = getEditorPaneMaxWidth();
+  const bounds = getEditorPaneWidthBounds();
   const nextWidth = clampEditorPaneWidth(width);
-  els.editorResizeHandle.setAttribute("aria-valuemin", String(MIN_EDITOR_PANE_WIDTH));
-  els.editorResizeHandle.setAttribute("aria-valuemax", String(maxWidth));
+  els.editorResizeHandle.setAttribute("aria-valuemin", String(bounds.min));
+  els.editorResizeHandle.setAttribute("aria-valuemax", String(bounds.max));
   els.editorResizeHandle.setAttribute("aria-valuenow", String(nextWidth));
 }
 
@@ -560,7 +601,7 @@ function onEditorResizeKeydown(event) {
   } else if (event.key === "ArrowRight") {
     nextWidth = currentWidth - step;
   } else if (event.key === "Home") {
-    nextWidth = MIN_EDITOR_PANE_WIDTH;
+    nextWidth = getEditorPaneKeyboardMinWidth();
   } else if (event.key === "End") {
     nextWidth = getEditorPaneMaxWidth();
   }
@@ -1949,6 +1990,7 @@ function renderLaunchScreen() {
 
 function renderGraphProjectLauncher() {
   const isVisible = hasWritableWorkspace() && state.graphProjectLauncherOpen;
+  document.body.classList.toggle("projectChooserOpen", isVisible);
   els.graphPane.classList.toggle("projectLauncherOpen", isVisible);
   els.graphProjectLauncher.hidden = !isVisible;
   els.graphProjectLauncher.setAttribute("aria-hidden", String(!isVisible));
