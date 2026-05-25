@@ -112,6 +112,31 @@ test("workspace chrome supports rename and fullscreen without losing the graph",
   await page.close();
 });
 
+test("project chooser hides the editor until another project is opened or created", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  assert.equal(await isVisible(page, ".editorPane"), true);
+  await page.getByRole("button", { name: "Open another notes folder" }).click();
+  await page.locator("#graphProjectLauncher").waitFor();
+
+  const metrics = await workspaceMetrics(page);
+  assert.match(metrics.bodyClass, /\bprojectChooserOpen\b/);
+  assert.equal(await isVisible(page, ".editorPane"), false);
+  assert.equal(await page.locator("#editorResizeHandle").evaluate((element) => getComputedStyle(element).display), "none");
+  assert(metrics.topbar.width > 1100);
+  assert.equal(await page.locator("#graphProjectLauncher").getAttribute("aria-hidden"), "false");
+
+  await page.getByRole("button", { name: "Return to graph" }).click();
+  await page.waitForFunction(() => !document.body.classList.contains("projectChooserOpen"));
+  assert.equal(await isVisible(page, ".editorPane"), true);
+
+  await page.close();
+});
+
 test("editor resize separator supports pointer drag, persistence, and keyboard control", async () => {
   const page = await newMockedTauriPage();
 
@@ -146,10 +171,36 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
   assert(narrowedByKey.editorPane.width < restored.editorPane.width);
   assert.equal(Math.round(narrowedByKey.graph.width), Math.round(initial.graph.width));
 
+  await dragEditorResizeHandle(page, 420);
+  const narrowedByDrag = await workspaceMetrics(page);
+  const desktopMinWidth = Number(await handle.getAttribute("aria-valuemin"));
+  assert.equal(desktopMinWidth, 260);
+  assert(narrowedByDrag.editorPane.width < initial.editorPane.width - 120);
+  assert(Math.abs(narrowedByDrag.editorPane.width - desktopMinWidth) <= 2);
+  assert(narrowedByDrag.editorPane.x > narrowedByDrag.graphPane.x);
+  assert(narrowedByDrag.editorPane.x + narrowedByDrag.editorPane.width <= narrowedByDrag.viewport.width + 1);
+  assert(narrowedByDrag.search.width >= 300);
+
   await page.keyboard.press("Home");
   const minimum = await workspaceMetrics(page);
-  assert(Math.abs(minimum.editorPane.width - 344) <= 2);
-  assert.equal(await handle.getAttribute("aria-valuenow"), "344");
+  assert(Math.abs(minimum.editorPane.width - desktopMinWidth) <= 2);
+  assert.equal(await handle.getAttribute("aria-valuenow"), String(desktopMinWidth));
+
+  await page.setViewportSize({ width: 760, height: 720 });
+  await page.waitForFunction(() => {
+    const editor = document.querySelector(".editorPane")?.getBoundingClientRect();
+    return editor && editor.right <= window.innerWidth + 1;
+  });
+  const responsive = await workspaceMetrics(page);
+  assert(responsive.viewport.width === 760);
+  assert(responsive.editorPane.width <= 270);
+  assert(responsive.editorPane.x + responsive.editorPane.width <= responsive.viewport.width + 1);
+  assert(responsive.resizeHandle.x > responsive.graphPane.x);
+  assert(responsive.graph.height > 450);
+  assert(responsive.search.width >= 160);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => window.innerWidth === 1440);
 
   await page.keyboard.press("End");
   const maximum = await workspaceMetrics(page);
@@ -320,7 +371,9 @@ async function workspaceMetrics(page) {
         x: rect.x,
         y: rect.y,
         width: rect.width,
-        height: rect.height
+        height: rect.height,
+        right: rect.right,
+        bottom: rect.bottom
       } : null;
     };
     const boxes = (selector) => Array.from(document.querySelectorAll(selector))
@@ -347,6 +400,10 @@ async function workspaceMetrics(page) {
 
     return {
       bodyClass: document.body.className,
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight
+      },
       tabs: box("#workspaceTabs"),
       topbar: box(".topbar"),
       graphPane: box(".graphPane"),
