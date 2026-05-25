@@ -1002,6 +1002,10 @@ body.graphFullscreen {
   overflow: hidden;
 }
 
+body.editorFullscreen {
+  overflow: hidden;
+}
+
 body.graphFullscreen .graphPane,
 .graphPane:fullscreen {
   position: fixed;
@@ -1019,6 +1023,28 @@ body.graphFullscreen .workspaceTabs,
 body.graphFullscreen .editorResizeHandle,
 body.graphFullscreen .editorPane {
   display: none;
+}
+
+body.editorFullscreen .workspaceTabs,
+body.editorFullscreen .editorResizeHandle {
+  display: none;
+}
+
+body.editorFullscreen .graphPane {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+body.editorFullscreen .editorPane,
+.editorPane:fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  display: grid;
+  width: 100vw;
+  height: 100vh;
+  border-left: 0;
+  background: var(--bg);
 }
 
 body.graphFullscreen .topbar {
@@ -1222,6 +1248,10 @@ body.graphFullscreen .topbarActions {
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.editorControls .iconButton {
+  flex: 0 0 auto;
 }
 
 h1,

@@ -109,6 +109,35 @@ test("workspace chrome supports rename and fullscreen without losing the graph",
   await page.waitForFunction(() => !document.body.classList.contains("graphFullscreen"));
   assert.equal(await isVisible(page, ".editorPane"), true);
 
+  await page.locator("#fullscreenEditorButton").click();
+  await page.waitForFunction(() => document.body.classList.contains("editorFullscreen"));
+  assert.equal(await isVisible(page, ".editorPane"), true);
+  assert.equal(await page.locator(".graphPane").evaluate((element) => getComputedStyle(element).visibility), "hidden");
+  assert.equal(await page.locator("#fullscreenEditorButton").getAttribute("aria-label"), "Exit full screen editor");
+
+  await page.locator("#fullscreenEditorButton").click();
+  await page.waitForFunction(() => !document.body.classList.contains("editorFullscreen"));
+  assert.equal(await isVisible(page, ".graphPane"), true);
+  assert.equal(await page.locator("#fullscreenEditorButton").getAttribute("aria-label"), "Enter full screen editor");
+
+  await page.close();
+});
+
+test("empty graph create hint stays centered in the visible graph area", async () => {
+  const page = await newMockedTauriPage(emptyWorkspace());
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  const metrics = await workspaceMetrics(page);
+  const hintX = Number(await page.locator(".emptyGraphText").getAttribute("x"));
+  const expectedX = (metrics.graphPane.x + metrics.resizeHandle.x) / 2;
+
+  assert.equal(await textContent(page, ".emptyGraphText"), "Click the graph to create the first note");
+  assert(Math.abs(hintX - expectedX) < 2);
+  assert(hintX < metrics.graph.width / 2);
+
   await page.close();
 });
 
@@ -230,7 +259,7 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
   await page.close();
 });
 
-async function newMockedTauriPage() {
+async function newMockedTauriPage(workspace = sampleWorkspace()) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.addInitScript((seedWorkspace) => {
     const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -304,7 +333,7 @@ async function newMockedTauriPage() {
         }
       }
     };
-  }, sampleWorkspace());
+  }, workspace);
   return page;
 }
 
@@ -345,6 +374,17 @@ function sampleWorkspace() {
         ].join("\n")
       }
     ]
+  };
+}
+
+function emptyWorkspace() {
+  return {
+    rootPath: "/tmp/empty-notes",
+    notesPath: "/tmp/empty-notes/notes",
+    workspaceName: "Empty Notes",
+    source: "folder",
+    positions: {},
+    notes: []
   };
 }
 
