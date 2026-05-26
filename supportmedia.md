@@ -41,7 +41,7 @@ Important existing constraints to preserve:
 - `layout.json` stores graph positions keyed by note path.
 - Frontmatter uses only `title`, `level`, and `parent`.
 - Graph hierarchy is derived from `parent`.
-- Dotted contextual graph edges are derived from body wiki links to notes.
+- Solid, semi-transparent contextual graph edges are derived from body wiki links to notes.
 - Native filesystem commands already guard against traversal and symlink escapes for note paths.
 
 Media support should add a separate attachment path, not loosen the note path rules.
@@ -437,7 +437,7 @@ type ImageEmbed = {
 
 It should not treat images as note refs.
 
-That means this should not create a dotted graph edge:
+That means this should not create a contextual graph edge:
 
 ```md
 ![[attachments/diagram.png]]
@@ -458,7 +458,7 @@ Image files should not:
 - Appear as nodes.
 - Appear in graph search as separate records.
 - Create hierarchy edges.
-- Create dotted contextual edges.
+- Create contextual note-reference edges.
 - Affect graph layout.
 - Affect `layout.json`.
 
@@ -732,4 +732,3 @@ The durable model should stay:
 - `parent` frontmatter defines hierarchy.
 - Body wiki links between notes define contextual references.
 - Media embeds enrich note bodies but do not define graph structure.
-

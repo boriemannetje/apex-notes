@@ -171,7 +171,7 @@ Graph rules:
 
 - Keep the graph background warm near-black.
 - Use thin hierarchy edges with rounded caps.
-- Use dotted reference edges for body `[[wiki links]]`.
+- Use solid, low-opacity reference edges for body `[[wiki links]]`.
 - Keep loose nodes visibly different but not alarming.
 - Keep selected nodes clear through fill, weight, and a controlled glow.
 - Use purple only for temporary connection mechanics, such as the rope.

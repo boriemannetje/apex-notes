@@ -2,7 +2,7 @@
 
 Apex Notes is a local desktop app for editing Markdown note hierarchies.
 
-The graph is derived from frontmatter: `parent` creates hierarchy edges when present, and body `[[wiki links]]` create dotted contextual connections.
+The graph is derived from frontmatter: `parent` creates hierarchy edges when present, and body `[[wiki links]]` create solid, semi-transparent contextual connections.
 
 Download the latest build at [apex-notes.netlify.app](https://apex-notes.netlify.app) or from [GitHub Releases](https://github.com/boriemannetje/apex-notes/releases).
 
@@ -11,7 +11,7 @@ Download the latest build at [apex-notes.netlify.app](https://apex-notes.netlify
 - Local-first Markdown notes
 - Native folder access through Tauri
 - Tree edges from frontmatter `parent`
-- Dotted reference edges from body `[[wiki links]]`
+- Semi-transparent reference edges from body `[[wiki links]]`
 - Minimal, draggable graph view
 - Bundled writing-agent skill in `skills/apex-notes-writing/`
 
@@ -70,7 +70,7 @@ The reusable writing-agent skill lives at:
 skills/apex-notes-writing/SKILL.md
 ```
 
-Put that skill in your note-taking folder or agent skill folder so a writing agent knows how to create notes, set `parent`, update `manifest.json`, and add dotted reference links through body wiki links.
+Put that skill in your note-taking folder or agent skill folder so a writing agent knows how to create notes, set `parent`, update `manifest.json`, and add contextual reference links through body wiki links.
 
 ## Website
 
