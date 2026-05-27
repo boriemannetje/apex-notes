@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  MAIN_PRODUCTION_DMG_DOWNLOAD_URL,
   MAIN_PRODUCTION_DMG_ASSET,
   checkForAppUpdate,
   findReleaseAsset,
@@ -24,8 +25,7 @@ function release(overrides = {}) {
     assets: [
       {
         name: MAIN_PRODUCTION_DMG_ASSET,
-        browser_download_url:
-          "https://github.com/boriemannetje/apex-notes/releases/download/main-production/apex-notes-main-macos-arm64.dmg"
+        browser_download_url: MAIN_PRODUCTION_DMG_DOWNLOAD_URL
       }
     ],
     ...overrides
@@ -99,6 +99,12 @@ test("findReleaseAsset and URL helpers are strict about the main-production DMG"
   assert.equal(candidate?.name, MAIN_PRODUCTION_DMG_ASSET);
   assert.equal(isMainProductionDownloadUrl(candidate?.browser_download_url || ""), true);
   assert.equal(isMainProductionDownloadUrl("https://github.com/boriemannetje/apex-notes/releases/download/old/app.dmg"), false);
+  assert.equal(
+    isMainProductionDownloadUrl(
+      "https://github.com/boriemannetje/apex-notes/releases/download/main-production/other.dmg"
+    ),
+    false
+  );
   assert.equal(normalizeCommit(" ABC "), "abc");
   assert.equal(shortCommit("123456789"), "1234567");
 });

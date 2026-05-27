@@ -417,7 +417,7 @@ async fn install_app_update(
 }
 
 fn validate_update_download_url(url: &str) -> Result<(), String> {
-    if url.starts_with(MAIN_PRODUCTION_DMG_URL_PREFIX) && url.ends_with(MAIN_PRODUCTION_DMG_ASSET) {
+    if url == format!("{}{}", MAIN_PRODUCTION_DMG_URL_PREFIX, MAIN_PRODUCTION_DMG_ASSET) {
         return Ok(());
     }
     Err("Update download must come from the Apex Notes main-production release".into())

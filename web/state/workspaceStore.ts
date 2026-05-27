@@ -90,6 +90,7 @@ export function createWorkspaceStore(recentProjects = []) {
     appUpdate: null,
     appUpdateCheckTimer: 0,
     appUpdateCheckInFlight: false,
-    appUpdateInstallInFlight: false
+    appUpdateInstallInFlight: false,
+    appUpdateInstallState: ""
   };
 }

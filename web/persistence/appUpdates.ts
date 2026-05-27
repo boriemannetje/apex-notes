@@ -7,6 +7,8 @@ export const MAIN_PRODUCTION_RELEASE_API_URL =
 export const MAIN_PRODUCTION_DMG_ASSET = "apex-notes-main-macos-arm64.dmg";
 export const MAIN_PRODUCTION_DOWNLOAD_PREFIX =
   "https://github.com/boriemannetje/apex-notes/releases/download/main-production/";
+export const MAIN_PRODUCTION_DMG_DOWNLOAD_URL =
+  `${MAIN_PRODUCTION_DOWNLOAD_PREFIX}${MAIN_PRODUCTION_DMG_ASSET}`;
 
 export interface BuildInfo {
   channel: string;
@@ -127,7 +129,7 @@ export function findReleaseAsset(release: GitHubRelease, assetName: string): Rel
 }
 
 export function isMainProductionDownloadUrl(url: string): boolean {
-  return typeof url === "string" && url.startsWith(MAIN_PRODUCTION_DOWNLOAD_PREFIX);
+  return url === MAIN_PRODUCTION_DMG_DOWNLOAD_URL;
 }
 
 export function normalizeCommit(commit: unknown): string {

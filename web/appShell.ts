@@ -106,7 +106,7 @@ const GRAPH_PAD = 96;
 const FIT_VIEW_PADDING = 24;
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
-const APP_UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const APP_UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
 const POSITIONING_OPTIONS = {
   levelGap: LEVEL_GAP,
@@ -554,6 +554,8 @@ function bindEvents() {
   document.addEventListener("keydown", onDocumentKeydown);
   document.addEventListener("pointerdown", onDocumentPointerDown);
   window.addEventListener("resize", scheduleResizeRender);
+  window.addEventListener("focus", refreshAppUpdateOnFocus);
+  document.addEventListener("visibilitychange", refreshAppUpdateOnVisibilityChange);
   document.addEventListener("fullscreenchange", syncFullscreenState);
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -1349,7 +1351,7 @@ async function hydrateRecentProjects() {
 
 function startAppUpdateChecks() {
   renderUpdateButton();
-  if (!isTauriApp() || typeof window.fetch !== "function") return;
+  if (!canCheckForAppUpdate()) return;
 
   void checkForAvailableUpdate();
   if (state.appUpdateCheckTimer) window.clearInterval(state.appUpdateCheckTimer);
@@ -1358,8 +1360,22 @@ function startAppUpdateChecks() {
   }, APP_UPDATE_CHECK_INTERVAL_MS);
 }
 
+function canCheckForAppUpdate() {
+  return isTauriApp() && typeof window.fetch === "function";
+}
+
+function refreshAppUpdateOnFocus() {
+  void checkForAvailableUpdate();
+}
+
+function refreshAppUpdateOnVisibilityChange() {
+  if (!document.hidden) {
+    void checkForAvailableUpdate();
+  }
+}
+
 async function checkForAvailableUpdate() {
-  if (state.appUpdateCheckInFlight || state.appUpdateInstallInFlight) return;
+  if (!canCheckForAppUpdate() || state.appUpdateCheckInFlight || state.appUpdateInstallInFlight) return;
   state.appUpdateCheckInFlight = true;
 
   try {
@@ -1389,7 +1405,7 @@ function renderUpdateButton(statusMessage = "") {
     return;
   }
 
-  const label = state.appUpdateInstallInFlight ? "Updating" : "Update";
+  const label = state.appUpdateInstallState || "Update";
   setButtonIcon(els.updateButton, "download", label);
   els.updateButton.disabled = state.appUpdateInstallInFlight;
   els.updateButton.title = statusMessage || `Install main update ${update.shortCommit}`;
@@ -1401,6 +1417,7 @@ async function installAvailableUpdate() {
   if (!update || !update.available || state.appUpdateInstallInFlight) return;
 
   state.appUpdateInstallInFlight = true;
+  state.appUpdateInstallState = "Updating...";
   renderUpdateButton("Installing update");
   setStatus("Installing update");
 
@@ -1409,9 +1426,12 @@ async function installAvailableUpdate() {
       downloadUrl: update.downloadUrl,
       releaseCommit: update.releaseCommit
     });
-    setStatus("Relaunching after update");
+    state.appUpdateInstallState = "Restarting...";
+    renderUpdateButton("Restarting after update");
+    setStatus("Restarting after update");
   } catch (error) {
     state.appUpdateInstallInFlight = false;
+    state.appUpdateInstallState = "";
     renderUpdateButton();
     setStatus("Update failed");
     console.error(error);

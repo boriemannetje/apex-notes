@@ -9,6 +9,8 @@ import { chromium } from "playwright";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const webRoot = path.join(repoRoot, "web");
+const mainProductionDmgUrl =
+  "https://github.com/boriemannetje/apex-notes/releases/download/main-production/apex-notes-main-macos-arm64.dmg";
 
 let server;
 let baseUrl;
@@ -153,22 +155,16 @@ test("pasting plain text into the graph creates a loose note", async () => {
 
 test("main-production update button appears and invokes native update install", async () => {
   const page = await newMockedTauriPage(sampleWorkspace(), {
-    updateRelease: {
-      target_commitish: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      assets: [
-        {
-          name: "apex-notes-main-macos-arm64.dmg",
-          browser_download_url:
-            "https://github.com/boriemannetje/apex-notes/releases/download/main-production/apex-notes-main-macos-arm64.dmg"
-        }
-      ]
-    }
+    holdInstallUpdate: true,
+    updateRelease: availableUpdateRelease()
   });
 
   await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
   const updateButton = page.getByRole("button", { name: /install apex notes update/i });
   await updateButton.waitFor();
   await updateButton.click();
+  await page.waitForFunction(() => window.__apexTestState.resolveInstallUpdate);
+  assert.equal(await textContent(page, "#updateButton"), "Updating...");
 
   const installCall = await page.waitForFunction(() => {
     return window.__apexTestState.calls.find((call) => call.command === "install_app_update");
@@ -176,6 +172,48 @@ test("main-production update button appears and invokes native update install", 
   const call = await installCall.jsonValue();
   assert.equal(call.args.releaseCommit, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
   assert.match(call.args.downloadUrl, /apex-notes-main-macos-arm64\.dmg$/);
+
+  await page.evaluate(() => window.__apexTestState.resolveInstallUpdate());
+  await page.waitForFunction(() => document.querySelector("#updateButton")?.textContent?.includes("Restarting..."));
+  assert.equal(await textContent(page, "#editorStatus"), "Restarting after update");
+
+  await page.close();
+});
+
+test("main-production update button stays hidden when no update is available", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.waitForFunction(() => window.__apexTestState.fetchCalls > 0);
+
+  assert.equal(await isVisible(page, "#updateButton"), false);
+
+  await page.close();
+});
+
+test("main-production update checks rerun on focus and report install failures", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), {
+    installUpdateError: "installer failed"
+  });
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.waitForFunction(() => window.__apexTestState.fetchCalls > 0);
+  assert.equal(await isVisible(page, "#updateButton"), false);
+
+  await page.evaluate((release) => {
+    window.__apexTestState.updateRelease = release;
+    window.dispatchEvent(new Event("focus"));
+  }, availableUpdateRelease());
+
+  const updateButton = page.getByRole("button", { name: /install apex notes update/i });
+  await updateButton.waitFor();
+  await page.waitForFunction(() => window.__apexTestState.fetchCalls > 1);
+  await updateButton.click();
+  await page.waitForFunction(() => document.querySelector("#editorStatus")?.textContent === "Update failed");
+
+  assert.equal(await textContent(page, "#editorStatus"), "Update failed");
+  assert.equal(await textContent(page, "#updateButton"), "Update");
+  assert.equal(await updateButton.isDisabled(), false);
 
   await page.close();
 });
@@ -318,12 +356,21 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
 
 async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  await page.addInitScript(({ seedWorkspace, seedUpdateRelease }) => {
+  await page.addInitScript(({
+    seedWorkspace,
+    seedUpdateRelease,
+    seedHoldInstallUpdate,
+    seedInstallUpdateError
+  }) => {
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const state = {
       workspace: clone(seedWorkspace),
       calls: [],
       clipboardText: "",
+      fetchCalls: 0,
+      holdInstallUpdate: seedHoldInstallUpdate,
+      installUpdateError: seedInstallUpdateError,
+      resolveInstallUpdate: null,
       updateRelease: seedUpdateRelease
     };
 
@@ -337,10 +384,14 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     }));
 
     window.__apexTestState = state;
-    window.fetch = async () => ({
-      ok: true,
-      json: async () => state.updateRelease
-    });
+    window.fetch = async () => {
+      state.fetchCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => clone(state.updateRelease)
+      };
+    };
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
@@ -409,17 +460,39 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             return clone(state.workspace);
           }
           if (command === "remember_recent_project" || command === "forget_recent_project") return [];
-          if (command === "install_app_update") return null;
+          if (command === "install_app_update") {
+            if (state.installUpdateError) throw new Error(state.installUpdateError);
+            if (state.holdInstallUpdate) {
+              await new Promise((resolve) => {
+                state.resolveInstallUpdate = resolve;
+              });
+            }
+            return null;
+          }
 
           throw new Error(`Unhandled test Tauri command: ${command}`);
         }
       }
     };
   }, {
+    seedHoldInstallUpdate: options.holdInstallUpdate || false,
+    seedInstallUpdateError: options.installUpdateError || "",
     seedWorkspace: workspace,
     seedUpdateRelease: options.updateRelease || { target_commitish: "", assets: [] }
   });
   return page;
+}
+
+function availableUpdateRelease(commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") {
+  return {
+    target_commitish: commit,
+    assets: [
+      {
+        name: "apex-notes-main-macos-arm64.dmg",
+        browser_download_url: mainProductionDmgUrl
+      }
+    ]
+  };
 }
 
 function sampleWorkspace() {
