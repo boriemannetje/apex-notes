@@ -445,7 +445,6 @@ fn spawn_macos_update_installer(download_url: String, release_commit: String) ->
     Command::new("/bin/zsh")
         .arg(&script_path)
         .arg(download_url)
-        .arg(env!("CARGO_PKG_VERSION"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -461,7 +460,6 @@ fn macos_update_script() -> &'static str {
 set -euo pipefail
 
 download_url="$1"
-expected_version="$2"
 tmp="$(cd "$(dirname "$0")" && pwd)"
 mount="$tmp/mount"
 
@@ -482,8 +480,6 @@ sleep 1
 rm -rf "/Applications/Apex Notes.app"
 ditto "$mount/Apex Notes.app" "/Applications/Apex Notes.app"
 codesign --verify --deep --strict "/Applications/Apex Notes.app"
-installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "/Applications/Apex Notes.app/Contents/Info.plist")"
-test "$installed_version" = "$expected_version"
 open -n "/Applications/Apex Notes.app"
 "#
 }

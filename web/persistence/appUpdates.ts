@@ -35,7 +35,6 @@ export interface AppUpdateInfo {
   htmlUrl: string;
   releaseCommit: string;
   releaseName: string;
-  releaseVersion: string;
   shortCommit: string;
 }
 
@@ -108,7 +107,6 @@ export function getUpdateAvailability(
     htmlUrl: release.html_url || "",
     releaseCommit,
     releaseName: release.name || "Apex Notes main production",
-    releaseVersion: current.version,
     shortCommit: shortCommit(releaseCommit)
   };
 }

@@ -40,7 +40,21 @@ test("getUpdateAvailability reports a main-production update when release commit
   assert.equal(availability.currentCommit, current.commit);
   assert.equal(availability.releaseCommit, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
   assert.equal(availability.shortCommit, "bbbbbbb");
-  assert.equal(availability.releaseVersion, "0.1.9");
+});
+
+test("getUpdateAvailability stays commit-based across app version bumps", () => {
+  const availability = getUpdateAvailability(
+    { ...current, version: "0.1.9" },
+    release({
+      name: "Apex Notes main production",
+      body: "Production build from main. App version: 0.1.10."
+    })
+  );
+
+  assert.equal(availability.available, true);
+  if (!availability.available) throw new Error("Expected update");
+  assert.equal(availability.releaseCommit, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  assert.equal(availability.currentCommit, current.commit);
 });
 
 test("getUpdateAvailability hides the button when current commit matches release", () => {
