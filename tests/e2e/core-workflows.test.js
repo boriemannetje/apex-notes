@@ -171,7 +171,7 @@ test("main-production update button appears and invokes native update install", 
   });
   const call = await installCall.jsonValue();
   assert.equal(call.args.releaseCommit, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-  assert.match(call.args.downloadUrl, /apex-notes-main-macos-arm64\.dmg$/);
+  assert.equal(Object.hasOwn(call.args, "downloadUrl"), false);
 
   await page.evaluate(() => window.__apexTestState.resolveInstallUpdate());
   await page.waitForFunction(() => document.querySelector("#updateButton")?.textContent?.includes("Restarting..."));

@@ -33,7 +33,6 @@ export interface AppUpdateInfo {
   available: boolean;
   channel: string;
   currentCommit: string;
-  downloadUrl: string;
   htmlUrl: string;
   releaseCommit: string;
   releaseName: string;
@@ -105,7 +104,6 @@ export function getUpdateAvailability(
     available: true,
     channel: current.channel,
     currentCommit,
-    downloadUrl: dmg.browser_download_url,
     htmlUrl: release.html_url || "",
     releaseCommit,
     releaseName: release.name || "Apex Notes main production",

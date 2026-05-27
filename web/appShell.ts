@@ -1423,7 +1423,6 @@ async function installAvailableUpdate() {
 
   try {
     await invokeNative("install_app_update", {
-      downloadUrl: update.downloadUrl,
       releaseCommit: update.releaseCommit
     });
     state.appUpdateInstallState = "Restarting...";

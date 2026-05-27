@@ -391,17 +391,15 @@ fn forget_recent_project(
 #[tauri::command(rename_all = "camelCase")]
 async fn install_app_update(
     app: tauri::AppHandle,
-    download_url: String,
     release_commit: String,
 ) -> Result<(), String> {
-    validate_update_download_url(&download_url)?;
     validate_release_commit(&release_commit)?;
 
     #[cfg(target_os = "macos")]
     {
         let app_handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            spawn_macos_update_installer(download_url, release_commit)
+            spawn_macos_update_installer(release_commit)
         })
         .await
         .map_err(to_error)??;
@@ -416,11 +414,8 @@ async fn install_app_update(
     }
 }
 
-fn validate_update_download_url(url: &str) -> Result<(), String> {
-    if url == format!("{}{}", MAIN_PRODUCTION_DMG_URL_PREFIX, MAIN_PRODUCTION_DMG_ASSET) {
-        return Ok(());
-    }
-    Err("Update download must come from the Apex Notes main-production release".into())
+fn main_production_dmg_url() -> String {
+    format!("{}{}", MAIN_PRODUCTION_DMG_URL_PREFIX, MAIN_PRODUCTION_DMG_ASSET)
 }
 
 fn validate_release_commit(commit: &str) -> Result<(), String> {
@@ -432,7 +427,7 @@ fn validate_release_commit(commit: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_macos_update_installer(download_url: String, release_commit: String) -> Result<(), String> {
+fn spawn_macos_update_installer(release_commit: String) -> Result<(), String> {
     let temp_dir = std::env::temp_dir().join(format!(
         "apex-notes-update-{}-{}",
         std::process::id(),
@@ -444,7 +439,7 @@ fn spawn_macos_update_installer(download_url: String, release_commit: String) ->
 
     Command::new("/bin/zsh")
         .arg(&script_path)
-        .arg(download_url)
+        .arg(main_production_dmg_url())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -988,17 +983,11 @@ mod tests {
     }
 
     #[test]
-    fn validates_main_production_update_download_url() {
-        assert!(validate_update_download_url(
+    fn builds_main_production_update_download_url_in_native_code() {
+        assert_eq!(
+            main_production_dmg_url(),
             "https://github.com/boriemannetje/apex-notes/releases/download/main-production/apex-notes-main-macos-arm64.dmg"
-        )
-        .is_ok());
-        assert!(validate_update_download_url(
-            "https://github.com/boriemannetje/apex-notes/releases/download/old/apex-notes-main-macos-arm64.dmg"
-        )
-        .is_err());
-        assert!(validate_update_download_url("https://example.com/apex-notes-main-macos-arm64.dmg")
-            .is_err());
+        );
     }
 
     #[test]
