@@ -7,7 +7,7 @@ import {
   findLooseGridPositions,
   resolveStoredPosition,
   resolveStoredPositions
-} from "./graphPositioning.js";
+} from "./graphPositioning.ts";
 
 test("resolves legacy dx dy positions against auto positions", () => {
   const autoPositions = new Map([

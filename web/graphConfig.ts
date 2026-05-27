@@ -1,3 +1,4 @@
+// @ts-nocheck
 export const LARGE_GRAPH_CONFIG = Object.freeze({
   noteCountThreshold: 500,
   referenceEdgeCountThreshold: 1000,

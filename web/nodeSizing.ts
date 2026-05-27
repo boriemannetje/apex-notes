@@ -1,3 +1,4 @@
+// @ts-nocheck
 export const NODE_SIZE_LINEAR_CONNECTIONS = 20;
 export const NODE_SIZE_LINEAR_TARGET_SCALE = 2.8;
 export const NODE_SIZE_MAX_SCALE = 5.5;

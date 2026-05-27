@@ -1,5 +1,7 @@
+// @ts-nocheck
 import createElement from "lucide/dist/esm/createElement.mjs";
 import CircleHelp from "lucide/dist/esm/icons/circle-question-mark.mjs";
+import Download from "lucide/dist/esm/icons/download.mjs";
 import FilePlus from "lucide/dist/esm/icons/file-plus.mjs";
 import FolderOpen from "lucide/dist/esm/icons/folder-open.mjs";
 import FolderPlus from "lucide/dist/esm/icons/folder-plus.mjs";
@@ -15,6 +17,7 @@ import X from "lucide/dist/esm/icons/x.mjs";
 const ICONS = {
   close: X,
   createProject: FolderPlus,
+  download: Download,
   fit: Scan,
   fullscreenEnter: Maximize2,
   fullscreenExit: Minimize2,

@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": false,
+    "isolatedModules": true,
+    "lib": ["DOM", "ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "strict": false,
+    "target": "ES2023",
+    "types": ["node"]
+  },
+  "include": ["web/**/*.ts", "web/**/*.js", "tests/**/*.js", "types/**/*.d.ts"]
+}

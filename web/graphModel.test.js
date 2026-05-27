@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGraphIndex, ISSUE_TYPES } from "./graphModel.js";
+import { createGraphIndex, ISSUE_TYPES } from "./graphModel.ts";
 
 test("builds explicit vertices, tree edges, and weighted reference edges", () => {
   const index = createGraphIndex([

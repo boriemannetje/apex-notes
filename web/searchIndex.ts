@@ -1,3 +1,4 @@
+// @ts-nocheck
 const DEFAULT_FIELD_WEIGHTS = {
   title: 3,
   path: 1.4,

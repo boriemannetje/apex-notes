@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -6,34 +7,32 @@ import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highligh
 import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
-} from "./graphLargeMode.js";
-import { LARGE_GRAPH_CONFIG } from "./graphConfig.js";
-import { createGraphIndex, ISSUE_TYPES } from "./graphModel.js";
-import { buildGraphLayout } from "./graphLayout.js";
+} from "./graphLargeMode.ts";
+import { LARGE_GRAPH_CONFIG } from "./graphConfig.ts";
+import { createGraphIndex } from "./graphModel.ts";
+import { buildGraphLayout } from "./graphLayout.ts";
 import {
   computeNoteLinkStats,
   decideVisibleLabels,
   getLabelVisibilityPolicy,
   prepareLabelVisibilityCache
-} from "./labelVisibility.js";
-import { connectionCountToNodeScale } from "./nodeSizing.js";
-import { createSearchIndex } from "./searchIndex.js";
-import { buildSearchResults } from "./searchResults.js";
+} from "./labelVisibility.ts";
+import { connectionCountToNodeScale } from "./nodeSizing.ts";
+import { createSearchIndex } from "./searchIndex.ts";
+import { buildSearchResults } from "./searchResults.ts";
 import {
   cleanWikiRef,
-  getNoteAliasKeys,
   normalizeKey,
-  parseWikiRefs,
   parseWikiTarget,
   slugify
-} from "./noteRefs.js";
+} from "./noteRefs.ts";
 import {
   createAbsolutePositionPatch,
   findChildPosition,
   findLooseGridPositions,
   resolveStoredPosition as resolveStoredGraphPosition
-} from "./graphPositioning.js";
-import { getClampedPopoverPosition } from "./popoverPositioning.js";
+} from "./graphPositioning.ts";
+import { getClampedPopoverPosition } from "./popoverPositioning.ts";
 import {
   loadRecentProjects,
   normalizeRecentProjects,
@@ -44,8 +43,28 @@ import {
   rememberRecentProject,
   removeRecentProject,
   saveRecentProjects
-} from "./recentProjects.js";
-import { createIcon, setButtonIcon } from "./icons.js";
+} from "./recentProjects.ts";
+import { createIcon, setButtonIcon } from "./icons.ts";
+import { checkForAppUpdate, getCurrentBuildInfo } from "./persistence/appUpdates.ts";
+import {
+  buildFileSignatureMap,
+  cloneFileSignatures,
+  diffFileSignatures,
+  liveUpdateStatus
+} from "./persistence/liveSync.ts";
+import { invokeNative, isTauriApp, pickNativeDirectory } from "./persistence/nativeWorkspaceAdapter.ts";
+import {
+  bodyFromText,
+  composeRaw,
+  createNoteRaw,
+  getAvailableDisplayTitle,
+  getAvailableNewNotePath as getAvailableNewNotePathForTitle,
+  titleFromText
+} from "./notes/noteComposer.ts";
+import { parseNote } from "./notes/noteParser.ts";
+import { validateNotes as validateNoteCollection } from "./notes/noteValidation.ts";
+import { createWorkspaceStore } from "./state/workspaceStore.ts";
+import { getDomElements } from "./ui/domElements.ts";
 import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
 const LEVEL_COLORS = ["#f1eee6", "#9fc5ff", "#a9d6ac", "#e8d188", "#ffb6d1", "#f2b380", "#7fd6df", "#c7b89a"];
@@ -87,6 +106,7 @@ const GRAPH_PAD = 96;
 const FIT_VIEW_PADDING = 24;
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
+const APP_UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
 const POSITIONING_OPTIONS = {
   levelGap: LEVEL_GAP,
@@ -103,169 +123,11 @@ const PERF_ENABLED = isPerfEnabled();
 const editorEditable = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
 
-const state = {
-  workspaces: [],
-  recentProjects: loadRecentProjects(),
-  defaultProjectLocation: "",
-  browsedProjectLocation: "",
-  createProjectParentPath: "",
-  activeWorkspaceId: null,
-  nextWorkspaceId: 1,
-  notes: [],
-  graphIndex: null,
-  searchIndex: null,
-  byPath: new Map(),
-  byKey: new Map(),
-  notePaths: new Set(),
-  sortedNotes: [],
-  sortedParentOptions: [],
-  selectedPath: null,
-  selectedPaths: new Set(),
-  rootPath: "",
-  notesPath: "",
-  source: "none",
-  workspaceName: "",
-  dirty: false,
-  saveTimer: null,
-  saveToken: 0,
-  fileSignatures: new Map(),
-  liveSyncTimer: 0,
-  liveSyncInFlight: false,
-  liveSyncToken: 0,
-  graphRenderFrame: 0,
-  queuedGraphRender: null,
-  viewAnimationFrame: 0,
-  filter: "",
-  searchResults: [],
-  searchOpen: false,
-  searchActiveIndex: -1,
-  validation: [],
-  layoutKey: "",
-  manualPositions: {},
-  autoPositions: new Map(),
-  positions: new Map(),
-  nodeSizes: new Map(),
-  nodeElements: new Map(),
-  edgeElements: [],
-  edgeElementsByPath: new Map(),
-  spatialIndex: null,
-  referenceEdges: [],
-  referenceEdgeCount: 0,
-  largeGraphMode: false,
-  labelStats: new Map(),
-  labelVisibilityCache: null,
-  labelVisibility: null,
-  labelVisibilityKey: "",
-  labelRefreshFrame: 0,
-  hoveredPath: null,
-  focusedPath: null,
-  editorView: null,
-  editorHydrating: false,
-  infoHydrating: false,
-  graphHasHierarchy: true,
-  hierarchyPromptShown: false,
-  hierarchyPromptText: "",
-  pendingCreatePoint: null,
-  nodeClipboard: null,
-  ropeElement: null,
-  ropeTargetPath: null,
-  selectionRectElement: null,
-  lastGraphPoint: null,
-  lastNodePointerDown: null,
-  suppressGraphCreateUntil: 0,
-  armedRope: null,
-  view: {
-    x: 0,
-    y: 0,
-    scale: 1
-  },
-  activeInteraction: null,
-  interactionFrame: 0,
-  queuedInteractionEvent: null,
-  graphBounds: null,
-  graphViewport: null,
-  graphFullscreenFallback: false,
-  editorFullscreenFallback: false,
-  graphProjectLauncherOpen: false,
-  renamingWorkspaceId: null,
-  workspaceRenameDraft: "",
-  editorPaneWidth: null,
-  editorResizeDrag: null
-};
+const state = createWorkspaceStore(loadRecentProjects());
 
 let suppressWorkspaceRenameCommit = false;
 
-const els = {
-  layout: document.querySelector(".layout"),
-  launchScreen: document.querySelector("#launchScreen"),
-  launchOpenProjectButton: document.querySelector("#launchOpenProjectButton"),
-  launchCreateProjectButton: document.querySelector("#launchCreateProjectButton"),
-  launchRecentList: document.querySelector("#launchRecentList"),
-  launchRecentEmpty: document.querySelector("#launchRecentEmpty"),
-  launchStatus: document.querySelector("#launchStatus"),
-  graphProjectLauncher: document.querySelector("#graphProjectLauncher"),
-  graphOpenProjectButton: document.querySelector("#graphOpenProjectButton"),
-  graphCreateProjectButton: document.querySelector("#graphCreateProjectButton"),
-  graphRecentList: document.querySelector("#graphRecentList"),
-  graphRecentEmpty: document.querySelector("#graphRecentEmpty"),
-  graphLaunchStatus: document.querySelector("#graphLaunchStatus"),
-  closeGraphProjectLauncherButton: document.querySelector("#closeGraphProjectLauncherButton"),
-  workspaceTabs: document.querySelector("#workspaceTabs"),
-  graph: document.querySelector("#graph"),
-  graphPane: document.querySelector(".graphPane"),
-  graphScroller: document.querySelector("#graphScroller"),
-  graphCanvas: null,
-  editorResizeHandle: document.querySelector("#editorResizeHandle"),
-  graphHelpButton: document.querySelector("#graphHelpButton"),
-  graphHelpDialog: document.querySelector("#graphHelpDialog"),
-  closeGraphHelpButton: document.querySelector("#closeGraphHelpButton"),
-  searchField: document.querySelector(".searchField"),
-  searchFieldIcon: document.querySelector("#searchFieldIcon"),
-  searchInput: document.querySelector("#searchInput"),
-  searchResults: document.querySelector("#searchResults"),
-  newNoteButton: document.querySelector("#newNoteButton"),
-  editorPane: document.querySelector(".editorPane"),
-  editor: document.querySelector("#editor"),
-  noteTitle: document.querySelector("#noteTitle"),
-  notePath: document.querySelector("#notePath"),
-  noteInfo: document.querySelector("#noteInfo"),
-  infoTitle: document.querySelector("#infoTitle"),
-  infoParent: document.querySelector("#infoParent"),
-  infoLevel: document.querySelector("#infoLevel"),
-  fullscreenEditorButton: document.querySelector("#fullscreenEditorButton"),
-  deleteNoteButton: document.querySelector("#deleteNoteButton"),
-  editorStatus: document.querySelector("#editorStatus"),
-  sourceStatus: document.querySelector("#sourceStatus"),
-  validationStatus: document.querySelector("#validationStatus"),
-  zoomInButton: document.querySelector("#zoomInButton"),
-  zoomOutButton: document.querySelector("#zoomOutButton"),
-  resetViewButton: document.querySelector("#resetViewButton"),
-  fullscreenGraphButton: document.querySelector("#fullscreenGraphButton"),
-  newNoteDialog: document.querySelector("#newNoteDialog"),
-  newNoteForm: document.querySelector("#newNoteForm"),
-  newNoteTitle: document.querySelector("#newNoteTitle"),
-  newNoteParent: document.querySelector("#newNoteParent"),
-  newNoteHint: document.querySelector("#newNoteHint"),
-  cancelNewNoteButton: document.querySelector("#cancelNewNoteButton"),
-  createFolderDialog: document.querySelector("#createFolderDialog"),
-  createFolderForm: document.querySelector("#createFolderForm"),
-  createFolderName: document.querySelector("#createFolderName"),
-  createFolderLocationSelect: document.querySelector("#createFolderLocationSelect"),
-  createFolderLocationPath: document.querySelector("#createFolderLocationPath"),
-  cancelCreateFolderButton: document.querySelector("#cancelCreateFolderButton"),
-  hierarchyPromptDialog: document.querySelector("#hierarchyPromptDialog"),
-  copyHierarchyPromptButton: document.querySelector("#copyHierarchyPromptButton"),
-  closeHierarchyPromptButton: document.querySelector("#closeHierarchyPromptButton"),
-  deleteConfirmDialog: document.querySelector("#deleteConfirmDialog"),
-  deleteConfirmTitle: document.querySelector("#deleteConfirmTitle"),
-  deleteConfirmMessage: document.querySelector("#deleteConfirmMessage"),
-  deleteConfirmDetail: document.querySelector("#deleteConfirmDetail"),
-  cancelDeleteButton: document.querySelector("#cancelDeleteButton"),
-  confirmDeleteButton: document.querySelector("#confirmDeleteButton"),
-  graphCreatePopover: document.querySelector("#graphCreatePopover"),
-  graphNewTitle: document.querySelector("#graphNewTitle"),
-  cancelGraphCreateButton: document.querySelector("#cancelGraphCreateButton")
-};
+const els = getDomElements();
 
 const wikiLinkField = StateField.define({
   create(editorState) {
@@ -350,13 +212,16 @@ class WikiLinkWidget extends WidgetType {
   }
 }
 
-initializeEditor();
-initializeIcons();
-initializeEditorPaneWidth();
-bindEvents();
-initializeGraphResizeObserver();
-startEmpty();
-void hydrateRecentProjects();
+export function initializeApp() {
+  initializeEditor();
+  initializeIcons();
+  initializeEditorPaneWidth();
+  bindEvents();
+  initializeGraphResizeObserver();
+  startEmpty();
+  void hydrateRecentProjects();
+  startAppUpdateChecks();
+}
 
 function initializeIcons() {
   setButtonIcon(els.graphHelpButton, "help");
@@ -366,6 +231,7 @@ function initializeIcons() {
   setButtonIcon(els.graphOpenProjectButton, "openProject", "Open project");
   setButtonIcon(els.graphCreateProjectButton, "createProject", "Create project");
   setButtonIcon(els.closeGraphProjectLauncherButton, "close");
+  setButtonIcon(els.updateButton, "download", "Update");
   els.searchFieldIcon.appendChild(createIcon("search"));
   setButtonIcon(els.zoomOutButton, "zoomOut");
   setButtonIcon(els.resetViewButton, "fit");
@@ -624,6 +490,7 @@ function bindEvents() {
   els.graphCreateProjectButton.addEventListener("click", openCreateFolderDialog);
   els.graphRecentList.addEventListener("click", onLaunchRecentClick);
   els.closeGraphProjectLauncherButton.addEventListener("click", closeGraphProjectLauncher);
+  els.updateButton.addEventListener("click", installAvailableUpdate);
   els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
   els.workspaceTabs.addEventListener("dblclick", onWorkspaceTabsDoubleClick);
   els.workspaceTabs.addEventListener("focusout", onWorkspaceTabsFocusOut);
@@ -1464,24 +1331,6 @@ async function createGraphFolder(event) {
   }
 }
 
-function isTauriApp() {
-  return Boolean(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.dialog);
-}
-
-async function pickNativeDirectory() {
-  const selected = await window.__TAURI__.dialog.open({
-    directory: true,
-    recursive: true,
-    multiple: false,
-    canCreateDirectories: true
-  });
-  return Array.isArray(selected) ? selected[0] : selected;
-}
-
-async function invokeNative(command, args = {}) {
-  return window.__TAURI__.core.invoke(command, args);
-}
-
 async function hydrateRecentProjects() {
   if (!isTauriApp()) {
     renderLaunchScreen();
@@ -1498,30 +1347,75 @@ async function hydrateRecentProjects() {
   }
 }
 
-function fileSignature(file) {
-  if (file && file.signature) return String(file.signature);
-  const modified = Number(file && file.modifiedMs) || 0;
-  const bytes = Number(file && file.byteLen) || 0;
-  return `${modified}:${bytes}`;
+function startAppUpdateChecks() {
+  renderUpdateButton();
+  if (!isTauriApp() || typeof window.fetch !== "function") return;
+
+  void checkForAvailableUpdate();
+  if (state.appUpdateCheckTimer) window.clearInterval(state.appUpdateCheckTimer);
+  state.appUpdateCheckTimer = window.setInterval(() => {
+    void checkForAvailableUpdate();
+  }, APP_UPDATE_CHECK_INTERVAL_MS);
 }
 
-function buildFileSignatureMap(files = []) {
-  const signatures = new Map();
-  for (const file of files || []) {
-    if (!file || !file.path) continue;
-    signatures.set(file.path, fileSignature(file));
+async function checkForAvailableUpdate() {
+  if (state.appUpdateCheckInFlight || state.appUpdateInstallInFlight) return;
+  state.appUpdateCheckInFlight = true;
+
+  try {
+    const availability = await checkForAppUpdate({
+      current: getCurrentBuildInfo(),
+      fetchImpl: window.fetch.bind(window)
+    });
+    state.appUpdate = availability.available ? availability : null;
+    renderUpdateButton();
+  } catch (error) {
+    state.appUpdate = null;
+    renderUpdateButton();
+    console.warn("Update check failed", error);
+  } finally {
+    state.appUpdateCheckInFlight = false;
   }
-  return signatures;
 }
 
-function cloneFileSignatures(signatures) {
-  if (signatures instanceof Map) {
-    return new Map(signatures);
+function renderUpdateButton(statusMessage = "") {
+  const update = state.appUpdate;
+  const visible = Boolean(update && update.available);
+  document.body.classList.toggle("hasAppUpdate", visible);
+  els.updateButton.hidden = !visible;
+
+  if (!visible) {
+    els.updateButton.disabled = false;
+    return;
   }
-  if (signatures && typeof signatures === "object") {
-    return new Map(Object.entries(signatures));
+
+  const label = state.appUpdateInstallInFlight ? "Updating" : "Update";
+  setButtonIcon(els.updateButton, "download", label);
+  els.updateButton.disabled = state.appUpdateInstallInFlight;
+  els.updateButton.title = statusMessage || `Install main update ${update.shortCommit}`;
+  els.updateButton.setAttribute("aria-label", statusMessage || `Install Apex Notes update ${update.shortCommit}`);
+}
+
+async function installAvailableUpdate() {
+  const update = state.appUpdate;
+  if (!update || !update.available || state.appUpdateInstallInFlight) return;
+
+  state.appUpdateInstallInFlight = true;
+  renderUpdateButton("Installing update");
+  setStatus("Installing update");
+
+  try {
+    await invokeNative("install_app_update", {
+      downloadUrl: update.downloadUrl,
+      releaseCommit: update.releaseCommit
+    });
+    setStatus("Relaunching after update");
+  } catch (error) {
+    state.appUpdateInstallInFlight = false;
+    renderUpdateButton();
+    setStatus("Update failed");
+    console.error(error);
   }
-  return new Map();
 }
 
 function canLiveSyncWorkspace() {
@@ -1575,21 +1469,7 @@ async function checkLiveFolderUpdates() {
     });
     if (token !== state.liveSyncToken || !canLiveSyncWorkspace()) return;
 
-    const nextSignatures = buildFileSignatureMap(statuses);
-    const pathsToRead = [];
-    const deletedPaths = [];
-
-    for (const file of statuses || []) {
-      if (!file || !file.path) continue;
-      if (state.fileSignatures.get(file.path) === nextSignatures.get(file.path)) continue;
-      pathsToRead.push(file.path);
-    }
-
-    for (const path of state.fileSignatures.keys()) {
-      if (!nextSignatures.has(path)) {
-        deletedPaths.push(path);
-      }
-    }
+    const { pathsToRead, deletedPaths, nextSignatures } = diffFileSignatures(state.fileSignatures, statuses);
 
     if (!pathsToRead.length && !deletedPaths.length) {
       state.fileSignatures = nextSignatures;
@@ -1681,14 +1561,6 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   maybeShowHierarchyPrompt();
   renderValidationStatus();
   saveActiveWorkspaceState();
-}
-
-function liveUpdateStatus(added, changed, removed) {
-  const parts = [];
-  if (added) parts.push(`${added} added`);
-  if (changed) parts.push(`${changed} changed`);
-  if (removed) parts.push(`${removed} removed`);
-  return `Live updated: ${parts.join(", ")}`;
 }
 
 function normalizeSelectionAfterNotesChanged() {
@@ -2379,103 +2251,6 @@ async function copyHierarchyPrompt() {
   }
 }
 
-function parseNote(path, raw) {
-  const parsed = splitMarkdown(raw);
-  const frontmatter = parseFrontmatter(parsed.frontmatterRaw);
-  const body = parsed.body;
-  const pathNoExt = path.replace(/\.md$/i, "");
-  const basename = pathNoExt.split("/").pop();
-  const heading = body.match(/^#\s+(.+)$/m);
-  const title = frontmatter.values.title || (heading && heading[1].trim()) || basename;
-  const level = Number.parseInt(frontmatter.values.level, 10);
-  const bodyRefs = parseWikiRefs(body);
-  const searchText = `${title} ${path} ${raw}`.toLowerCase();
-
-  const keys = new Set(getNoteAliasKeys(path, title));
-
-  return {
-    path,
-    pathNoExt,
-    basename,
-    title,
-    level: Number.isFinite(level) ? level : 4,
-    declaredLevel: Number.isFinite(level) ? level : null,
-    derivedLevel: null,
-    rawLevel: frontmatter.values.level,
-    hasFrontmatter: parsed.hasFrontmatter,
-    hasLevel: Object.prototype.hasOwnProperty.call(frontmatter.values, "level") && Number.isFinite(level),
-    hasTitle: Object.prototype.hasOwnProperty.call(frontmatter.values, "title"),
-    parentRef: frontmatter.values.parent || null,
-    raw,
-    frontmatterRaw: parsed.frontmatterRaw,
-    frontmatterEntries: frontmatter.entries,
-    frontmatterValues: frontmatter.values,
-    body,
-    bodyRefs,
-    bodyRefNotes: [],
-    searchText,
-    keys: [...keys],
-    parentNote: null,
-    children: []
-  };
-}
-
-function splitMarkdown(raw) {
-  if (!raw.startsWith("---")) {
-    return {
-      hasFrontmatter: false,
-      frontmatterRaw: "",
-      body: raw
-    };
-  }
-
-  const endIndex = raw.indexOf("\n---", 3);
-  if (endIndex === -1) {
-    return {
-      hasFrontmatter: false,
-      frontmatterRaw: "",
-      body: raw
-    };
-  }
-
-  const frontmatterRaw = raw.slice(3, endIndex).replace(/^\n/, "").replace(/\s+$/, "");
-  const body = raw.slice(endIndex + 4).replace(/^\s*\n/, "");
-  return {
-    hasFrontmatter: true,
-    frontmatterRaw,
-    body
-  };
-}
-
-function parseFrontmatter(raw) {
-  const lines = raw ? raw.split("\n") : [];
-  const entries = [];
-  const values = {};
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index];
-    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (!match) {
-      entries.push({ key: null, lines: [line] });
-      index += 1;
-      continue;
-    }
-
-    const key = match[1];
-    const entryLines = [line];
-    index += 1;
-    while (index < lines.length && !lines[index].match(/^([A-Za-z0-9_-]+):\s*(.*)$/)) {
-      entryLines.push(lines[index]);
-      index += 1;
-    }
-    entries.push({ key, lines: entryLines });
-    values[key] = stripQuotes(match[2].trim());
-  }
-
-  return { entries, values };
-}
-
 function resolveWikiNote(ref) {
   if (state.graphIndex) {
     const path = state.graphIndex.resolvePath(ref);
@@ -2485,58 +2260,7 @@ function resolveWikiNote(ref) {
 }
 
 function validateNotes() {
-  const issues = [];
-
-  for (const note of state.notes) {
-    if (!note.hasFrontmatter) {
-      issues.push({ type: "frontmatter", note, message: `${note.title} is missing frontmatter` });
-    }
-
-    if (!note.hasTitle) {
-      issues.push({ type: "frontmatter", note, message: `${note.title} is missing a title` });
-    }
-
-    if (!note.hasLevel) {
-      issues.push({ type: "level", note, message: `${note.title} is missing a valid level` });
-    }
-  }
-
-  if (state.graphIndex) {
-    for (const issue of state.graphIndex.validation) {
-      issues.push(graphIssueToValidation(issue));
-    }
-  }
-
-  return issues;
-}
-
-function graphIssueToValidation(issue) {
-  const path = issue.path || (Array.isArray(issue.paths) ? issue.paths[0] : null);
-  const note = path ? state.byPath.get(path) || null : null;
-  let type = "parent";
-
-  if (issue.type === ISSUE_TYPES.LEVEL_MISMATCH) {
-    type = "level";
-  } else if (issue.type === ISSUE_TYPES.DUPLICATE_ALIAS) {
-    type = "duplicate";
-  }
-
-  return {
-    type,
-    note,
-    graphIssue: issue,
-    message: issue.message || "Hierarchy issue"
-  };
-}
-
-function stripQuotes(value) {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
+  return validateNoteCollection(state.notes, state.graphIndex, state.byPath);
 }
 
 async function selectNote(path, force = false) {
@@ -2967,23 +2691,6 @@ async function autosaveSelectedNote() {
   }
 }
 
-function composeRaw(note, body, values) {
-  const knownKeys = new Set(["title", "level", "parent", "group"]);
-  const lines = [
-    `title: "${escapeYaml(values.title)}"`,
-    `level: ${values.level}`,
-    values.parentRef ? `parent: "${escapeYaml(values.parentRef)}"` : "parent: null"
-  ];
-
-  for (const entry of note.frontmatterEntries || []) {
-    if (!entry.key || knownKeys.has(entry.key)) continue;
-    lines.push(...entry.lines);
-  }
-
-  const cleanBody = body || "";
-  return `---\n${lines.join("\n")}\n---\n\n${cleanBody}${cleanBody.endsWith("\n") ? "" : "\n"}`;
-}
-
 function noteNeedsFullRefresh(current, updated) {
   return (
     current.title !== updated.title ||
@@ -3020,18 +2727,6 @@ function patchBodyOnlyNote(note, updated) {
   note.searchText = updated.searchText;
   state.searchIndex = createSearchIndex(state.notes);
   updateSearchResults();
-}
-
-function createNoteRaw({ title, level, parent, body }) {
-  return [
-    "---",
-    `title: "${escapeYaml(title)}"`,
-    `level: ${level}`,
-    parent ? `parent: "[[${parent.basename}]]"` : "parent: null",
-    "---",
-    "",
-    body || `# ${title}\n`
-  ].join("\n");
 }
 
 function renderGraph({ preserveView } = { preserveView: true }) {
@@ -5801,20 +5496,13 @@ async function pasteCopiedNodes(clipboard, point) {
 }
 
 async function createNoteFromPastedText(text, point) {
-  const parent = getPasteParent();
-  if (!parent) {
-    setStatus("Select a parent note before pasting text");
-    return false;
-  }
-
   const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
   const title = getAvailableDisplayTitle(titleFromText(text), reservedTitles);
-  const level = parent.level + 1;
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level,
-    parent,
+    level: 0,
+    parent: null,
     body: bodyFromText(text, title)
   });
 
@@ -5917,48 +5605,6 @@ function positionsAroundPoint(point, count) {
       y: round(origin.y + row * gapY)
     };
   });
-}
-
-function getAvailableDisplayTitle(title, reservedTitles) {
-  const base = String(title || "").trim() || "Untitled note";
-  let candidate = base;
-  let suffix = 2;
-  while (reservedTitles.has(normalizeKey(candidate))) {
-    candidate = `${base} ${suffix}`;
-    suffix += 1;
-  }
-  return candidate;
-}
-
-function titleFromText(text, fallback = "Pasted note") {
-  const parsed = splitMarkdown(text);
-  const frontmatter = parseFrontmatter(parsed.frontmatterRaw);
-  if (frontmatter.values.title) return frontmatter.values.title;
-
-  const body = parsed.body || text;
-  const heading = body.match(/^#\s+(.+)$/m);
-  if (heading) return cleanTitleText(heading[1], fallback);
-
-  return cleanTitleText(body, fallback);
-}
-
-function cleanTitleText(text, fallback) {
-  const words = String(text || "")
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/[#>*_`~\[\]().,!?:;"']/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 6);
-  const title = words.join(" ").slice(0, 56).trim();
-  return title || fallback;
-}
-
-function bodyFromText(text, title) {
-  const parsed = splitMarkdown(text);
-  const body = (parsed.hasFrontmatter ? parsed.body : text).trim();
-  return body ? `${body}\n` : `# ${title}\n`;
 }
 
 function basenameFromPath(path) {
@@ -6333,15 +5979,7 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
 }
 
 function getAvailableNewNotePath(title, reservedPaths = state.notePaths) {
-  const base = slugify(title) || "untitled";
-  const existing = new Set([...reservedPaths].map((path) => path.toLowerCase()));
-  let suffix = 0;
-
-  while (true) {
-    const filename = `${base}${suffix ? `-${suffix + 1}` : ""}.md`;
-    if (!existing.has(filename.toLowerCase())) return filename;
-    suffix += 1;
-  }
+  return getAvailableNewNotePathForTitle(title, reservedPaths);
 }
 
 async function updateManifestFile() {
@@ -6351,10 +5989,6 @@ async function updateManifestFile() {
     notesPath: state.notesPath,
     paths
   });
-}
-
-function escapeYaml(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function getLevelColor(level) {

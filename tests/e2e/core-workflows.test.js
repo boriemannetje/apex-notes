@@ -123,6 +123,63 @@ test("workspace chrome supports rename and fullscreen without losing the graph",
   await page.close();
 });
 
+test("pasting plain text into the graph creates a loose note", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#searchInput").fill("child");
+  await page.locator("[data-search-result-path='child.md']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
+  await page.locator("#searchInput").fill("");
+
+  await page.evaluate(() => {
+    window.__apexTestState.clipboardText = "# Pasted Loose\n\nA loose pasted note.";
+  });
+  await page.locator("#graph").focus();
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+V" : "Control+V");
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "pasted-loose.md");
+
+  const pastedRaw = await noteRaw(page, "pasted-loose.md");
+  assert.match(pastedRaw, /title: "Pasted Loose"/);
+  assert.match(pastedRaw, /level: 0/);
+  assert.match(pastedRaw, /parent: null/);
+  assert.equal(await textContent(page, "#editorStatus"), "Pasted text as note");
+
+  await page.close();
+});
+
+test("main-production update button appears and invokes native update install", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), {
+    updateRelease: {
+      target_commitish: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      assets: [
+        {
+          name: "apex-notes-main-macos-arm64.dmg",
+          browser_download_url:
+            "https://github.com/boriemannetje/apex-notes/releases/download/main-production/apex-notes-main-macos-arm64.dmg"
+        }
+      ]
+    }
+  });
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  const updateButton = page.getByRole("button", { name: /install apex notes update/i });
+  await updateButton.waitFor();
+  await updateButton.click();
+
+  const installCall = await page.waitForFunction(() => {
+    return window.__apexTestState.calls.find((call) => call.command === "install_app_update");
+  });
+  const call = await installCall.jsonValue();
+  assert.equal(call.args.releaseCommit, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  assert.match(call.args.downloadUrl, /apex-notes-main-macos-arm64\.dmg$/);
+
+  await page.close();
+});
+
 test("empty graph create hint stays centered in the visible graph area", async () => {
   const page = await newMockedTauriPage(emptyWorkspace());
 
@@ -259,13 +316,15 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
   await page.close();
 });
 
-async function newMockedTauriPage(workspace = sampleWorkspace()) {
+async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  await page.addInitScript((seedWorkspace) => {
+  await page.addInitScript(({ seedWorkspace, seedUpdateRelease }) => {
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const state = {
       workspace: clone(seedWorkspace),
-      calls: []
+      calls: [],
+      clipboardText: "",
+      updateRelease: seedUpdateRelease
     };
 
     const signatureFor = (note) => `${note.path}:${note.raw.length}`;
@@ -278,6 +337,19 @@ async function newMockedTauriPage(workspace = sampleWorkspace()) {
     }));
 
     window.__apexTestState = state;
+    window.fetch = async () => ({
+      ok: true,
+      json: async () => state.updateRelease
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        readText: async () => state.clipboardText,
+        writeText: async (text) => {
+          state.clipboardText = String(text || "");
+        }
+      }
+    });
     window.__TAURI__ = {
       dialog: {
         open: async () => state.workspace.rootPath
@@ -300,6 +372,15 @@ async function newMockedTauriPage(workspace = sampleWorkspace()) {
             state.workspace.notes.push({ path: args.path, raw: args.raw });
             return null;
           }
+          if (command === "create_notes") {
+            for (const note of args.notes || []) {
+              if (state.workspace.notes.some((item) => item.path === note.path)) {
+                throw new Error(`Note already exists: ${note.path}`);
+              }
+              state.workspace.notes.push({ path: note.path, raw: note.raw });
+            }
+            return null;
+          }
           if (command === "write_note") {
             const note = state.workspace.notes.find((item) => item.path === args.path);
             if (!note) throw new Error(`Missing note: ${args.path}`);
@@ -317,7 +398,7 @@ async function newMockedTauriPage(workspace = sampleWorkspace()) {
           if (command === "write_layout_patch") {
             state.workspace.positions = {
               ...(state.workspace.positions || {}),
-              ...(args.patch || {})
+              ...(args.updates || args.patch || {})
             };
             return null;
           }
@@ -328,12 +409,16 @@ async function newMockedTauriPage(workspace = sampleWorkspace()) {
             return clone(state.workspace);
           }
           if (command === "remember_recent_project" || command === "forget_recent_project") return [];
+          if (command === "install_app_update") return null;
 
           throw new Error(`Unhandled test Tauri command: ${command}`);
         }
       }
     };
-  }, workspace);
+  }, {
+    seedWorkspace: workspace,
+    seedUpdateRelease: options.updateRelease || { target_commitish: "", assets: [] }
+  });
   return page;
 }
 

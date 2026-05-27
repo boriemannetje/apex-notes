@@ -11,7 +11,7 @@ import {
   rememberRecentProject,
   removeRecentProject,
   saveRecentProjects
-} from "./recentProjects.js";
+} from "./recentProjects.ts";
 
 test("remembers projects newest first and dedupes by root path", () => {
   const projects = rememberRecentProject(

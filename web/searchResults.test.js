@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SearchIndex } from "./searchIndex.js";
-import { buildSearchResults } from "./searchResults.js";
+import { SearchIndex } from "./searchIndex.ts";
+import { buildSearchResults } from "./searchResults.ts";
 
 test("ranked search puts the closest title match first", () => {
   const notes = [

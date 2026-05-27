@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   NODE_SIZE_MAX_SCALE,
   connectionCountToNodeScale
-} from "./nodeSizing.js";
+} from "./nodeSizing.ts";
 
 test("connection scale starts at the current node size", () => {
   assert.equal(connectionCountToNodeScale(0), 1);

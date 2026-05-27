@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildGraphLayout } from "./graphLayout.js";
+import { buildGraphLayout } from "./graphLayout.ts";
 
 test("lays out a valid hierarchy with deterministic fixed levels", () => {
   const notes = [

@@ -1,3 +1,4 @@
+// @ts-nocheck
 const DEFAULT_OPTIONS = Object.freeze({
   levelGap: 138,
   nodeGap: 168,
