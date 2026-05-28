@@ -615,6 +615,7 @@ function openGraphProjectLauncher() {
   closeGraphCreatePopover();
   state.graphProjectLauncherOpen = true;
   renderGraphProjectLauncher();
+  renderWorkspaceTabs();
   setStatus("Choose a project");
 }
 
@@ -623,6 +624,7 @@ function closeGraphProjectLauncher() {
 
   state.graphProjectLauncherOpen = false;
   renderGraphProjectLauncher();
+  renderWorkspaceTabs();
   setStatus(hasWritableWorkspace() ? "Graph ready" : "");
 }
 
@@ -953,6 +955,14 @@ function onWorkspaceTabsClick(event) {
     return;
   }
 
+  const closeProjectChooserButton = event.target.closest("[data-close-project-chooser]");
+  if (closeProjectChooserButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeGraphProjectLauncher();
+    return;
+  }
+
   const closeButton = event.target.closest("[data-close-workspace]");
   if (closeButton) {
     event.preventDefault();
@@ -973,7 +983,7 @@ function onWorkspaceTabsClick(event) {
 }
 
 function onWorkspaceTabsDoubleClick(event) {
-  if (event.target.closest("[data-close-workspace], [data-open-workspace], [data-rename-workspace]")) {
+  if (event.target.closest("[data-close-workspace], [data-close-project-chooser], [data-open-workspace], [data-rename-workspace]")) {
     return;
   }
 
@@ -2119,13 +2129,14 @@ function renderWorkspaceTabs() {
 
   for (const workspace of state.workspaces) {
     const isActive = workspace.id === state.activeWorkspaceId;
+    const isSelected = isActive && !state.graphProjectLauncherOpen;
     const isDirty = isActive ? state.dirty : workspace.dirty;
     const isRenaming = isActive && state.renamingWorkspaceId === workspace.id;
     const tab = document.createElement("div");
-    tab.className = `workspaceTab${isActive ? " active" : ""}${isRenaming ? " renaming" : ""}`;
+    tab.className = `workspaceTab${isSelected ? " active" : ""}${isRenaming ? " renaming" : ""}`;
     tab.dataset.workspaceId = workspace.id;
     tab.setAttribute("role", "tab");
-    tab.setAttribute("aria-selected", String(isActive));
+    tab.setAttribute("aria-selected", String(isSelected));
     tab.title = workspace.rootPath || workspace.workspaceName || "Folder";
     const workspaceLabel = workspace.workspaceName || "Folder";
 
@@ -2179,7 +2190,37 @@ function renderWorkspaceTabs() {
     fragment.appendChild(tab);
   }
 
-  if (state.workspaces.length) {
+  if (state.workspaces.length && state.graphProjectLauncherOpen) {
+    const tab = document.createElement("div");
+    tab.className = "workspaceTab workspaceTabTransient active";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", "true");
+    tab.title = "Open new";
+
+    const openButton = document.createElement("button");
+    openButton.className = "workspaceTabMain";
+    openButton.type = "button";
+    openButton.dataset.openWorkspace = "true";
+    openButton.setAttribute("aria-label", "Open new project");
+    openButton.title = "Open new project";
+
+    const title = document.createElement("span");
+    title.className = "workspaceTabTitle";
+    title.textContent = "Open new";
+    openButton.appendChild(title);
+    tab.appendChild(openButton);
+
+    const closeButton = document.createElement("button");
+    closeButton.className = "workspaceTabClose";
+    closeButton.type = "button";
+    closeButton.dataset.closeProjectChooser = "true";
+    closeButton.setAttribute("aria-label", "Close open new tab");
+    closeButton.title = "Close open new tab";
+    closeButton.appendChild(createIcon("close"));
+    tab.appendChild(closeButton);
+
+    fragment.appendChild(tab);
+  } else if (state.workspaces.length) {
     const addButton = document.createElement("button");
     addButton.className = "workspaceTabAdd";
     addButton.type = "button";

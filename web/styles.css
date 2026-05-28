@@ -463,6 +463,10 @@ body.hasAppUpdate .statusRail {
   min-width: min(260px, 45vw);
 }
 
+.workspaceTabTransient {
+  min-width: 126px;
+}
+
 .workspaceTab:not(.active):hover {
   background: var(--bg-raised);
 }
