@@ -390,26 +390,23 @@ fn forget_recent_project(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn install_app_update(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     release_commit: String,
 ) -> Result<(), String> {
     validate_release_commit(&release_commit)?;
 
     #[cfg(target_os = "macos")]
     {
-        let app_handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             spawn_macos_update_installer(release_commit)
         })
         .await
         .map_err(to_error)??;
-        app_handle.exit(0);
         Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
         Err("Automatic app updates are currently available for macOS builds only".into())
     }
 }

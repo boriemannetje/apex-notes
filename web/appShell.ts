@@ -1431,6 +1431,7 @@ async function installAvailableUpdate() {
   setStatus("Installing update");
 
   try {
+    await waitForPaint();
     await invokeNative("install_app_update", {
       releaseCommit: update.releaseCommit
     });
@@ -1444,6 +1445,14 @@ async function installAvailableUpdate() {
     setStatus("Update failed");
     console.error(error);
   }
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
 }
 
 function canLiveSyncWorkspace() {
