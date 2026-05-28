@@ -28,14 +28,14 @@ test("builds explicit vertices, tree edges, and weighted reference edges", () =>
   assert.equal(index.refsIn.get("leaf.md").get("root.md"), 2);
 });
 
-test("resolves parent refs through note aliases and derives missing levels", () => {
+test("resolves parent refs through note aliases and derives runtime levels", () => {
   const index = createGraphIndex([
-    note("folder/root-note.md", "Guiding Principle", 0, null, ""),
+    note("folder/root-note.md", "Guiding Principle", 99, null, ""),
     { path: "child.md", title: "Child", parentRef: "[[root-note]]", body: "" }
   ]);
 
   assert.equal(index.parents.get("child.md"), "folder/root-note.md");
-  assert.equal(index.V.get("child.md").declaredLevel, null);
+  assert.equal(index.V.get("folder/root-note.md").level, 0);
   assert.equal(index.V.get("child.md").derivedLevel, 1);
   assert.equal(index.V.get("child.md").level, 1);
 });
@@ -52,8 +52,9 @@ test("keeps broken notes present and reports invariant violations", () => {
   assert.deepEqual(index.roots, ["root.md"]);
   assert.deepEqual(
     index.validation.map((issue) => issue.type).sort(),
-    [ISSUE_TYPES.LEVEL_MISMATCH, ISSUE_TYPES.MISSING_PARENT].sort()
+    [ISSUE_TYPES.MISSING_PARENT]
   );
+  assert.equal(index.V.get("too-deep.md").level, 1);
 });
 
 test("supports multiple parentless roots and loose notes as valid forest entries", () => {
@@ -133,7 +134,6 @@ function note(path, title, level, parentRef, body) {
     level,
     parentRef,
     body,
-    hasLevel: true,
     hasTitle: true,
     hasFrontmatter: true
   };

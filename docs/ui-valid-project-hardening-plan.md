@@ -18,27 +18,27 @@ Each note is a Markdown file with exactly this frontmatter shape:
 ```yaml
 ---
 title: "Human Readable Title"
-level: 0
 parent: null
 ---
 ```
 
-The canonical hierarchy edge is `parent`. Body wiki links are contextual references only. A valid UI-created project may contain:
+The canonical hierarchy edge is `parent`; graph depth is derived at runtime from the parent chain. Body wiki links are contextual references only. A valid UI-created project may contain:
 
 - More than one root or loose note with `parent: null`.
 - Duplicate display titles.
 - Multiple independent hierarchies.
-- Deep levels beyond any named category system.
+- Deep hierarchies beyond any named category system.
 
 A valid UI-created project must not contain:
 
 - Missing frontmatter.
-- Missing `title`, `level`, or `parent`.
+- Missing `title` or `parent`.
 - Extra app schema fields added by the app.
 - A parent reference that cannot resolve to a note.
 - A parent reference that points to a descendant and creates a cycle.
-- A declared level that disagrees with the resolved parent chain.
 - A `manifest.json` that omits files the app created or includes files the app deleted.
+
+Legacy `level` frontmatter is ignored and may be removed the next time a note is rewritten.
 
 ## Part 1: What Happened In `vivalafrance`
 
@@ -165,10 +165,8 @@ Preflight should reject:
 - Missing required frontmatter.
 - Parent cycles.
 - Parent references that cannot resolve.
-- Level mismatches after the operation.
 - Manifest drift after create/delete.
 - Empty titles after trimming.
-- Non-finite levels.
 - Writes to a path outside the active notes folder.
 
 Preflight should allow:
@@ -195,7 +193,7 @@ For multi-note writes:
 
 - Apply all parsed writes to a cloned workspace state.
 - Rebuild once.
-- Confirm all intended level changes and parent edges exist.
+- Confirm all intended parent edges exist.
 - Update visible state atomically.
 
 If verification fails, the app should show a recoverable error and leave the previous visible graph state in place.
@@ -211,9 +209,8 @@ write_note_checked(notes_path, path, raw, expected_manifest_delta)
 The backend should verify:
 
 - The path is a Markdown file under the active notes folder.
-- Frontmatter parses into exactly `title`, `level`, and `parent` for app-created files.
+- Frontmatter parses into exactly `title` and `parent` for app-created files.
 - `title` is present and non-empty.
-- `level` is a non-negative integer.
 - `parent` is `null` or a wiki ref string.
 
 The backend cannot always validate the full graph cheaply for one write unless it reads sibling notes, but it can prevent malformed raw files from being written by the UI.
@@ -246,7 +243,7 @@ Split validation into three categories:
 Examples:
 
 ```text
-invalid: missing parent, cycle, level mismatch, missing title
+invalid: missing parent, cycle, missing title
 warning: duplicate display titles, ambiguous manually typed body ref
 info: multiple roots, loose notes, grid layout
 ```
@@ -259,9 +256,7 @@ When invalid data is detected, offer targeted repairs instead of only showing th
 
 - Missing frontmatter: "Repair note format"
 - Missing title: "Use filename as title"
-- Missing level with parent: "Derive level from parent"
 - Missing parent target: "Detach as loose note" or "Choose parent"
-- Level mismatch: "Update level to expected value"
 - Manifest drift: "Rebuild manifest"
 
 The agent prompt remains useful for large imported folders, but app-created inconsistencies should have one-click repair paths.
@@ -274,13 +269,13 @@ Add unit tests for:
 - Path-stem resolution before alias resolution.
 - Duplicate titles produce warnings, not invalid errors.
 - Parent cycle preflight rejection.
-- Level derivation when connecting a loose note to a parent.
+- Depth derivation when connecting a loose note to a parent.
 - Manifest coverage after create/delete.
 
 Add e2e tests for:
 
 - Create two notes with the same title, connect them by body reference, reopen, and verify no invalid-format warning.
-- Drag a loose root under another node and verify parent/level are written correctly.
+- Drag a loose root under another node and verify parent is written correctly.
 - Rename a node to a duplicate title and verify the graph remains valid.
 - Delete a parent and verify children are not silently rewritten into malformed state.
 - Paste a copied subgraph and verify all parent refs point to new paths.
@@ -291,7 +286,6 @@ This hardening is complete when:
 
 - A user can create duplicate display titles through the UI without invalidating the project.
 - Every drag-created reference edge renders immediately and after reopen.
-- Every drag-created hierarchy edge writes a resolvable `parent` ref and a correct level.
+- Every drag-created hierarchy edge writes a resolvable `parent` ref.
 - Reopening a project created only through the UI never shows an invalid-format warning.
 - The test suite includes the `vivalafrance` regression and at least one full UI reopen workflow.
-

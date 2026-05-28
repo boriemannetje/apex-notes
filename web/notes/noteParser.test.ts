@@ -30,36 +30,32 @@ test("parseFrontmatter preserves unknown entry lines and strips simple quotes", 
   ]);
 });
 
-test("parseNote derives title, level, parent, refs, aliases, and search text", () => {
+test("parseNote parses title, parent, refs, aliases, search text, and ignores legacy level", () => {
   const note = parseNote(
     "area/child.md",
-    "---\ntitle: \"Child Note\"\nlevel: 2\nparent: \"[[parent]]\"\n---\n\n# Ignored Heading\nLinks [[Sibling]] and [[Other|alias]].\n"
+    "---\ntitle: \"Child Note\"\nlevel: 99\nparent: \"[[parent]]\"\n---\n\n# Ignored Heading\nLinks [[Sibling]] and [[Other|alias]].\n"
   );
 
   assert.equal(note.path, "area/child.md");
   assert.equal(note.basename, "child");
   assert.equal(note.title, "Child Note");
-  assert.equal(note.level, 2);
-  assert.equal(note.declaredLevel, 2);
-  assert.equal(note.rawLevel, "2");
+  assert.equal(note.level, 0);
   assert.equal(note.parentRef, "[[parent]]");
   assert.equal(note.hasFrontmatter, true);
-  assert.equal(note.hasLevel, true);
   assert.equal(note.hasTitle, true);
+  assert.equal(note.frontmatterValues.level, "99");
   assert.deepEqual(note.bodyRefs.map((ref) => ref.ref), ["Sibling", "Other"]);
   assert.ok(note.keys.includes("child note"));
   assert.ok(note.searchText.includes("child note area/child.md"));
 });
 
-test("parseNote falls back to heading/path and default level for loose malformed notes", () => {
+test("parseNote falls back to heading/path for loose malformed notes", () => {
   const note = parseNote("loose.md", "# Loose\n\nNo frontmatter");
 
   assert.equal(note.title, "Loose");
-  assert.equal(note.level, 4);
-  assert.equal(note.declaredLevel, null);
+  assert.equal(note.level, 0);
   assert.equal(note.parentRef, null);
   assert.equal(note.hasFrontmatter, false);
-  assert.equal(note.hasLevel, false);
   assert.equal(note.hasTitle, false);
 });
 

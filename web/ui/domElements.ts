@@ -35,7 +35,6 @@ export function getDomElements() {
     noteInfo: document.querySelector("#noteInfo"),
     infoTitle: document.querySelector("#infoTitle"),
     infoParent: document.querySelector("#infoParent"),
-    infoLevel: document.querySelector("#infoLevel"),
     fullscreenEditorButton: document.querySelector("#fullscreenEditorButton"),
     deleteNoteButton: document.querySelector("#deleteNoteButton"),
     editorStatus: document.querySelector("#editorStatus"),

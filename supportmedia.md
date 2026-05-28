@@ -39,8 +39,8 @@ Important existing constraints to preserve:
 - Note files are `.md` files.
 - `manifest.json` lists Markdown note paths only.
 - `layout.json` stores graph positions keyed by note path.
-- Frontmatter uses only `title`, `level`, and `parent`.
-- Graph hierarchy is derived from `parent`.
+- Frontmatter uses only `title` and `parent`.
+- Graph hierarchy and depth are derived from `parent`.
 - Solid, semi-transparent contextual graph edges are derived from body wiki links to notes.
 - Native filesystem commands already guard against traversal and symlink escapes for note paths.
 
@@ -123,12 +123,11 @@ Every note should keep the existing shape:
 ```yaml
 ---
 title: "Human Readable Title"
-level: 0
 parent: null
 ---
 ```
 
-No new schema fields should be added for media.
+No new schema fields should be added for media. Legacy `level` fields are ignored by the app and may be removed when a note is rewritten.
 
 Rejected examples:
 

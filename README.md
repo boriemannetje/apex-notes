@@ -58,7 +58,7 @@ This public repository contains the app source, neutral sample notes, and the bu
 
 Markdown files live in `notes/`. The bundled folder contains only neutral starter data.
 
-The graph uses frontmatter, not body links, for hierarchy. `parent` is the canonical hierarchy edge when present. Parentless notes are valid loose notes or independent roots, and every connected child is one level deeper than its parent.
+The graph uses frontmatter, not body links, for hierarchy. `parent` is the canonical hierarchy edge when present. Parentless notes are valid loose notes or independent roots, and connected-note depth is derived from the parent chain. Legacy `level` frontmatter is ignored and may be removed when a note is rewritten.
 
 See `AGENTS.md` before creating or linking notes.
 

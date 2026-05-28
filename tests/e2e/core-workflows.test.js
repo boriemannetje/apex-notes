@@ -45,6 +45,7 @@ test("core Tauri workspace flows keep working", async () => {
   assert.equal(await textContent(page, ".workspaceTab.active .workspaceTabTitle"), "Smoke Notes");
   assert.equal(await textContent(page, "#noteTitle"), "Root");
   assert.equal(await textContent(page, "#notePath"), "root.md");
+  assert.equal(await textContent(page, "#validationStatus"), "Valid");
 
   await assertMainWorkspaceGeometry(page);
   await assertGraphNode(page, "root.md");
@@ -63,7 +64,7 @@ test("core Tauri workspace flows keep working", async () => {
 
   const createdRaw = await noteRaw(page, "grandchild.md");
   assert.match(createdRaw, /title: "Grandchild"/);
-  assert.match(createdRaw, /level: 2/);
+  assert.doesNotMatch(createdRaw, /\nlevel:/);
   assert.match(createdRaw, /parent: "\[\[child\]\]"/);
   assert.equal(await textContent(page, "#editorStatus"), "Note created");
 
@@ -76,7 +77,7 @@ test("core Tauri workspace flows keep working", async () => {
 
   const renamedRaw = await noteRaw(page, "grandchild.md");
   assert.match(renamedRaw, /title: "Renamed Grandchild"/);
-  assert.match(renamedRaw, /level: 1/);
+  assert.doesNotMatch(renamedRaw, /\nlevel:/);
   assert.match(renamedRaw, /parent: "\[\[root\]\]"/);
   assert.equal(await textContent(page, "#noteTitle"), "Renamed Grandchild");
 
@@ -146,7 +147,7 @@ test("pasting plain text into the graph creates a loose note", async () => {
 
   const pastedRaw = await noteRaw(page, "pasted-loose.md");
   assert.match(pastedRaw, /title: "Pasted Loose"/);
-  assert.match(pastedRaw, /level: 0/);
+  assert.doesNotMatch(pastedRaw, /\nlevel:/);
   assert.match(pastedRaw, /parent: null/);
   assert.equal(await textContent(page, "#editorStatus"), "Pasted text as note");
 
@@ -590,7 +591,7 @@ function sampleWorkspace() {
         raw: [
           "---",
           'title: "Child"',
-          "level: 1",
+          "level: 99",
           'parent: "[[root]]"',
           "---",
           "",

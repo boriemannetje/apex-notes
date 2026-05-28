@@ -148,7 +148,6 @@ function note(path, title, level, parent) {
     title,
     level,
     parentRef: parent,
-    hasLevel: true,
     hasTitle: true,
     hasFrontmatter: true
   };

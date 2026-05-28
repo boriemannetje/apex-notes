@@ -7,7 +7,6 @@ interface ComposeNote {
 
 interface ComposeValues {
   title: string;
-  level: number;
   parentRef?: string | null;
 }
 
@@ -19,7 +18,6 @@ export function composeRaw(note: ComposeNote, body: string, values: ComposeValue
   const knownKeys = new Set(["title", "level", "parent", "group"]);
   const lines = [
     `title: "${escapeYaml(values.title)}"`,
-    `level: ${values.level}`,
     values.parentRef ? `parent: "${escapeYaml(values.parentRef)}"` : "parent: null"
   ];
 
@@ -34,19 +32,16 @@ export function composeRaw(note: ComposeNote, body: string, values: ComposeValue
 
 export function createNoteRaw({
   title,
-  level,
   parent,
   body
 }: {
   title: string;
-  level: number;
   parent: NoteParent | null;
   body?: string;
 }): string {
   return [
     "---",
     `title: "${escapeYaml(title)}"`,
-    `level: ${level}`,
     parent ? `parent: "[[${parent.basename}]]"` : "parent: null",
     "---",
     "",

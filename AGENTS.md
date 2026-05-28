@@ -9,17 +9,15 @@ Every note must start with this shape:
 ```yaml
 ---
 title: "Human Readable Title"
-level: 0
 parent: null
 ---
 ```
 
-Level semantics:
+Derived depth semantics:
 
-- `0` is a root depth, not a guarantee that there is only one apex in the folder.
 - A note with `parent: null` may be a loose note or the root of an independent hierarchy.
-- A note with a parent has level `parent.level + 1`.
-- Levels are unbounded depth numbers. Do not assign names to levels.
+- A note with a parent derives its graph depth from the parent chain.
+- Old `level` frontmatter is legacy metadata. The app ignores it and may remove it when rewriting a note.
 
 ## Canonical Linking Rule
 
@@ -33,7 +31,7 @@ For every connected child note, `parent` must point to exactly one immediate par
 parent: "[[parent-note]]"
 ```
 
-The parent must be exactly one level above the child. Multiple independent hierarchies may live in one folder.
+The parent must be the child's immediate parent. Multiple independent hierarchies may live in one folder.
 
 Do not use body links to define hierarchy. Body links are contextual references only.
 
@@ -59,4 +57,4 @@ The local app can read files directly after the user opens the notes folder, but
 
 ## Strict Separation
 
-Do not add schema fields beyond `title`, `level`, and `parent` unless the schema is explicitly changed. The app derives children from each present parent edge.
+Do not add schema fields beyond `title` and `parent` unless the schema is explicitly changed. The app derives depth and children from each present parent edge.

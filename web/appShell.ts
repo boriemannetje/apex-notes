@@ -79,8 +79,8 @@ const EDITOR_PANE_WIDTH_LARGE_STEP = 96;
 const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
 - check for pre-existing hierarchy, sometimes only a few files don't have the correct formatting
 - Build sensible hierarchy edges from the notes in this folder following the note writing skill.
-- Parentless level 0 notes are allowed as loose notes or roots of independent hierarchies.
-- When a note is connected to a parent, the parent must be one level above it.
+- Parentless notes are allowed as loose notes or roots of independent hierarchies.
+- When a note is connected to a parent, its depth is derived from the parent chain.
 - Moving down a connected hierarchy should become progressively less abstract and more concrete: principles -> themes -> projects/areas -> concrete notes, examples, tasks, or observations.
 - Use body wiki links only for contextual references between related notes, not as hierarchy.
 
@@ -2358,17 +2358,9 @@ function applyGraphIndexToNotes(graphIndex) {
     note.children = [];
     note.parentNote = null;
     note.bodyRefNotes = [];
-    note.declaredLevel = vertex ? vertex.declaredLevel : (note.hasLevel ? note.level : null);
     note.derivedLevel = vertex ? vertex.derivedLevel : null;
-    const inferredRootWithoutLevel =
-      vertex &&
-      vertex.derivedLevel === 0 &&
-      !note.hasLevel &&
-      !cleanWikiRef(note.parentRef);
-    if (vertex && Number.isFinite(vertex.derivedLevel) && !inferredRootWithoutLevel) {
+    if (vertex && Number.isFinite(vertex.derivedLevel)) {
       note.level = vertex.derivedLevel;
-    } else if (Number.isFinite(note.declaredLevel)) {
-      note.level = note.declaredLevel;
     } else {
       note.level = 4;
     }
@@ -2407,7 +2399,7 @@ function isHierarchyComplete(notes) {
   if (!notes.length) return true;
 
   for (const note of notes) {
-    if (!note.hasFrontmatter || !note.hasLevel || !note.hasTitle) {
+    if (!note.hasFrontmatter || !note.hasTitle) {
       return false;
     }
   }
@@ -2420,11 +2412,11 @@ function isHierarchyComplete(notes) {
 }
 
 function isValidApex(note) {
-  if (!note || cleanWikiRef(note.parentRef) || !note.hasLevel) return false;
+  if (!note || !note.hasFrontmatter || !note.hasTitle || cleanWikiRef(note.parentRef)) return false;
   if (state.graphIndex && state.graphIndex.derivedLevels.has(note.path)) {
     return state.graphIndex.derivedLevels.get(note.path) === 0;
   }
-  return Boolean(note.hasLevel && note.level === 0);
+  return Boolean(note.level === 0);
 }
 
 function hasValidHierarchyEdge(note) {
@@ -2437,8 +2429,6 @@ function hasValidHierarchyEdge(note) {
   return Boolean(
     note &&
     parent &&
-    note.hasLevel &&
-    parent.hasLevel &&
     Number.isFinite(note.level) &&
     Number.isFinite(parent.level) &&
     parent.level === note.level - 1
@@ -2485,7 +2475,6 @@ function isValidParentlessHierarchyNote(note) {
     note &&
     note.hasFrontmatter &&
     note.hasTitle &&
-    note.hasLevel &&
     Number.isFinite(note.level) &&
     !cleanWikiRef(note.parentRef)
   );
@@ -2722,7 +2711,6 @@ function renderInfoPanel(note) {
   if (!note) {
     els.infoTitle.value = "";
     els.infoParent.innerHTML = "";
-    els.infoLevel.value = "";
     els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
     els.noteInfo.open = false;
     state.infoHydrating = false;
@@ -2732,7 +2720,6 @@ function renderInfoPanel(note) {
   els.infoTitle.value = note.title;
   els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
   renderInfoParents(note);
-  updateInfoDerivedFields();
   state.infoHydrating = false;
 }
 
@@ -2767,25 +2754,8 @@ function isDescendant(candidate, parent) {
   return false;
 }
 
-function collectDescendants(parent) {
-  const descendants = [];
-  const stack = [...(parent.children || [])];
-  const seen = new Set([parent.path]);
-
-  for (let index = 0; index < stack.length; index += 1) {
-    const note = stack[index];
-    if (!note || seen.has(note.path)) continue;
-    seen.add(note.path);
-    descendants.push(note);
-    stack.push(...(note.children || []));
-  }
-
-  return descendants;
-}
-
 function onInfoChanged() {
   if (state.infoHydrating) return;
-  updateInfoDerivedFields();
   const note = getSelectedNote();
   if (note) {
     els.noteTitle.textContent = els.infoTitle.value.trim() || note.title;
@@ -2793,18 +2763,10 @@ function onInfoChanged() {
   markSelectedDirty();
 }
 
-function updateInfoDerivedFields() {
-  const parent = state.byPath.get(els.infoParent.value) || null;
-  const level = parent ? parent.level + 1 : 0;
-  els.infoLevel.value = String(level);
-}
-
 function getInfoValues(note) {
   const parent = state.byPath.get(els.infoParent.value) || null;
-  const level = parent ? parent.level + 1 : 0;
   return {
     title: els.infoTitle.value.trim() || note.title,
-    level,
     parentRef: parent ? `[[${parent.basename}]]` : null
   };
 }
@@ -3013,10 +2975,8 @@ async function autosaveSelectedNote() {
 function noteNeedsFullRefresh(current, updated) {
   return (
     current.title !== updated.title ||
-    current.level !== updated.level ||
     current.parentRef !== updated.parentRef ||
     current.hasFrontmatter !== updated.hasFrontmatter ||
-    current.hasLevel !== updated.hasLevel ||
     current.hasTitle !== updated.hasTitle ||
     !sameWikiRefs(current.bodyRefs, updated.bodyRefs)
   );
@@ -3035,11 +2995,8 @@ function patchBodyOnlyNote(note, updated) {
   note.frontmatterRaw = updated.frontmatterRaw;
   note.frontmatterEntries = updated.frontmatterEntries;
   note.frontmatterValues = updated.frontmatterValues;
-  note.declaredLevel = updated.declaredLevel;
   note.derivedLevel = updated.derivedLevel;
-  note.rawLevel = updated.rawLevel;
   note.hasFrontmatter = updated.hasFrontmatter;
-  note.hasLevel = updated.hasLevel;
   note.hasTitle = updated.hasTitle;
   note.body = updated.body;
   note.bodyRefs = updated.bodyRefs;
@@ -3464,7 +3421,6 @@ function renderGraphNode(canvas, note) {
 
 function graphNodeAriaLabel(note, { loose = false, nodeSize = getNodeSize(note.path) } = {}) {
   const parts = [note.title];
-  parts.push(Number.isFinite(note.level) ? `level ${note.level}` : "no level");
   parts.push(`${nodeSize.connectionCount} connection${nodeSize.connectionCount === 1 ? "" : "s"}`);
   if (loose) parts.push("loose note");
   if (state.armedRope && state.armedRope.sourcePath === note.path) parts.push("connection ready");
@@ -5371,7 +5327,6 @@ async function createLooseGraphNote(title, position) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level: 0,
     parent: null,
     body: `# ${title}\n`
   });
@@ -5434,12 +5389,8 @@ async function connectLooseNoteToParent(child, parent) {
 
   const historyBefore = snapshotWorkspaceForHistory();
   const parentPlan = getParentConnectionPlan(parent, child);
-  const nextChildLevel = parentPlan.level + 1;
-  const currentChildLevel = Number.isFinite(child.level) ? child.level : 0;
-  const levelDelta = nextChildLevel - currentChildLevel;
   const childRaw = composeRaw(child, child.body, {
     title: child.title,
-    level: nextChildLevel,
     parentRef: `[[${parent.basename}]]`
   });
 
@@ -5449,18 +5400,6 @@ async function connectLooseNoteToParent(child, parent) {
   }
   if (childRaw !== child.raw) {
     writes.push({ path: child.path, raw: childRaw });
-  }
-  if (levelDelta !== 0) {
-    for (const descendant of collectDescendants(child)) {
-      const level = Number.isFinite(descendant.level) ? descendant.level + levelDelta : levelDelta;
-      const raw = composeRaw(descendant, descendant.body, {
-        ...frontmatterValuesForNote(descendant),
-        level
-      });
-      if (raw !== descendant.raw) {
-        writes.push({ path: descendant.path, raw });
-      }
-    }
   }
 
   if (!writes.length) {
@@ -5582,7 +5521,6 @@ function frontmatterValuesForNote(note) {
     : cleanWikiRef(note.parentRef);
   return {
     title: note.title,
-    level: Number.isFinite(note.level) ? note.level : 0,
     parentRef: parentRef ? (parentRef.startsWith("[[") ? parentRef : `[[${parentRef}]]`) : null
   };
 }
@@ -5608,7 +5546,6 @@ function getParentConnectionValues(parent, child) {
   if (hasUsableHierarchySlot(parent)) {
     return {
       title: parent.title,
-      level: parent.level,
       parentRef: parent.parentNote ? `[[${parent.parentNote.basename}]]` : null
     };
   }
@@ -5617,14 +5554,12 @@ function getParentConnectionValues(parent, child) {
   if (apex) {
     return {
       title: parent.title,
-      level: apex.level + 1,
       parentRef: `[[${apex.basename}]]`
     };
   }
 
   return {
     title: parent.title,
-    level: 0,
     parentRef: null
   };
 }
@@ -5816,7 +5751,6 @@ async function pasteCopiedNodes(clipboard, point) {
     const path = getAvailableNewNotePath(title, reservedPaths);
     const raw = createNoteRaw({
       title,
-      level,
       parent: nextParent,
       body: source.body || `# ${title}\n`
     });
@@ -5846,7 +5780,6 @@ async function createNoteFromPastedText(text, point) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level: 0,
     parent: null,
     body: bodyFromText(text, title)
   });
@@ -6025,11 +5958,9 @@ async function importMarkdownFiles(files, point) {
     const text = await file.text();
     const fallbackTitle = file.name.replace(/\.md$/i, "").replace(/[-_]+/g, " ");
     const title = getAvailableDisplayTitle(titleFromText(text, fallbackTitle), reservedTitles);
-    const level = parent.level + 1;
     const path = getAvailableNewNotePath(title, reservedPaths);
     const raw = createNoteRaw({
       title,
-      level,
       parent,
       body: bodyFromText(text, title)
     });
@@ -6129,7 +6060,7 @@ function renderValidationStatus() {
   if (!state.validation.length) {
     if (state.graphHasHierarchy) {
       els.validationStatus.textContent = "Valid";
-      els.validationStatus.title = "No broken parents or missing levels";
+      els.validationStatus.title = "No broken parents or missing frontmatter";
       return;
     }
 
@@ -6144,7 +6075,6 @@ function renderValidationStatus() {
   }, {});
   const parts = [
     counts.parent ? `${counts.parent} parent` : "",
-    counts.level ? `${counts.level} level` : "",
     counts.duplicate ? `${counts.duplicate} duplicate` : "",
     counts.frontmatter ? `${counts.frontmatter} frontmatter` : ""
   ].filter(Boolean);
@@ -6212,18 +6142,17 @@ function closeNewNoteDialog() {
 
 function updateNewNoteHint() {
   if (!state.notes.length) {
-    els.newNoteHint.textContent = "Creates the first level 0 root note.";
+    els.newNoteHint.textContent = "Creates the first root note.";
     return;
   }
 
   const parent = state.byPath.get(els.newNoteParent.value);
   if (!parent) {
-    els.newNoteHint.textContent = "Creates a level 0 root or loose note.";
+    els.newNoteHint.textContent = "Creates a root or loose note.";
     return;
   }
 
-  const nextLevel = parent.level + 1;
-  els.newNoteHint.textContent = `Level ${nextLevel}, parent [[${parent.basename}]].`;
+  els.newNoteHint.textContent = `Creates a child of [[${parent.basename}]].`;
 }
 
 async function createNewNote(event) {
@@ -6238,11 +6167,9 @@ async function createNewNote(event) {
     return;
   }
 
-  const level = parent ? parent.level + 1 : 0;
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level,
     parent,
     body: `# ${title}\n`
   });
@@ -6287,7 +6214,6 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level: 0,
     parent: null,
     body: `# ${title}\n`
   });
@@ -6350,8 +6276,7 @@ function getLevelColor(level) {
 
 function parentOptionLabel(note) {
   const indent = "  ".repeat(Math.min(note.level, 12));
-  const overflow = note.level > 12 ? `L${note.level} ` : "";
-  return `${indent}${overflow}${note.title}`;
+  return `${indent}${note.title}`;
 }
 
 function setStatus(message) {
