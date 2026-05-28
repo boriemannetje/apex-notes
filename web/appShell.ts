@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoEditorHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
@@ -107,6 +107,7 @@ const FIT_VIEW_PADDING = 24;
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
 const APP_UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const MAX_WORKSPACE_HISTORY_ENTRIES = 80;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
 const POSITIONING_OPTIONS = {
   levelGap: LEVEL_GAP,
@@ -260,7 +261,12 @@ function initializeEditor() {
           if (!update.docChanged || state.editorHydrating) return;
           markSelectedDirty();
         }),
-        keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
+        keymap.of([
+          { key: "Mod-y", run: redoEditorHistory },
+          indentWithTab,
+          ...defaultKeymap,
+          ...historyKeymap
+        ]),
         EditorView.theme(
           {
             "&": {
@@ -1039,6 +1045,9 @@ function startEmpty() {
   state.workspaceName = "";
   state.dirty = false;
   state.saveToken += 1;
+  state.undoStack = [];
+  state.redoStack = [];
+  state.historyApplying = false;
   state.fileSignatures = new Map();
   cancelQueuedGraphRender();
   cancelGraphViewAnimation();
@@ -1579,6 +1588,7 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   updateSourceStatus();
   maybeShowHierarchyPrompt();
   renderValidationStatus();
+  clearWorkspaceHistory();
   saveActiveWorkspaceState();
 }
 
@@ -1620,6 +1630,8 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {})
     filter: "",
     view: { x: 0, y: 0, scale: 1 },
     hasView: false,
+    undoStack: [],
+    redoStack: [],
     hierarchyPromptShown: false,
     hierarchyPromptText: ""
   };
@@ -1654,6 +1666,263 @@ function hasEmptyWritableWorkspace() {
   return hasWritableWorkspace() && state.notes.length === 0;
 }
 
+function snapshotWorkspaceForHistory() {
+  if (!hasWritableWorkspace() || !state.activeWorkspaceId) return null;
+  return {
+    workspaceId: state.activeWorkspaceId,
+    notes: state.notes
+      .map((note) => ({ path: note.path, raw: note.raw }))
+      .sort((a, b) => compareText(a.path, b.path)),
+    positions: cloneHistoryPositions(state.manualPositions),
+    selectedPath: state.selectedPath,
+    selectedPaths: [...state.selectedPaths].filter((path) => state.notePaths.has(path)),
+    view: { ...state.view }
+  };
+}
+
+function cloneHistoryPositions(positions) {
+  const next = {};
+  for (const [path, position] of Object.entries(positions || {})) {
+    const cloned = cloneHistoryPosition(position);
+    if (cloned) next[path] = cloned;
+  }
+  return next;
+}
+
+function cloneHistoryPosition(position) {
+  if (!position || typeof position !== "object") return null;
+  if (Number.isFinite(position.x) && Number.isFinite(position.y)) {
+    return {
+      x: round(position.x),
+      y: round(position.y)
+    };
+  }
+  if (Number.isFinite(position.dx) || Number.isFinite(position.dy)) {
+    return {
+      dx: round(Number(position.dx) || 0),
+      dy: round(Number(position.dy) || 0)
+    };
+  }
+  return null;
+}
+
+function recordWorkspaceHistory(label, before, after = snapshotWorkspaceForHistory()) {
+  if (state.historyApplying) return;
+  const entry = buildWorkspaceHistoryEntry(label, before, after);
+  if (!entry) return;
+
+  state.undoStack.push(entry);
+  if (state.undoStack.length > MAX_WORKSPACE_HISTORY_ENTRIES) {
+    state.undoStack.shift();
+  }
+  state.redoStack = [];
+  saveActiveWorkspaceState();
+}
+
+function buildWorkspaceHistoryEntry(label, before, after) {
+  if (!before || !after || before.workspaceId !== after.workspaceId) return null;
+
+  const beforeNotes = noteRawMap(before.notes);
+  const afterNotes = noteRawMap(after.notes);
+  const notePaths = new Set([...beforeNotes.keys(), ...afterNotes.keys()]);
+  const notes = [];
+  for (const path of [...notePaths].sort(compareText)) {
+    const beforeRaw = beforeNotes.has(path) ? beforeNotes.get(path) : null;
+    const afterRaw = afterNotes.has(path) ? afterNotes.get(path) : null;
+    if (beforeRaw !== afterRaw) {
+      notes.push({ path, beforeRaw, afterRaw });
+    }
+  }
+
+  const beforePositions = positionMap(before.positions);
+  const afterPositions = positionMap(after.positions);
+  const positionPaths = new Set([...beforePositions.keys(), ...afterPositions.keys()]);
+  const positions = [];
+  for (const path of [...positionPaths].sort(compareText)) {
+    const beforePosition = beforePositions.get(path) || null;
+    const afterPosition = afterPositions.get(path) || null;
+    if (!sameHistoryPosition(beforePosition, afterPosition)) {
+      positions.push({ path, beforePosition, afterPosition });
+    }
+  }
+
+  if (!notes.length && !positions.length) return null;
+  return {
+    label,
+    workspaceId: before.workspaceId,
+    notes,
+    positions,
+    beforeSelection: {
+      selectedPath: before.selectedPath,
+      selectedPaths: before.selectedPaths || [],
+      view: before.view || null
+    },
+    afterSelection: {
+      selectedPath: after.selectedPath,
+      selectedPaths: after.selectedPaths || [],
+      view: after.view || null
+    }
+  };
+}
+
+function noteRawMap(notes) {
+  return new Map((notes || []).map((note) => [note.path, note.raw]));
+}
+
+function positionMap(positions) {
+  const map = new Map();
+  for (const [path, position] of Object.entries(positions || {})) {
+    const cloned = cloneHistoryPosition(position);
+    if (cloned) map.set(path, cloned);
+  }
+  return map;
+}
+
+function sameHistoryPosition(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function clearWorkspaceHistory() {
+  state.undoStack = [];
+  state.redoStack = [];
+  saveActiveWorkspaceState();
+}
+
+async function undoWorkspaceHistory() {
+  return stepWorkspaceHistory("undo");
+}
+
+async function redoWorkspaceHistory() {
+  return stepWorkspaceHistory("redo");
+}
+
+async function stepWorkspaceHistory(direction) {
+  if (!hasWritableWorkspace()) {
+    setStatus(direction === "undo" ? "Open a folder to undo changes" : "Open a folder to redo changes");
+    return false;
+  }
+
+  if (state.historyApplying) return false;
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+  }
+
+  const undo = direction === "undo";
+  const fromStack = undo ? state.undoStack : state.redoStack;
+  const toStack = undo ? state.redoStack : state.undoStack;
+  const entry = fromStack[fromStack.length - 1];
+  if (!entry) {
+    setStatus(undo ? "Nothing to undo" : "Nothing to redo");
+    return false;
+  }
+
+  if (entry.workspaceId !== state.activeWorkspaceId) {
+    clearWorkspaceHistory();
+    setStatus("Undo history reset after switching folders");
+    return false;
+  }
+
+  state.historyApplying = true;
+  stopLiveSync();
+  try {
+    await applyWorkspaceHistoryEntry(entry, undo ? "before" : "after");
+    fromStack.pop();
+    toStack.push(entry);
+    if (toStack.length > MAX_WORKSPACE_HISTORY_ENTRIES) {
+      toStack.shift();
+    }
+    setStatus(`${undo ? "Undid" : "Redid"} ${entry.label}`);
+    saveActiveWorkspaceState();
+    return true;
+  } catch (error) {
+    setStatus(undo ? "Could not undo change" : "Could not redo change");
+    console.error(error);
+    return false;
+  } finally {
+    state.historyApplying = false;
+    startLiveSync();
+  }
+}
+
+async function applyWorkspaceHistoryEntry(entry, side) {
+  const selection = side === "before" ? entry.beforeSelection : entry.afterSelection;
+  const noteChanges = entry.notes || [];
+  const positionChanges = entry.positions || [];
+  const pathsToTrash = [];
+
+  for (const change of noteChanges) {
+    const raw = side === "before" ? change.beforeRaw : change.afterRaw;
+    if (raw === null || raw === undefined) {
+      if (state.byPath.has(change.path)) pathsToTrash.push(change.path);
+      continue;
+    }
+    await invokeNative("write_note", {
+      notesPath: state.notesPath,
+      path: change.path,
+      raw
+    });
+  }
+
+  if (pathsToTrash.length) {
+    await invokeNative("trash_notes", {
+      notesPath: state.notesPath,
+      paths: pathsToTrash
+    });
+  }
+
+  const nextNotes = new Map(state.notes.map((note) => [note.path, note]));
+  for (const change of noteChanges) {
+    const raw = side === "before" ? change.beforeRaw : change.afterRaw;
+    if (raw === null || raw === undefined) {
+      nextNotes.delete(change.path);
+    } else {
+      nextNotes.set(change.path, parseNote(change.path, raw));
+    }
+  }
+  state.notes = [...nextNotes.values()].sort((a, b) => compareText(a.path, b.path));
+
+  for (const change of positionChanges) {
+    const position = side === "before" ? change.beforePosition : change.afterPosition;
+    if (position) {
+      state.manualPositions[change.path] = cloneHistoryPosition(position);
+    } else {
+      delete state.manualPositions[change.path];
+    }
+  }
+
+  state.selectedPath = selection?.selectedPath || null;
+  state.selectedPaths = new Set(selection?.selectedPaths || []);
+  if (selection?.view) {
+    state.view = { ...selection.view };
+  }
+  state.dirty = false;
+  state.saveToken += 1;
+  rebuildIndex();
+  state.validation = validateNotes();
+  state.manualPositions = pruneStoredPositions(state.manualPositions);
+  normalizeSelectionAfterNotesChanged();
+
+  await updateManifestFile();
+  if (positionChanges.length) {
+    const patch = {};
+    for (const change of positionChanges) {
+      patch[change.path] = side === "before"
+        ? cloneHistoryPosition(change.beforePosition)
+        : cloneHistoryPosition(change.afterPosition);
+    }
+    await savePositionPatch(patch);
+  }
+
+  renderCurrentSelection("");
+  renderNewNoteParents();
+  renderGraph({ preserveView: true });
+  updateSourceStatus();
+  renderValidationStatus();
+}
+
 function buildLayoutKey(source, rootPath, workspaceName) {
   return `${STORAGE_PREFIX}:${source}:${rootPath || workspaceName || "workspace"}`;
 }
@@ -1674,6 +1943,8 @@ function saveActiveWorkspaceState() {
   workspace.source = state.source;
   workspace.workspaceName = state.workspaceName;
   workspace.dirty = state.dirty;
+  workspace.undoStack = state.undoStack;
+  workspace.redoStack = state.redoStack;
   workspace.fileSignatures = cloneFileSignatures(state.fileSignatures);
   workspace.filter = state.filter;
   workspace.layoutKey = state.layoutKey;
@@ -1710,6 +1981,9 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.workspaceName = workspace.workspaceName || workspace.rootPath || "Folder";
   state.dirty = Boolean(workspace.dirty);
   state.saveToken += 1;
+  state.undoStack = workspace.undoStack || [];
+  state.redoStack = workspace.redoStack || [];
+  state.historyApplying = false;
   state.fileSignatures = cloneFileSignatures(workspace.fileSignatures);
   state.filter = workspace.filter || "";
   state.searchResults = [];
@@ -2590,6 +2864,7 @@ async function deleteGraphSelection() {
     if (state.dirty) return false;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
 
   try {
@@ -2618,12 +2893,13 @@ async function deleteGraphSelection() {
     renderCurrentSelection(`Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch({
+    await savePositionPatch({
       ...positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)),
       ...positionRemovalPatch(deletedPaths)
     });
     updateSourceStatus();
     renderValidationStatus();
+    recordWorkspaceHistory("note deletion", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not move note to Trash");
@@ -2661,6 +2937,7 @@ async function autosaveSelectedNote() {
     return;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const raw = composeRaw(note, getEditorBody(), getInfoValues(note));
   const path = note.path;
   const token = ++state.saveToken;
@@ -2702,6 +2979,7 @@ async function autosaveSelectedNote() {
     }
 
     updateSourceStatus();
+    recordWorkspaceHistory("note edit", historyBefore);
     setStatus("Saved automatically");
   } catch (error) {
     state.dirty = true;
@@ -4407,6 +4685,7 @@ function startNodeDrag(event, note, group) {
     initialPositions,
     additiveSelection,
     baseSelection,
+    historyBefore: snapshotWorkspaceForHistory(),
     moved: false
   };
   group.classList.add("dragging");
@@ -4617,7 +4896,7 @@ async function endInteraction(event) {
   if (interaction.type === "node") {
     clearNodeDragClasses(interaction);
     if (interaction.moved) {
-      void savePositionPatch(positionPatchForPaths(interaction.paths));
+      await savePositionPatch(positionPatchForPaths(interaction.paths));
     }
     if (!interaction.moved) {
       if (interaction.additiveSelection) {
@@ -4639,6 +4918,7 @@ async function endInteraction(event) {
         openSingle: false,
         statusMessage: `Moved ${interaction.paths.length} note${interaction.paths.length === 1 ? "" : "s"}`
       });
+      recordWorkspaceHistory("graph move", interaction.historyBefore);
     }
     state.activeInteraction = null;
     return;
@@ -5064,6 +5344,7 @@ async function createLooseGraphNote(title, position) {
     if (state.dirty) return false;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
@@ -5102,6 +5383,7 @@ async function createLooseGraphNote(title, position) {
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("note creation", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not create note");
@@ -5128,6 +5410,7 @@ async function connectLooseNoteToParent(child, parent) {
     layoutSnapshot = snapshotGraphPositions();
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const parentPlan = getParentConnectionPlan(parent, child);
   const nextChildLevel = parentPlan.level + 1;
   const currentChildLevel = Number.isFinite(child.level) ? child.level : 0;
@@ -5186,10 +5469,11 @@ async function connectLooseNoteToParent(child, parent) {
     renderSelectedNote(`Connected ${child.title} under ${parent.title}`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("hierarchy change", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not connect note");
@@ -5212,6 +5496,7 @@ async function connectNoteReference(source, target) {
     layoutSnapshot = snapshotGraphPositions();
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   if (hasBodyReference(source, target)) {
     state.selectedPath = source.path;
     state.selectedPaths = new Set([source.path]);
@@ -5243,10 +5528,11 @@ async function connectNoteReference(source, target) {
     renderSelectedNote(`Linked ${source.title} to ${target.title}`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("body link", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not add body link");
@@ -5330,7 +5616,27 @@ function findFallbackApex(parent, child) {
 }
 
 async function onDocumentKeydown(event) {
-  if (isTextEntryTarget(event.target)) return;
+  const isShortcut = (event.metaKey || event.ctrlKey) && !event.altKey;
+  const key = event.key.toLowerCase();
+  const isTextEntry = isTextEntryTarget(event.target);
+
+  if (!isTextEntry && isShortcut && key === "z") {
+    event.preventDefault();
+    if (event.shiftKey) {
+      await redoWorkspaceHistory();
+    } else {
+      await undoWorkspaceHistory();
+    }
+    return;
+  }
+
+  if (!isTextEntry && isShortcut && key === "y") {
+    event.preventDefault();
+    await redoWorkspaceHistory();
+    return;
+  }
+
+  if (isTextEntry) return;
 
   const hasGraphFocus = document.activeElement === els.graph || els.graph.contains(document.activeElement);
   const hasSelection = state.selectedPaths.size > 0;
@@ -5342,10 +5648,8 @@ async function onDocumentKeydown(event) {
     return;
   }
 
-  const isShortcut = (event.metaKey || event.ctrlKey) && !event.altKey;
   if (!isShortcut) return;
 
-  const key = event.key.toLowerCase();
   if (key === "c" && hasSelection) {
     event.preventDefault();
     await copySelectedNodes("copy");
@@ -5541,6 +5845,7 @@ async function createNotesBatch(specs, statusMessage) {
     return false;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
   const createdPaths = specs.map((spec) => spec.path);
 
@@ -5577,9 +5882,10 @@ async function createNotesBatch(specs, statusMessage) {
     renderCurrentSelection(statusMessage);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, createdPaths)));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, createdPaths)));
     updateSourceStatus();
     renderValidationStatus();
+    recordWorkspaceHistory("note creation", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not create note");
@@ -5918,6 +6224,7 @@ async function createNewNote(event) {
     parent,
     body: `# ${title}\n`
   });
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
 
   try {
@@ -5940,10 +6247,11 @@ async function createNewNote(event) {
     renderSelectedNote("Note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, [path])));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, [path])));
     updateSourceStatus();
     renderValidationStatus();
     closeNewNoteDialog();
+    recordWorkspaceHistory("note creation", historyBefore);
   } catch (error) {
     setStatus("Could not create note");
     console.error(error);
@@ -5953,6 +6261,7 @@ async function createNewNote(event) {
 async function createFirstNote(title, position = getGraphViewportCenter()) {
   if (!title || !hasEmptyWritableWorkspace()) return false;
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
@@ -5989,6 +6298,7 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("note creation", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not create note");

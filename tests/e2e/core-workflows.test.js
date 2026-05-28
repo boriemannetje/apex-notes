@@ -153,6 +153,61 @@ test("pasting plain text into the graph creates a loose note", async () => {
   await page.close();
 });
 
+test("command z and command y undo and redo workspace note creation", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#newNoteButton").click();
+  await page.locator("#newNoteTitle").fill("Undoable Note");
+  await page.locator("#newNoteParent").selectOption("root.md");
+  await page.locator("#newNoteForm button[type='submit']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "undoable-note.md");
+  assert.match(await noteRaw(page, "undoable-note.md"), /title: "Undoable Note"/);
+
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => !window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "undoable-note.md"
+  ));
+  assert.equal(await textContent(page, "#notePath"), "root.md");
+  assert.equal(await textContent(page, "#editorStatus"), "Undid note creation");
+  assert.equal(await page.locator(".node[data-path='undoable-note.md']").count(), 0);
+
+  await pressShortcut(page, "Y");
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "undoable-note.md"
+  ));
+  assert.match(await noteRaw(page, "undoable-note.md"), /parent: "\[\[root\]\]"/);
+  assert.equal(await textContent(page, "#notePath"), "undoable-note.md");
+  assert.equal(await textContent(page, "#editorStatus"), "Redid note creation");
+  await assertGraphNode(page, "undoable-note.md");
+
+  await page.close();
+});
+
+test("editor command z and command y undo and redo text edits", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("\nUndo body line");
+  await page.waitForFunction(() => document.querySelector(".cm-content")?.textContent?.includes("Undo body line"));
+
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => !document.querySelector(".cm-content")?.textContent?.includes("Undo body line"));
+
+  await pressShortcut(page, "Y");
+  await page.waitForFunction(() => document.querySelector(".cm-content")?.textContent?.includes("Undo body line"));
+
+  await page.close();
+});
+
 test("main-production update button appears and invokes native update install", async () => {
   const page = await newMockedTauriPage(sampleWorkspace(), {
     holdInstallUpdate: true,
@@ -433,8 +488,11 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             return null;
           }
           if (command === "write_note") {
-            const note = state.workspace.notes.find((item) => item.path === args.path);
-            if (!note) throw new Error(`Missing note: ${args.path}`);
+            let note = state.workspace.notes.find((item) => item.path === args.path);
+            if (!note) {
+              note = { path: args.path, raw: "" };
+              state.workspace.notes.push(note);
+            }
             note.raw = args.raw;
             return null;
           }
@@ -447,10 +505,16 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             return null;
           }
           if (command === "write_layout_patch") {
-            state.workspace.positions = {
-              ...(state.workspace.positions || {}),
-              ...(args.updates || args.patch || {})
-            };
+            const next = { ...(state.workspace.positions || {}) };
+            const updates = args.updates || args.patch || {};
+            for (const [path, position] of Object.entries(updates)) {
+              if (position === null) {
+                delete next[path];
+              } else {
+                next[path] = position;
+              }
+            }
+            state.workspace.positions = next;
             return null;
           }
           if (command === "rename_workspace") {
@@ -627,6 +691,11 @@ async function dragEditorResizeHandle(page, deltaX) {
   await page.mouse.down();
   await page.mouse.move(startX + deltaX, startY, { steps: 8 });
   await page.mouse.up();
+}
+
+async function pressShortcut(page, key) {
+  const modifier = process.platform === "darwin" ? "Meta" : "Control";
+  await page.keyboard.press(`${modifier}+${key.toUpperCase()}`);
 }
 
 async function assertGraphNode(page, path) {
