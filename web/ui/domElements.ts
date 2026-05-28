@@ -42,6 +42,7 @@ export function getDomElements() {
     sourceStatus: document.querySelector("#sourceStatus"),
     validationStatus: document.querySelector("#validationStatus"),
     updateButton: document.querySelector("#updateButton"),
+    updateRestartOverlay: document.querySelector("#updateRestartOverlay"),
     zoomInButton: document.querySelector("#zoomInButton"),
     zoomOutButton: document.querySelector("#zoomOutButton"),
     resetViewButton: document.querySelector("#resetViewButton"),

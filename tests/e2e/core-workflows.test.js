@@ -231,6 +231,10 @@ test("main-production update button appears and invokes native update install", 
   await page.evaluate(() => window.__apexTestState.resolveInstallUpdate());
   await page.waitForFunction(() => document.querySelector("#updateButton")?.textContent?.includes("Restarting..."));
   assert.equal(await textContent(page, "#editorStatus"), "Restarting after update");
+  await page.locator("#updateRestartOverlay").waitFor();
+  assert.match(await textContent(page, "#updateRestartOverlay"), /Restarting to update\.\.\./);
+  assert.match(await textContent(page, "#updateRestartOverlay"), /Apex Notes will reopen automatically\./);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "updateRestartOverlay");
 
   await page.close();
 });

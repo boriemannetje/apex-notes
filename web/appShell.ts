@@ -1411,6 +1411,7 @@ function renderUpdateButton(statusMessage = "") {
 
   if (!visible) {
     els.updateButton.disabled = false;
+    hideUpdateRestartOverlay();
     return;
   }
 
@@ -1438,13 +1439,25 @@ async function installAvailableUpdate() {
     state.appUpdateInstallState = "Restarting...";
     renderUpdateButton("Restarting after update");
     setStatus("Restarting after update");
+    showUpdateRestartOverlay();
+    await waitForPaint();
   } catch (error) {
     state.appUpdateInstallInFlight = false;
     state.appUpdateInstallState = "";
     renderUpdateButton();
+    hideUpdateRestartOverlay();
     setStatus("Update failed");
     console.error(error);
   }
+}
+
+function showUpdateRestartOverlay() {
+  els.updateRestartOverlay.hidden = false;
+  els.updateRestartOverlay.focus({ preventScroll: true });
+}
+
+function hideUpdateRestartOverlay() {
+  els.updateRestartOverlay.hidden = true;
 }
 
 function waitForPaint() {

@@ -260,6 +260,38 @@ body.hasAppUpdate .statusRail {
   display: none;
 }
 
+.updateRestartOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 24px;
+  background: rgba(17, 17, 15, 0.96);
+  color: var(--text);
+  text-align: center;
+  pointer-events: auto;
+}
+
+.updateRestartOverlay[hidden] {
+  display: none;
+}
+
+.updateRestartOverlay:focus {
+  outline: none;
+}
+
+.updateRestartTitle {
+  font-size: clamp(1.45rem, 4vw, 2.4rem);
+  font-weight: 700;
+}
+
+.updateRestartDetail {
+  color: var(--muted);
+  font-size: 0.98rem;
+}
+
 #noteTitle.editableTitle {
   cursor: text;
   margin: -3px -5px;
