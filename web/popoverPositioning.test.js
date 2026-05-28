@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getClampedPopoverPosition } from "./popoverPositioning.js";
+import { getClampedPopoverPosition } from "./popoverPositioning.ts";
 
 const bounds = {
   left: 100,

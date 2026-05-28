@@ -1,3 +1,4 @@
+// @ts-nocheck
 const DEFAULT_RESULT_LIMIT = 12;
 
 export function buildSearchResults(notes = [], searchIndex = null, query = "", options = {}) {

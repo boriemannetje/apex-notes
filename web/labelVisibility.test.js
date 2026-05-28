@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { computeNoteLinkStats } from "./labelVisibility.js";
+import { computeNoteLinkStats } from "./labelVisibility.ts";
 
 test("link stats count unique hierarchy and contextual neighbors", () => {
   const stats = computeNoteLinkStats([

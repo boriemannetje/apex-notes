@@ -1,4 +1,5 @@
-import { LARGE_GRAPH_CONFIG } from "./graphConfig.js";
+// @ts-nocheck
+import { LARGE_GRAPH_CONFIG } from "./graphConfig.ts";
 
 export function detectLargeGraphMode(metrics = {}, options = {}) {
   metrics = metrics || {};

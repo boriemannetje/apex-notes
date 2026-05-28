@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs, io,
     path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
@@ -63,6 +64,10 @@ struct NotePosition {
     #[serde(skip_serializing_if = "Option::is_none")]
     dy: Option<f64>,
 }
+
+const MAIN_PRODUCTION_DMG_URL_PREFIX: &str =
+    "https://github.com/boriemannetje/apex-notes/releases/download/main-production/";
+const MAIN_PRODUCTION_DMG_ASSET: &str = "apex-notes-main-macos-arm64.dmg";
 
 #[tauri::command(rename_all = "camelCase")]
 async fn read_workspace(root_path: String) -> Result<Workspace, String> {
@@ -383,6 +388,94 @@ fn forget_recent_project(
     Ok(projects)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn install_app_update(
+    _app: tauri::AppHandle,
+    release_commit: String,
+) -> Result<(), String> {
+    validate_release_commit(&release_commit)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            spawn_macos_update_installer(release_commit)
+        })
+        .await
+        .map_err(to_error)??;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Automatic app updates are currently available for macOS builds only".into())
+    }
+}
+
+fn main_production_dmg_url() -> String {
+    format!("{}{}", MAIN_PRODUCTION_DMG_URL_PREFIX, MAIN_PRODUCTION_DMG_ASSET)
+}
+
+fn validate_release_commit(commit: &str) -> Result<(), String> {
+    let trimmed = commit.trim();
+    if (7..=40).contains(&trimmed.len()) && trimmed.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err("Update release commit is invalid".into())
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_macos_update_installer(release_commit: String) -> Result<(), String> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "apex-notes-update-{}-{}",
+        std::process::id(),
+        release_commit
+    ));
+    fs::create_dir_all(&temp_dir).map_err(to_error)?;
+    let script_path = temp_dir.join("install-update.zsh");
+    fs::write(&script_path, macos_update_script()).map_err(to_error)?;
+
+    Command::new("/bin/zsh")
+        .arg(&script_path)
+        .arg(main_production_dmg_url())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(to_error)?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_update_script() -> &'static str {
+    r#"#!/bin/zsh
+set -euo pipefail
+
+download_url="$1"
+tmp="$(cd "$(dirname "$0")" && pwd)"
+mount="$tmp/mount"
+
+cleanup() {
+  hdiutil detach "$mount" >/dev/null 2>&1 || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+mkdir -p "$mount"
+curl -fL --retry 3 -o "$tmp/apex-notes.dmg" "$download_url"
+hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$tmp/apex-notes.dmg" >/dev/null
+codesign --verify --deep --strict "$mount/Apex Notes.app"
+
+osascript -e 'tell application id "app.apex.notes" to quit' >/dev/null 2>&1 || true
+sleep 1
+
+rm -rf "/Applications/Apex Notes.app"
+ditto "$mount/Apex Notes.app" "/Applications/Apex Notes.app"
+codesign --verify --deep --strict "/Applications/Apex Notes.app"
+open -n "/Applications/Apex Notes.app"
+"#
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -401,7 +494,8 @@ pub fn run() {
             trash_notes,
             read_recent_projects,
             remember_recent_project,
-            forget_recent_project
+            forget_recent_project,
+            install_app_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
@@ -883,6 +977,22 @@ mod tests {
         assert_eq!(normalized.len(), 8);
         assert_eq!(normalized[0].root_path, "/tmp/project-9");
         assert_eq!(normalized[0].name, "Duplicate");
+    }
+
+    #[test]
+    fn builds_main_production_update_download_url_in_native_code() {
+        assert_eq!(
+            main_production_dmg_url(),
+            "https://github.com/boriemannetje/apex-notes/releases/download/main-production/apex-notes-main-macos-arm64.dmg"
+        );
+    }
+
+    #[test]
+    fn validates_release_commit_shape() {
+        assert!(validate_release_commit("0192607e6d6aad1d69296c8f5e78bd113c2355f5").is_ok());
+        assert!(validate_release_commit("0192607").is_ok());
+        assert!(validate_release_commit("not-a-sha").is_err());
+        assert!(validate_release_commit("").is_err());
     }
 }
 

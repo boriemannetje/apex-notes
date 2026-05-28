@@ -1,4 +1,5 @@
-import { cleanWikiRef, getNoteAliasKeys, normalizeKey, parseWikiTarget, slugify } from "./noteRefs.js";
+// @ts-nocheck
+import { cleanWikiRef, getNoteAliasKeys, normalizeKey, parseWikiTarget, slugify } from "./noteRefs.ts";
 
 export const ISSUE_TYPES = Object.freeze({
   MISSING_PARENT: "missing-parent",

@@ -1,4 +1,5 @@
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+// @ts-nocheck
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoEditorHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
@@ -6,34 +7,32 @@ import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highligh
 import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
-} from "./graphLargeMode.js";
-import { LARGE_GRAPH_CONFIG } from "./graphConfig.js";
-import { createGraphIndex, ISSUE_TYPES } from "./graphModel.js";
-import { buildGraphLayout } from "./graphLayout.js";
+} from "./graphLargeMode.ts";
+import { LARGE_GRAPH_CONFIG } from "./graphConfig.ts";
+import { createGraphIndex } from "./graphModel.ts";
+import { buildGraphLayout } from "./graphLayout.ts";
 import {
   computeNoteLinkStats,
   decideVisibleLabels,
   getLabelVisibilityPolicy,
   prepareLabelVisibilityCache
-} from "./labelVisibility.js";
-import { connectionCountToNodeScale } from "./nodeSizing.js";
-import { createSearchIndex } from "./searchIndex.js";
-import { buildSearchResults } from "./searchResults.js";
+} from "./labelVisibility.ts";
+import { connectionCountToNodeScale } from "./nodeSizing.ts";
+import { createSearchIndex } from "./searchIndex.ts";
+import { buildSearchResults } from "./searchResults.ts";
 import {
   cleanWikiRef,
-  getNoteAliasKeys,
   normalizeKey,
-  parseWikiRefs,
   parseWikiTarget,
   slugify
-} from "./noteRefs.js";
+} from "./noteRefs.ts";
 import {
   createAbsolutePositionPatch,
   findChildPosition,
   findLooseGridPositions,
   resolveStoredPosition as resolveStoredGraphPosition
-} from "./graphPositioning.js";
-import { getClampedPopoverPosition } from "./popoverPositioning.js";
+} from "./graphPositioning.ts";
+import { getClampedPopoverPosition } from "./popoverPositioning.ts";
 import {
   loadRecentProjects,
   normalizeRecentProjects,
@@ -44,8 +43,28 @@ import {
   rememberRecentProject,
   removeRecentProject,
   saveRecentProjects
-} from "./recentProjects.js";
-import { createIcon, setButtonIcon } from "./icons.js";
+} from "./recentProjects.ts";
+import { createIcon, setButtonIcon } from "./icons.ts";
+import { checkForAppUpdate, getCurrentBuildInfo } from "./persistence/appUpdates.ts";
+import {
+  buildFileSignatureMap,
+  cloneFileSignatures,
+  diffFileSignatures,
+  liveUpdateStatus
+} from "./persistence/liveSync.ts";
+import { invokeNative, isTauriApp, pickNativeDirectory } from "./persistence/nativeWorkspaceAdapter.ts";
+import {
+  bodyFromText,
+  composeRaw,
+  createNoteRaw,
+  getAvailableDisplayTitle,
+  getAvailableNewNotePath as getAvailableNewNotePathForTitle,
+  titleFromText
+} from "./notes/noteComposer.ts";
+import { parseNote } from "./notes/noteParser.ts";
+import { validateNotes as validateNoteCollection } from "./notes/noteValidation.ts";
+import { createWorkspaceStore } from "./state/workspaceStore.ts";
+import { getDomElements } from "./ui/domElements.ts";
 import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
 
 const LEVEL_COLORS = ["#f1eee6", "#9fc5ff", "#a9d6ac", "#e8d188", "#ffb6d1", "#f2b380", "#7fd6df", "#c7b89a"];
@@ -87,6 +106,8 @@ const GRAPH_PAD = 96;
 const FIT_VIEW_PADDING = 24;
 const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
+const APP_UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const MAX_WORKSPACE_HISTORY_ENTRIES = 80;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
 const POSITIONING_OPTIONS = {
   levelGap: LEVEL_GAP,
@@ -103,169 +124,11 @@ const PERF_ENABLED = isPerfEnabled();
 const editorEditable = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
 
-const state = {
-  workspaces: [],
-  recentProjects: loadRecentProjects(),
-  defaultProjectLocation: "",
-  browsedProjectLocation: "",
-  createProjectParentPath: "",
-  activeWorkspaceId: null,
-  nextWorkspaceId: 1,
-  notes: [],
-  graphIndex: null,
-  searchIndex: null,
-  byPath: new Map(),
-  byKey: new Map(),
-  notePaths: new Set(),
-  sortedNotes: [],
-  sortedParentOptions: [],
-  selectedPath: null,
-  selectedPaths: new Set(),
-  rootPath: "",
-  notesPath: "",
-  source: "none",
-  workspaceName: "",
-  dirty: false,
-  saveTimer: null,
-  saveToken: 0,
-  fileSignatures: new Map(),
-  liveSyncTimer: 0,
-  liveSyncInFlight: false,
-  liveSyncToken: 0,
-  graphRenderFrame: 0,
-  queuedGraphRender: null,
-  viewAnimationFrame: 0,
-  filter: "",
-  searchResults: [],
-  searchOpen: false,
-  searchActiveIndex: -1,
-  validation: [],
-  layoutKey: "",
-  manualPositions: {},
-  autoPositions: new Map(),
-  positions: new Map(),
-  nodeSizes: new Map(),
-  nodeElements: new Map(),
-  edgeElements: [],
-  edgeElementsByPath: new Map(),
-  spatialIndex: null,
-  referenceEdges: [],
-  referenceEdgeCount: 0,
-  largeGraphMode: false,
-  labelStats: new Map(),
-  labelVisibilityCache: null,
-  labelVisibility: null,
-  labelVisibilityKey: "",
-  labelRefreshFrame: 0,
-  hoveredPath: null,
-  focusedPath: null,
-  editorView: null,
-  editorHydrating: false,
-  infoHydrating: false,
-  graphHasHierarchy: true,
-  hierarchyPromptShown: false,
-  hierarchyPromptText: "",
-  pendingCreatePoint: null,
-  nodeClipboard: null,
-  ropeElement: null,
-  ropeTargetPath: null,
-  selectionRectElement: null,
-  lastGraphPoint: null,
-  lastNodePointerDown: null,
-  suppressGraphCreateUntil: 0,
-  armedRope: null,
-  view: {
-    x: 0,
-    y: 0,
-    scale: 1
-  },
-  activeInteraction: null,
-  interactionFrame: 0,
-  queuedInteractionEvent: null,
-  graphBounds: null,
-  graphViewport: null,
-  graphFullscreenFallback: false,
-  editorFullscreenFallback: false,
-  graphProjectLauncherOpen: false,
-  renamingWorkspaceId: null,
-  workspaceRenameDraft: "",
-  editorPaneWidth: null,
-  editorResizeDrag: null
-};
+const state = createWorkspaceStore(loadRecentProjects());
 
 let suppressWorkspaceRenameCommit = false;
 
-const els = {
-  layout: document.querySelector(".layout"),
-  launchScreen: document.querySelector("#launchScreen"),
-  launchOpenProjectButton: document.querySelector("#launchOpenProjectButton"),
-  launchCreateProjectButton: document.querySelector("#launchCreateProjectButton"),
-  launchRecentList: document.querySelector("#launchRecentList"),
-  launchRecentEmpty: document.querySelector("#launchRecentEmpty"),
-  launchStatus: document.querySelector("#launchStatus"),
-  graphProjectLauncher: document.querySelector("#graphProjectLauncher"),
-  graphOpenProjectButton: document.querySelector("#graphOpenProjectButton"),
-  graphCreateProjectButton: document.querySelector("#graphCreateProjectButton"),
-  graphRecentList: document.querySelector("#graphRecentList"),
-  graphRecentEmpty: document.querySelector("#graphRecentEmpty"),
-  graphLaunchStatus: document.querySelector("#graphLaunchStatus"),
-  closeGraphProjectLauncherButton: document.querySelector("#closeGraphProjectLauncherButton"),
-  workspaceTabs: document.querySelector("#workspaceTabs"),
-  graph: document.querySelector("#graph"),
-  graphPane: document.querySelector(".graphPane"),
-  graphScroller: document.querySelector("#graphScroller"),
-  graphCanvas: null,
-  editorResizeHandle: document.querySelector("#editorResizeHandle"),
-  graphHelpButton: document.querySelector("#graphHelpButton"),
-  graphHelpDialog: document.querySelector("#graphHelpDialog"),
-  closeGraphHelpButton: document.querySelector("#closeGraphHelpButton"),
-  searchField: document.querySelector(".searchField"),
-  searchFieldIcon: document.querySelector("#searchFieldIcon"),
-  searchInput: document.querySelector("#searchInput"),
-  searchResults: document.querySelector("#searchResults"),
-  newNoteButton: document.querySelector("#newNoteButton"),
-  editorPane: document.querySelector(".editorPane"),
-  editor: document.querySelector("#editor"),
-  noteTitle: document.querySelector("#noteTitle"),
-  notePath: document.querySelector("#notePath"),
-  noteInfo: document.querySelector("#noteInfo"),
-  infoTitle: document.querySelector("#infoTitle"),
-  infoParent: document.querySelector("#infoParent"),
-  infoLevel: document.querySelector("#infoLevel"),
-  fullscreenEditorButton: document.querySelector("#fullscreenEditorButton"),
-  deleteNoteButton: document.querySelector("#deleteNoteButton"),
-  editorStatus: document.querySelector("#editorStatus"),
-  sourceStatus: document.querySelector("#sourceStatus"),
-  validationStatus: document.querySelector("#validationStatus"),
-  zoomInButton: document.querySelector("#zoomInButton"),
-  zoomOutButton: document.querySelector("#zoomOutButton"),
-  resetViewButton: document.querySelector("#resetViewButton"),
-  fullscreenGraphButton: document.querySelector("#fullscreenGraphButton"),
-  newNoteDialog: document.querySelector("#newNoteDialog"),
-  newNoteForm: document.querySelector("#newNoteForm"),
-  newNoteTitle: document.querySelector("#newNoteTitle"),
-  newNoteParent: document.querySelector("#newNoteParent"),
-  newNoteHint: document.querySelector("#newNoteHint"),
-  cancelNewNoteButton: document.querySelector("#cancelNewNoteButton"),
-  createFolderDialog: document.querySelector("#createFolderDialog"),
-  createFolderForm: document.querySelector("#createFolderForm"),
-  createFolderName: document.querySelector("#createFolderName"),
-  createFolderLocationSelect: document.querySelector("#createFolderLocationSelect"),
-  createFolderLocationPath: document.querySelector("#createFolderLocationPath"),
-  cancelCreateFolderButton: document.querySelector("#cancelCreateFolderButton"),
-  hierarchyPromptDialog: document.querySelector("#hierarchyPromptDialog"),
-  copyHierarchyPromptButton: document.querySelector("#copyHierarchyPromptButton"),
-  closeHierarchyPromptButton: document.querySelector("#closeHierarchyPromptButton"),
-  deleteConfirmDialog: document.querySelector("#deleteConfirmDialog"),
-  deleteConfirmTitle: document.querySelector("#deleteConfirmTitle"),
-  deleteConfirmMessage: document.querySelector("#deleteConfirmMessage"),
-  deleteConfirmDetail: document.querySelector("#deleteConfirmDetail"),
-  cancelDeleteButton: document.querySelector("#cancelDeleteButton"),
-  confirmDeleteButton: document.querySelector("#confirmDeleteButton"),
-  graphCreatePopover: document.querySelector("#graphCreatePopover"),
-  graphNewTitle: document.querySelector("#graphNewTitle"),
-  cancelGraphCreateButton: document.querySelector("#cancelGraphCreateButton")
-};
+const els = getDomElements();
 
 const wikiLinkField = StateField.define({
   create(editorState) {
@@ -350,13 +213,16 @@ class WikiLinkWidget extends WidgetType {
   }
 }
 
-initializeEditor();
-initializeIcons();
-initializeEditorPaneWidth();
-bindEvents();
-initializeGraphResizeObserver();
-startEmpty();
-void hydrateRecentProjects();
+export function initializeApp() {
+  initializeEditor();
+  initializeIcons();
+  initializeEditorPaneWidth();
+  bindEvents();
+  initializeGraphResizeObserver();
+  startEmpty();
+  void hydrateRecentProjects();
+  startAppUpdateChecks();
+}
 
 function initializeIcons() {
   setButtonIcon(els.graphHelpButton, "help");
@@ -366,6 +232,7 @@ function initializeIcons() {
   setButtonIcon(els.graphOpenProjectButton, "openProject", "Open project");
   setButtonIcon(els.graphCreateProjectButton, "createProject", "Create project");
   setButtonIcon(els.closeGraphProjectLauncherButton, "close");
+  setButtonIcon(els.updateButton, "download", "Update");
   els.searchFieldIcon.appendChild(createIcon("search"));
   setButtonIcon(els.zoomOutButton, "zoomOut");
   setButtonIcon(els.resetViewButton, "fit");
@@ -394,7 +261,12 @@ function initializeEditor() {
           if (!update.docChanged || state.editorHydrating) return;
           markSelectedDirty();
         }),
-        keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
+        keymap.of([
+          { key: "Mod-y", run: redoEditorHistory },
+          indentWithTab,
+          ...defaultKeymap,
+          ...historyKeymap
+        ]),
         EditorView.theme(
           {
             "&": {
@@ -624,6 +496,7 @@ function bindEvents() {
   els.graphCreateProjectButton.addEventListener("click", openCreateFolderDialog);
   els.graphRecentList.addEventListener("click", onLaunchRecentClick);
   els.closeGraphProjectLauncherButton.addEventListener("click", closeGraphProjectLauncher);
+  els.updateButton.addEventListener("click", installAvailableUpdate);
   els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
   els.workspaceTabs.addEventListener("dblclick", onWorkspaceTabsDoubleClick);
   els.workspaceTabs.addEventListener("focusout", onWorkspaceTabsFocusOut);
@@ -687,6 +560,8 @@ function bindEvents() {
   document.addEventListener("keydown", onDocumentKeydown);
   document.addEventListener("pointerdown", onDocumentPointerDown);
   window.addEventListener("resize", scheduleResizeRender);
+  window.addEventListener("focus", refreshAppUpdateOnFocus);
+  document.addEventListener("visibilitychange", refreshAppUpdateOnVisibilityChange);
   document.addEventListener("fullscreenchange", syncFullscreenState);
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
@@ -1170,6 +1045,9 @@ function startEmpty() {
   state.workspaceName = "";
   state.dirty = false;
   state.saveToken += 1;
+  state.undoStack = [];
+  state.redoStack = [];
+  state.historyApplying = false;
   state.fileSignatures = new Map();
   cancelQueuedGraphRender();
   cancelGraphViewAnimation();
@@ -1464,24 +1342,6 @@ async function createGraphFolder(event) {
   }
 }
 
-function isTauriApp() {
-  return Boolean(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.dialog);
-}
-
-async function pickNativeDirectory() {
-  const selected = await window.__TAURI__.dialog.open({
-    directory: true,
-    recursive: true,
-    multiple: false,
-    canCreateDirectories: true
-  });
-  return Array.isArray(selected) ? selected[0] : selected;
-}
-
-async function invokeNative(command, args = {}) {
-  return window.__TAURI__.core.invoke(command, args);
-}
-
 async function hydrateRecentProjects() {
   if (!isTauriApp()) {
     renderLaunchScreen();
@@ -1498,30 +1358,114 @@ async function hydrateRecentProjects() {
   }
 }
 
-function fileSignature(file) {
-  if (file && file.signature) return String(file.signature);
-  const modified = Number(file && file.modifiedMs) || 0;
-  const bytes = Number(file && file.byteLen) || 0;
-  return `${modified}:${bytes}`;
+function startAppUpdateChecks() {
+  renderUpdateButton();
+  if (!canCheckForAppUpdate()) return;
+
+  void checkForAvailableUpdate();
+  if (state.appUpdateCheckTimer) window.clearInterval(state.appUpdateCheckTimer);
+  state.appUpdateCheckTimer = window.setInterval(() => {
+    void checkForAvailableUpdate();
+  }, APP_UPDATE_CHECK_INTERVAL_MS);
 }
 
-function buildFileSignatureMap(files = []) {
-  const signatures = new Map();
-  for (const file of files || []) {
-    if (!file || !file.path) continue;
-    signatures.set(file.path, fileSignature(file));
-  }
-  return signatures;
+function canCheckForAppUpdate() {
+  return isTauriApp() && typeof window.fetch === "function";
 }
 
-function cloneFileSignatures(signatures) {
-  if (signatures instanceof Map) {
-    return new Map(signatures);
+function refreshAppUpdateOnFocus() {
+  void checkForAvailableUpdate();
+}
+
+function refreshAppUpdateOnVisibilityChange() {
+  if (!document.hidden) {
+    void checkForAvailableUpdate();
   }
-  if (signatures && typeof signatures === "object") {
-    return new Map(Object.entries(signatures));
+}
+
+async function checkForAvailableUpdate() {
+  if (!canCheckForAppUpdate() || state.appUpdateCheckInFlight || state.appUpdateInstallInFlight) return;
+  state.appUpdateCheckInFlight = true;
+
+  try {
+    const availability = await checkForAppUpdate({
+      current: getCurrentBuildInfo(),
+      fetchImpl: window.fetch.bind(window)
+    });
+    state.appUpdate = availability.available ? availability : null;
+    renderUpdateButton();
+  } catch (error) {
+    state.appUpdate = null;
+    renderUpdateButton();
+    console.warn("Update check failed", error);
+  } finally {
+    state.appUpdateCheckInFlight = false;
   }
-  return new Map();
+}
+
+function renderUpdateButton(statusMessage = "") {
+  const update = state.appUpdate;
+  const visible = Boolean(update && update.available);
+  document.body.classList.toggle("hasAppUpdate", visible);
+  els.updateButton.hidden = !visible;
+
+  if (!visible) {
+    els.updateButton.disabled = false;
+    hideUpdateRestartOverlay();
+    return;
+  }
+
+  const label = state.appUpdateInstallState || "Update";
+  setButtonIcon(els.updateButton, "download", label);
+  els.updateButton.disabled = state.appUpdateInstallInFlight;
+  els.updateButton.title = statusMessage || `Install main update ${update.shortCommit}`;
+  els.updateButton.setAttribute("aria-label", statusMessage || `Install Apex Notes update ${update.shortCommit}`);
+}
+
+async function installAvailableUpdate() {
+  const update = state.appUpdate;
+  if (!update || !update.available || state.appUpdateInstallInFlight) return;
+
+  state.appUpdateInstallInFlight = true;
+  state.appUpdateInstallState = "Updating...";
+  renderUpdateButton("Installing update");
+  setStatus("Installing update");
+
+  try {
+    await waitForPaint();
+    await invokeNative("install_app_update", {
+      releaseCommit: update.releaseCommit
+    });
+    state.appUpdateInstallState = "Restarting...";
+    renderUpdateButton("Restarting after update");
+    setStatus("Restarting after update");
+    showUpdateRestartOverlay();
+    await waitForPaint();
+  } catch (error) {
+    state.appUpdateInstallInFlight = false;
+    state.appUpdateInstallState = "";
+    renderUpdateButton();
+    hideUpdateRestartOverlay();
+    setStatus("Update failed");
+    console.error(error);
+  }
+}
+
+function showUpdateRestartOverlay() {
+  els.updateRestartOverlay.hidden = false;
+  els.updateRestartOverlay.focus({ preventScroll: true });
+}
+
+function hideUpdateRestartOverlay() {
+  els.updateRestartOverlay.hidden = true;
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
 }
 
 function canLiveSyncWorkspace() {
@@ -1575,21 +1519,7 @@ async function checkLiveFolderUpdates() {
     });
     if (token !== state.liveSyncToken || !canLiveSyncWorkspace()) return;
 
-    const nextSignatures = buildFileSignatureMap(statuses);
-    const pathsToRead = [];
-    const deletedPaths = [];
-
-    for (const file of statuses || []) {
-      if (!file || !file.path) continue;
-      if (state.fileSignatures.get(file.path) === nextSignatures.get(file.path)) continue;
-      pathsToRead.push(file.path);
-    }
-
-    for (const path of state.fileSignatures.keys()) {
-      if (!nextSignatures.has(path)) {
-        deletedPaths.push(path);
-      }
-    }
+    const { pathsToRead, deletedPaths, nextSignatures } = diffFileSignatures(state.fileSignatures, statuses);
 
     if (!pathsToRead.length && !deletedPaths.length) {
       state.fileSignatures = nextSignatures;
@@ -1680,15 +1610,8 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   updateSourceStatus();
   maybeShowHierarchyPrompt();
   renderValidationStatus();
+  clearWorkspaceHistory();
   saveActiveWorkspaceState();
-}
-
-function liveUpdateStatus(added, changed, removed) {
-  const parts = [];
-  if (added) parts.push(`${added} added`);
-  if (changed) parts.push(`${changed} changed`);
-  if (removed) parts.push(`${removed} removed`);
-  return `Live updated: ${parts.join(", ")}`;
 }
 
 function normalizeSelectionAfterNotesChanged() {
@@ -1729,6 +1652,8 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {})
     filter: "",
     view: { x: 0, y: 0, scale: 1 },
     hasView: false,
+    undoStack: [],
+    redoStack: [],
     hierarchyPromptShown: false,
     hierarchyPromptText: ""
   };
@@ -1763,6 +1688,263 @@ function hasEmptyWritableWorkspace() {
   return hasWritableWorkspace() && state.notes.length === 0;
 }
 
+function snapshotWorkspaceForHistory() {
+  if (!hasWritableWorkspace() || !state.activeWorkspaceId) return null;
+  return {
+    workspaceId: state.activeWorkspaceId,
+    notes: state.notes
+      .map((note) => ({ path: note.path, raw: note.raw }))
+      .sort((a, b) => compareText(a.path, b.path)),
+    positions: cloneHistoryPositions(state.manualPositions),
+    selectedPath: state.selectedPath,
+    selectedPaths: [...state.selectedPaths].filter((path) => state.notePaths.has(path)),
+    view: { ...state.view }
+  };
+}
+
+function cloneHistoryPositions(positions) {
+  const next = {};
+  for (const [path, position] of Object.entries(positions || {})) {
+    const cloned = cloneHistoryPosition(position);
+    if (cloned) next[path] = cloned;
+  }
+  return next;
+}
+
+function cloneHistoryPosition(position) {
+  if (!position || typeof position !== "object") return null;
+  if (Number.isFinite(position.x) && Number.isFinite(position.y)) {
+    return {
+      x: round(position.x),
+      y: round(position.y)
+    };
+  }
+  if (Number.isFinite(position.dx) || Number.isFinite(position.dy)) {
+    return {
+      dx: round(Number(position.dx) || 0),
+      dy: round(Number(position.dy) || 0)
+    };
+  }
+  return null;
+}
+
+function recordWorkspaceHistory(label, before, after = snapshotWorkspaceForHistory()) {
+  if (state.historyApplying) return;
+  const entry = buildWorkspaceHistoryEntry(label, before, after);
+  if (!entry) return;
+
+  state.undoStack.push(entry);
+  if (state.undoStack.length > MAX_WORKSPACE_HISTORY_ENTRIES) {
+    state.undoStack.shift();
+  }
+  state.redoStack = [];
+  saveActiveWorkspaceState();
+}
+
+function buildWorkspaceHistoryEntry(label, before, after) {
+  if (!before || !after || before.workspaceId !== after.workspaceId) return null;
+
+  const beforeNotes = noteRawMap(before.notes);
+  const afterNotes = noteRawMap(after.notes);
+  const notePaths = new Set([...beforeNotes.keys(), ...afterNotes.keys()]);
+  const notes = [];
+  for (const path of [...notePaths].sort(compareText)) {
+    const beforeRaw = beforeNotes.has(path) ? beforeNotes.get(path) : null;
+    const afterRaw = afterNotes.has(path) ? afterNotes.get(path) : null;
+    if (beforeRaw !== afterRaw) {
+      notes.push({ path, beforeRaw, afterRaw });
+    }
+  }
+
+  const beforePositions = positionMap(before.positions);
+  const afterPositions = positionMap(after.positions);
+  const positionPaths = new Set([...beforePositions.keys(), ...afterPositions.keys()]);
+  const positions = [];
+  for (const path of [...positionPaths].sort(compareText)) {
+    const beforePosition = beforePositions.get(path) || null;
+    const afterPosition = afterPositions.get(path) || null;
+    if (!sameHistoryPosition(beforePosition, afterPosition)) {
+      positions.push({ path, beforePosition, afterPosition });
+    }
+  }
+
+  if (!notes.length && !positions.length) return null;
+  return {
+    label,
+    workspaceId: before.workspaceId,
+    notes,
+    positions,
+    beforeSelection: {
+      selectedPath: before.selectedPath,
+      selectedPaths: before.selectedPaths || [],
+      view: before.view || null
+    },
+    afterSelection: {
+      selectedPath: after.selectedPath,
+      selectedPaths: after.selectedPaths || [],
+      view: after.view || null
+    }
+  };
+}
+
+function noteRawMap(notes) {
+  return new Map((notes || []).map((note) => [note.path, note.raw]));
+}
+
+function positionMap(positions) {
+  const map = new Map();
+  for (const [path, position] of Object.entries(positions || {})) {
+    const cloned = cloneHistoryPosition(position);
+    if (cloned) map.set(path, cloned);
+  }
+  return map;
+}
+
+function sameHistoryPosition(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function clearWorkspaceHistory() {
+  state.undoStack = [];
+  state.redoStack = [];
+  saveActiveWorkspaceState();
+}
+
+async function undoWorkspaceHistory() {
+  return stepWorkspaceHistory("undo");
+}
+
+async function redoWorkspaceHistory() {
+  return stepWorkspaceHistory("redo");
+}
+
+async function stepWorkspaceHistory(direction) {
+  if (!hasWritableWorkspace()) {
+    setStatus(direction === "undo" ? "Open a folder to undo changes" : "Open a folder to redo changes");
+    return false;
+  }
+
+  if (state.historyApplying) return false;
+  if (state.dirty) {
+    await flushAutosave();
+    if (state.dirty) return false;
+  }
+
+  const undo = direction === "undo";
+  const fromStack = undo ? state.undoStack : state.redoStack;
+  const toStack = undo ? state.redoStack : state.undoStack;
+  const entry = fromStack[fromStack.length - 1];
+  if (!entry) {
+    setStatus(undo ? "Nothing to undo" : "Nothing to redo");
+    return false;
+  }
+
+  if (entry.workspaceId !== state.activeWorkspaceId) {
+    clearWorkspaceHistory();
+    setStatus("Undo history reset after switching folders");
+    return false;
+  }
+
+  state.historyApplying = true;
+  stopLiveSync();
+  try {
+    await applyWorkspaceHistoryEntry(entry, undo ? "before" : "after");
+    fromStack.pop();
+    toStack.push(entry);
+    if (toStack.length > MAX_WORKSPACE_HISTORY_ENTRIES) {
+      toStack.shift();
+    }
+    setStatus(`${undo ? "Undid" : "Redid"} ${entry.label}`);
+    saveActiveWorkspaceState();
+    return true;
+  } catch (error) {
+    setStatus(undo ? "Could not undo change" : "Could not redo change");
+    console.error(error);
+    return false;
+  } finally {
+    state.historyApplying = false;
+    startLiveSync();
+  }
+}
+
+async function applyWorkspaceHistoryEntry(entry, side) {
+  const selection = side === "before" ? entry.beforeSelection : entry.afterSelection;
+  const noteChanges = entry.notes || [];
+  const positionChanges = entry.positions || [];
+  const pathsToTrash = [];
+
+  for (const change of noteChanges) {
+    const raw = side === "before" ? change.beforeRaw : change.afterRaw;
+    if (raw === null || raw === undefined) {
+      if (state.byPath.has(change.path)) pathsToTrash.push(change.path);
+      continue;
+    }
+    await invokeNative("write_note", {
+      notesPath: state.notesPath,
+      path: change.path,
+      raw
+    });
+  }
+
+  if (pathsToTrash.length) {
+    await invokeNative("trash_notes", {
+      notesPath: state.notesPath,
+      paths: pathsToTrash
+    });
+  }
+
+  const nextNotes = new Map(state.notes.map((note) => [note.path, note]));
+  for (const change of noteChanges) {
+    const raw = side === "before" ? change.beforeRaw : change.afterRaw;
+    if (raw === null || raw === undefined) {
+      nextNotes.delete(change.path);
+    } else {
+      nextNotes.set(change.path, parseNote(change.path, raw));
+    }
+  }
+  state.notes = [...nextNotes.values()].sort((a, b) => compareText(a.path, b.path));
+
+  for (const change of positionChanges) {
+    const position = side === "before" ? change.beforePosition : change.afterPosition;
+    if (position) {
+      state.manualPositions[change.path] = cloneHistoryPosition(position);
+    } else {
+      delete state.manualPositions[change.path];
+    }
+  }
+
+  state.selectedPath = selection?.selectedPath || null;
+  state.selectedPaths = new Set(selection?.selectedPaths || []);
+  if (selection?.view) {
+    state.view = { ...selection.view };
+  }
+  state.dirty = false;
+  state.saveToken += 1;
+  rebuildIndex();
+  state.validation = validateNotes();
+  state.manualPositions = pruneStoredPositions(state.manualPositions);
+  normalizeSelectionAfterNotesChanged();
+
+  await updateManifestFile();
+  if (positionChanges.length) {
+    const patch = {};
+    for (const change of positionChanges) {
+      patch[change.path] = side === "before"
+        ? cloneHistoryPosition(change.beforePosition)
+        : cloneHistoryPosition(change.afterPosition);
+    }
+    await savePositionPatch(patch);
+  }
+
+  renderCurrentSelection("");
+  renderNewNoteParents();
+  renderGraph({ preserveView: true });
+  updateSourceStatus();
+  renderValidationStatus();
+}
+
 function buildLayoutKey(source, rootPath, workspaceName) {
   return `${STORAGE_PREFIX}:${source}:${rootPath || workspaceName || "workspace"}`;
 }
@@ -1783,6 +1965,8 @@ function saveActiveWorkspaceState() {
   workspace.source = state.source;
   workspace.workspaceName = state.workspaceName;
   workspace.dirty = state.dirty;
+  workspace.undoStack = state.undoStack;
+  workspace.redoStack = state.redoStack;
   workspace.fileSignatures = cloneFileSignatures(state.fileSignatures);
   workspace.filter = state.filter;
   workspace.layoutKey = state.layoutKey;
@@ -1819,6 +2003,9 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.workspaceName = workspace.workspaceName || workspace.rootPath || "Folder";
   state.dirty = Boolean(workspace.dirty);
   state.saveToken += 1;
+  state.undoStack = workspace.undoStack || [];
+  state.redoStack = workspace.redoStack || [];
+  state.historyApplying = false;
   state.fileSignatures = cloneFileSignatures(workspace.fileSignatures);
   state.filter = workspace.filter || "";
   state.searchResults = [];
@@ -2379,103 +2566,6 @@ async function copyHierarchyPrompt() {
   }
 }
 
-function parseNote(path, raw) {
-  const parsed = splitMarkdown(raw);
-  const frontmatter = parseFrontmatter(parsed.frontmatterRaw);
-  const body = parsed.body;
-  const pathNoExt = path.replace(/\.md$/i, "");
-  const basename = pathNoExt.split("/").pop();
-  const heading = body.match(/^#\s+(.+)$/m);
-  const title = frontmatter.values.title || (heading && heading[1].trim()) || basename;
-  const level = Number.parseInt(frontmatter.values.level, 10);
-  const bodyRefs = parseWikiRefs(body);
-  const searchText = `${title} ${path} ${raw}`.toLowerCase();
-
-  const keys = new Set(getNoteAliasKeys(path, title));
-
-  return {
-    path,
-    pathNoExt,
-    basename,
-    title,
-    level: Number.isFinite(level) ? level : 4,
-    declaredLevel: Number.isFinite(level) ? level : null,
-    derivedLevel: null,
-    rawLevel: frontmatter.values.level,
-    hasFrontmatter: parsed.hasFrontmatter,
-    hasLevel: Object.prototype.hasOwnProperty.call(frontmatter.values, "level") && Number.isFinite(level),
-    hasTitle: Object.prototype.hasOwnProperty.call(frontmatter.values, "title"),
-    parentRef: frontmatter.values.parent || null,
-    raw,
-    frontmatterRaw: parsed.frontmatterRaw,
-    frontmatterEntries: frontmatter.entries,
-    frontmatterValues: frontmatter.values,
-    body,
-    bodyRefs,
-    bodyRefNotes: [],
-    searchText,
-    keys: [...keys],
-    parentNote: null,
-    children: []
-  };
-}
-
-function splitMarkdown(raw) {
-  if (!raw.startsWith("---")) {
-    return {
-      hasFrontmatter: false,
-      frontmatterRaw: "",
-      body: raw
-    };
-  }
-
-  const endIndex = raw.indexOf("\n---", 3);
-  if (endIndex === -1) {
-    return {
-      hasFrontmatter: false,
-      frontmatterRaw: "",
-      body: raw
-    };
-  }
-
-  const frontmatterRaw = raw.slice(3, endIndex).replace(/^\n/, "").replace(/\s+$/, "");
-  const body = raw.slice(endIndex + 4).replace(/^\s*\n/, "");
-  return {
-    hasFrontmatter: true,
-    frontmatterRaw,
-    body
-  };
-}
-
-function parseFrontmatter(raw) {
-  const lines = raw ? raw.split("\n") : [];
-  const entries = [];
-  const values = {};
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index];
-    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (!match) {
-      entries.push({ key: null, lines: [line] });
-      index += 1;
-      continue;
-    }
-
-    const key = match[1];
-    const entryLines = [line];
-    index += 1;
-    while (index < lines.length && !lines[index].match(/^([A-Za-z0-9_-]+):\s*(.*)$/)) {
-      entryLines.push(lines[index]);
-      index += 1;
-    }
-    entries.push({ key, lines: entryLines });
-    values[key] = stripQuotes(match[2].trim());
-  }
-
-  return { entries, values };
-}
-
 function resolveWikiNote(ref) {
   if (state.graphIndex) {
     const path = state.graphIndex.resolvePath(ref);
@@ -2485,58 +2575,7 @@ function resolveWikiNote(ref) {
 }
 
 function validateNotes() {
-  const issues = [];
-
-  for (const note of state.notes) {
-    if (!note.hasFrontmatter) {
-      issues.push({ type: "frontmatter", note, message: `${note.title} is missing frontmatter` });
-    }
-
-    if (!note.hasTitle) {
-      issues.push({ type: "frontmatter", note, message: `${note.title} is missing a title` });
-    }
-
-    if (!note.hasLevel) {
-      issues.push({ type: "level", note, message: `${note.title} is missing a valid level` });
-    }
-  }
-
-  if (state.graphIndex) {
-    for (const issue of state.graphIndex.validation) {
-      issues.push(graphIssueToValidation(issue));
-    }
-  }
-
-  return issues;
-}
-
-function graphIssueToValidation(issue) {
-  const path = issue.path || (Array.isArray(issue.paths) ? issue.paths[0] : null);
-  const note = path ? state.byPath.get(path) || null : null;
-  let type = "parent";
-
-  if (issue.type === ISSUE_TYPES.LEVEL_MISMATCH) {
-    type = "level";
-  } else if (issue.type === ISSUE_TYPES.DUPLICATE_ALIAS) {
-    type = "duplicate";
-  }
-
-  return {
-    type,
-    note,
-    graphIssue: issue,
-    message: issue.message || "Hierarchy issue"
-  };
-}
-
-function stripQuotes(value) {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
+  return validateNoteCollection(state.notes, state.graphIndex, state.byPath);
 }
 
 async function selectNote(path, force = false) {
@@ -2847,6 +2886,7 @@ async function deleteGraphSelection() {
     if (state.dirty) return false;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
 
   try {
@@ -2875,12 +2915,13 @@ async function deleteGraphSelection() {
     renderCurrentSelection(`Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch({
+    await savePositionPatch({
       ...positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)),
       ...positionRemovalPatch(deletedPaths)
     });
     updateSourceStatus();
     renderValidationStatus();
+    recordWorkspaceHistory("note deletion", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not move note to Trash");
@@ -2918,6 +2959,7 @@ async function autosaveSelectedNote() {
     return;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const raw = composeRaw(note, getEditorBody(), getInfoValues(note));
   const path = note.path;
   const token = ++state.saveToken;
@@ -2959,29 +3001,13 @@ async function autosaveSelectedNote() {
     }
 
     updateSourceStatus();
+    recordWorkspaceHistory("note edit", historyBefore);
     setStatus("Saved automatically");
   } catch (error) {
     state.dirty = true;
     setStatus("Autosave failed");
     console.error(error);
   }
-}
-
-function composeRaw(note, body, values) {
-  const knownKeys = new Set(["title", "level", "parent", "group"]);
-  const lines = [
-    `title: "${escapeYaml(values.title)}"`,
-    `level: ${values.level}`,
-    values.parentRef ? `parent: "${escapeYaml(values.parentRef)}"` : "parent: null"
-  ];
-
-  for (const entry of note.frontmatterEntries || []) {
-    if (!entry.key || knownKeys.has(entry.key)) continue;
-    lines.push(...entry.lines);
-  }
-
-  const cleanBody = body || "";
-  return `---\n${lines.join("\n")}\n---\n\n${cleanBody}${cleanBody.endsWith("\n") ? "" : "\n"}`;
 }
 
 function noteNeedsFullRefresh(current, updated) {
@@ -3020,18 +3046,6 @@ function patchBodyOnlyNote(note, updated) {
   note.searchText = updated.searchText;
   state.searchIndex = createSearchIndex(state.notes);
   updateSearchResults();
-}
-
-function createNoteRaw({ title, level, parent, body }) {
-  return [
-    "---",
-    `title: "${escapeYaml(title)}"`,
-    `level: ${level}`,
-    parent ? `parent: "[[${parent.basename}]]"` : "parent: null",
-    "---",
-    "",
-    body || `# ${title}\n`
-  ].join("\n");
 }
 
 function renderGraph({ preserveView } = { preserveView: true }) {
@@ -4693,6 +4707,7 @@ function startNodeDrag(event, note, group) {
     initialPositions,
     additiveSelection,
     baseSelection,
+    historyBefore: snapshotWorkspaceForHistory(),
     moved: false
   };
   group.classList.add("dragging");
@@ -4903,7 +4918,7 @@ async function endInteraction(event) {
   if (interaction.type === "node") {
     clearNodeDragClasses(interaction);
     if (interaction.moved) {
-      void savePositionPatch(positionPatchForPaths(interaction.paths));
+      await savePositionPatch(positionPatchForPaths(interaction.paths));
     }
     if (!interaction.moved) {
       if (interaction.additiveSelection) {
@@ -4925,6 +4940,7 @@ async function endInteraction(event) {
         openSingle: false,
         statusMessage: `Moved ${interaction.paths.length} note${interaction.paths.length === 1 ? "" : "s"}`
       });
+      recordWorkspaceHistory("graph move", interaction.historyBefore);
     }
     state.activeInteraction = null;
     return;
@@ -5350,6 +5366,7 @@ async function createLooseGraphNote(title, position) {
     if (state.dirty) return false;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
@@ -5388,6 +5405,7 @@ async function createLooseGraphNote(title, position) {
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("note creation", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not create note");
@@ -5414,6 +5432,7 @@ async function connectLooseNoteToParent(child, parent) {
     layoutSnapshot = snapshotGraphPositions();
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const parentPlan = getParentConnectionPlan(parent, child);
   const nextChildLevel = parentPlan.level + 1;
   const currentChildLevel = Number.isFinite(child.level) ? child.level : 0;
@@ -5472,10 +5491,11 @@ async function connectLooseNoteToParent(child, parent) {
     renderSelectedNote(`Connected ${child.title} under ${parent.title}`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("hierarchy change", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not connect note");
@@ -5498,6 +5518,7 @@ async function connectNoteReference(source, target) {
     layoutSnapshot = snapshotGraphPositions();
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   if (hasBodyReference(source, target)) {
     state.selectedPath = source.path;
     state.selectedPaths = new Set([source.path]);
@@ -5529,10 +5550,11 @@ async function connectNoteReference(source, target) {
     renderSelectedNote(`Linked ${source.title} to ${target.title}`);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("body link", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not add body link");
@@ -5616,7 +5638,27 @@ function findFallbackApex(parent, child) {
 }
 
 async function onDocumentKeydown(event) {
-  if (isTextEntryTarget(event.target)) return;
+  const isShortcut = (event.metaKey || event.ctrlKey) && !event.altKey;
+  const key = event.key.toLowerCase();
+  const isTextEntry = isTextEntryTarget(event.target);
+
+  if (!isTextEntry && isShortcut && key === "z") {
+    event.preventDefault();
+    if (event.shiftKey) {
+      await redoWorkspaceHistory();
+    } else {
+      await undoWorkspaceHistory();
+    }
+    return;
+  }
+
+  if (!isTextEntry && isShortcut && key === "y") {
+    event.preventDefault();
+    await redoWorkspaceHistory();
+    return;
+  }
+
+  if (isTextEntry) return;
 
   const hasGraphFocus = document.activeElement === els.graph || els.graph.contains(document.activeElement);
   const hasSelection = state.selectedPaths.size > 0;
@@ -5628,10 +5670,8 @@ async function onDocumentKeydown(event) {
     return;
   }
 
-  const isShortcut = (event.metaKey || event.ctrlKey) && !event.altKey;
   if (!isShortcut) return;
 
-  const key = event.key.toLowerCase();
   if (key === "c" && hasSelection) {
     event.preventDefault();
     await copySelectedNodes("copy");
@@ -5801,20 +5841,13 @@ async function pasteCopiedNodes(clipboard, point) {
 }
 
 async function createNoteFromPastedText(text, point) {
-  const parent = getPasteParent();
-  if (!parent) {
-    setStatus("Select a parent note before pasting text");
-    return false;
-  }
-
   const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
   const title = getAvailableDisplayTitle(titleFromText(text), reservedTitles);
-  const level = parent.level + 1;
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level,
-    parent,
+    level: 0,
+    parent: null,
     body: bodyFromText(text, title)
   });
 
@@ -5834,6 +5867,7 @@ async function createNotesBatch(specs, statusMessage) {
     return false;
   }
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
   const createdPaths = specs.map((spec) => spec.path);
 
@@ -5870,9 +5904,10 @@ async function createNotesBatch(specs, statusMessage) {
     renderCurrentSelection(statusMessage);
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, createdPaths)));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, createdPaths)));
     updateSourceStatus();
     renderValidationStatus();
+    recordWorkspaceHistory("note creation", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not create note");
@@ -5917,48 +5952,6 @@ function positionsAroundPoint(point, count) {
       y: round(origin.y + row * gapY)
     };
   });
-}
-
-function getAvailableDisplayTitle(title, reservedTitles) {
-  const base = String(title || "").trim() || "Untitled note";
-  let candidate = base;
-  let suffix = 2;
-  while (reservedTitles.has(normalizeKey(candidate))) {
-    candidate = `${base} ${suffix}`;
-    suffix += 1;
-  }
-  return candidate;
-}
-
-function titleFromText(text, fallback = "Pasted note") {
-  const parsed = splitMarkdown(text);
-  const frontmatter = parseFrontmatter(parsed.frontmatterRaw);
-  if (frontmatter.values.title) return frontmatter.values.title;
-
-  const body = parsed.body || text;
-  const heading = body.match(/^#\s+(.+)$/m);
-  if (heading) return cleanTitleText(heading[1], fallback);
-
-  return cleanTitleText(body, fallback);
-}
-
-function cleanTitleText(text, fallback) {
-  const words = String(text || "")
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/[#>*_`~\[\]().,!?:;"']/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 6);
-  const title = words.join(" ").slice(0, 56).trim();
-  return title || fallback;
-}
-
-function bodyFromText(text, title) {
-  const parsed = splitMarkdown(text);
-  const body = (parsed.hasFrontmatter ? parsed.body : text).trim();
-  return body ? `${body}\n` : `# ${title}\n`;
 }
 
 function basenameFromPath(path) {
@@ -6253,6 +6246,7 @@ async function createNewNote(event) {
     parent,
     body: `# ${title}\n`
   });
+  const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
 
   try {
@@ -6275,10 +6269,11 @@ async function createNewNote(event) {
     renderSelectedNote("Note created");
     renderNewNoteParents();
     renderGraph({ preserveView: true });
-    void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, [path])));
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, [path])));
     updateSourceStatus();
     renderValidationStatus();
     closeNewNoteDialog();
+    recordWorkspaceHistory("note creation", historyBefore);
   } catch (error) {
     setStatus("Could not create note");
     console.error(error);
@@ -6288,6 +6283,7 @@ async function createNewNote(event) {
 async function createFirstNote(title, position = getGraphViewportCenter()) {
   if (!title || !hasEmptyWritableWorkspace()) return false;
 
+  const historyBefore = snapshotWorkspaceForHistory();
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
@@ -6324,6 +6320,7 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
     updateSourceStatus();
     renderValidationStatus();
     saveActiveWorkspaceState();
+    recordWorkspaceHistory("note creation", historyBefore);
     return true;
   } catch (error) {
     setStatus("Could not create note");
@@ -6333,15 +6330,7 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
 }
 
 function getAvailableNewNotePath(title, reservedPaths = state.notePaths) {
-  const base = slugify(title) || "untitled";
-  const existing = new Set([...reservedPaths].map((path) => path.toLowerCase()));
-  let suffix = 0;
-
-  while (true) {
-    const filename = `${base}${suffix ? `-${suffix + 1}` : ""}.md`;
-    if (!existing.has(filename.toLowerCase())) return filename;
-    suffix += 1;
-  }
+  return getAvailableNewNotePathForTitle(title, reservedPaths);
 }
 
 async function updateManifestFile() {
@@ -6351,10 +6340,6 @@ async function updateManifestFile() {
     notesPath: state.notesPath,
     paths
   });
-}
-
-function escapeYaml(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function getLevelColor(level) {

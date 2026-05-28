@@ -224,6 +224,74 @@ select:disabled {
   display: none;
 }
 
+body.hasAppUpdate .statusRail {
+  position: fixed;
+  top: 8px;
+  right: 12px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.statusRail .muted {
+  display: none;
+}
+
+.updateButton {
+  min-height: 32px;
+  height: 32px;
+  border-color: rgba(216, 239, 142, 0.74);
+  background: rgba(31, 31, 27, 0.94);
+  color: var(--accent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  pointer-events: auto;
+}
+
+.updateButton:hover,
+.updateButton:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.updateButton[hidden] {
+  display: none;
+}
+
+.updateRestartOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  padding: 24px;
+  background: rgba(17, 17, 15, 0.96);
+  color: var(--text);
+  text-align: center;
+  pointer-events: auto;
+}
+
+.updateRestartOverlay[hidden] {
+  display: none;
+}
+
+.updateRestartOverlay:focus {
+  outline: none;
+}
+
+.updateRestartTitle {
+  font-size: clamp(1.45rem, 4vw, 2.4rem);
+  font-weight: 700;
+}
+
+.updateRestartDetail {
+  color: var(--muted);
+  font-size: 0.98rem;
+}
+
 #noteTitle.editableTitle {
   cursor: text;
   margin: -3px -5px;

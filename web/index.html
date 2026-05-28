@@ -13,8 +13,23 @@
   <body>
     <nav id="workspaceTabs" class="workspaceTabs" aria-label="Open note folders" role="tablist"></nav>
     <div class="statusRail" aria-live="polite">
+      <button id="updateButton" class="updateButton" type="button" hidden>
+        Update available
+      </button>
       <span id="validationStatus" class="muted"></span>
       <span id="sourceStatus" class="muted"></span>
+    </div>
+    <div
+      id="updateRestartOverlay"
+      class="updateRestartOverlay"
+      role="status"
+      aria-live="assertive"
+      aria-atomic="true"
+      tabindex="-1"
+      hidden
+    >
+      <div class="updateRestartTitle">Restarting to update...</div>
+      <div class="updateRestartDetail">Apex Notes will reopen automatically.</div>
     </div>
 
     <section id="launchScreen" class="launchScreen" aria-labelledby="launchTitle">

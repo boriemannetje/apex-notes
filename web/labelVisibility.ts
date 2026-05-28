@@ -1,9 +1,10 @@
+// @ts-nocheck
 import {
   cleanWikiRef,
   getNoteAliasKeys,
   normalizeKey,
   parseWikiRefs
-} from "./noteRefs.js";
+} from "./noteRefs.ts";
 
 const FAR_ZOOM_MAX = 0.6;
 const MID_ZOOM_MAX = 0.95;

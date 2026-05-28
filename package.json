@@ -3,16 +3,18 @@
   "version": "0.1.9",
   "type": "module",
   "scripts": {
-    "build:web": "esbuild web/app.js --bundle --format=iife --loader:.md=text --outfile=web/app.bundle.js",
-    "build:web:prod": "esbuild web/app.js --bundle --format=iife --loader:.md=text --minify --outfile=web/app.bundle.js",
+    "build:web": "node scripts/build-web.mjs",
+    "build:web:prod": "node scripts/build-web.mjs --minify",
     "build:site": "npm run build:web:prod",
     "package:mac": "scripts/package-macos-release.sh",
     "serve": "npm run build:web && python3 -m http.server 8765 -d web",
     "dev": "tauri dev",
     "build": "npm run build:web:prod && tauri build",
-    "test": "node --test web/*.test.js",
-    "test:e2e": "npm run build:web:prod && node --test tests/e2e/*.test.js",
-    "test:pr": "npm test && npm run test:e2e && cargo test --manifest-path src-tauri/Cargo.toml && npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && node --experimental-strip-types --test web/*.test.js web/**/*.test.ts",
+    "test:coverage": "node --experimental-strip-types --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-functions=70 --test-coverage-branches=70 --test-coverage-include=web/notes/*.ts --test-coverage-include=web/persistence/*.ts --test-coverage-include=web/state/*.ts --test-coverage-include=web/ui/*.ts web/*.test.js web/**/*.test.ts",
+    "test:e2e": "APEX_NOTES_BUILD_CHANNEL=main-production npm run build:web:prod && node --test tests/e2e/*.test.js",
+    "test:pr": "npm test && npm run test:coverage && npm run test:e2e && cargo test --manifest-path src-tauri/Cargo.toml && npm run build",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -25,7 +27,9 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.1",
+    "@types/node": "^25.9.1",
     "esbuild": "^0.28.0",
-    "playwright": "^1.60.0"
+    "playwright": "^1.60.0",
+    "typescript": "^6.0.3"
   }
 }

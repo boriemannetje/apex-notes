@@ -1,3 +1,4 @@
+// @ts-nocheck
 const DEFAULT_MARGIN = 12;
 const DEFAULT_GAP = 10;
 

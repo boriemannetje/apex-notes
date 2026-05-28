@@ -1,3 +1,4 @@
+// @ts-nocheck
 export const RECENT_PROJECTS_STORAGE_KEY = "apex-notes-recent-projects-v1";
 export const RECENT_PROJECT_LIMIT = 8;
 
