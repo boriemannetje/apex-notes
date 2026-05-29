@@ -987,7 +987,7 @@ function onWorkspaceTabsDoubleClick(event) {
     return;
   }
 
-  const tab = event.target.closest(".workspaceTab.active");
+  const tab = event.target.closest(".workspaceTab.active[data-workspace-id]");
   if (!tab) return;
   event.preventDefault();
   startWorkspaceTabRename(tab.dataset.workspaceId);
