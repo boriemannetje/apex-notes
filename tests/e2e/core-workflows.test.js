@@ -312,10 +312,19 @@ test("project chooser hides the editor until another project is opened or create
   assert.equal(await page.locator("#editorResizeHandle").evaluate((element) => getComputedStyle(element).display), "none");
   assert(metrics.topbar.width > 1100);
   assert.equal(await page.locator("#graphProjectLauncher").getAttribute("aria-hidden"), "false");
+  assert.equal(await textContent(page, ".workspaceTab.active .workspaceTabTitle"), "Open new");
+  assert.equal(await page.locator(".workspaceTab.active").getAttribute("aria-selected"), "true");
 
-  await page.getByRole("button", { name: "Return to graph" }).click();
+  await page.getByRole("button", { name: "Current folder: Smoke Notes" }).click();
+  await page.waitForFunction(() => !document.body.classList.contains("projectChooserOpen"));
+  assert.equal(await textContent(page, ".workspaceTab.active .workspaceTabTitle"), "Smoke Notes");
+
+  await page.getByRole("button", { name: "Open another notes folder" }).click();
+  await page.locator("#graphProjectLauncher").waitFor();
+  await page.getByRole("button", { name: "Close open new tab" }).click();
   await page.waitForFunction(() => !document.body.classList.contains("projectChooserOpen"));
   assert.equal(await isVisible(page, ".editorPane"), true);
+  assert.equal(await textContent(page, ".workspaceTab.active .workspaceTabTitle"), "Smoke Notes");
 
   await page.close();
 });
