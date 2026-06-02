@@ -7,7 +7,7 @@ parent: null
 
 Source: https://apex-notes.netlify.app/
 
-This guide translates the public Apex Notes website into product UI rules for the local desktop app. The goal is to borrow the website's quiet beauty, warmth, and confidence while keeping the app dense, fast, and useful for repeated work.
+This guide translates the public Apex Notes website into product UI rules for the local desktop app. The goal is to borrow the website's quiet beauty, warmth, and confidence while keeping the app dense, fast, and useful for repeated work. [[
 
 ## Design Direction
 
