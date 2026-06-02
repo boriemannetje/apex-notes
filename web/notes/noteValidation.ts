@@ -12,8 +12,8 @@ export function validateNotes(notes, graphIndex, byPath) {
       issues.push({ type: "frontmatter", note, message: `${note.title} is missing a title` });
     }
 
-    if (!note.hasLevel) {
-      issues.push({ type: "level", note, message: `${note.title} is missing a valid level` });
+    if (!note.hasParent) {
+      issues.push({ type: "frontmatter", note, message: `${note.title} is missing a parent` });
     }
   }
 
@@ -31,9 +31,7 @@ export function graphIssueToValidation(issue, byPath) {
   const note = path ? byPath.get(path) || null : null;
   let type = "parent";
 
-  if (issue.type === ISSUE_TYPES.LEVEL_MISMATCH) {
-    type = "level";
-  } else if (issue.type === ISSUE_TYPES.DUPLICATE_ALIAS) {
+  if (issue.type === ISSUE_TYPES.DUPLICATE_ALIAS) {
     type = "duplicate";
   }
 

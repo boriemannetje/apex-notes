@@ -1,3 +1,8 @@
+---
+title: "Supporting Media In Apex Notes"
+parent: "[[device-support-roadmap-nailing-mac-first]]"
+---
+
 # Supporting Media In Apex Notes
 
 Apex Notes can launch without media support. The core product is a local-first Markdown hierarchy tool: Markdown notes are graph nodes, frontmatter defines hierarchy, and body links add contextual references. Media support should preserve that model instead of becoming a second graph or schema layer.
@@ -123,7 +128,6 @@ Every note should keep the existing shape:
 ```yaml
 ---
 title: "Human Readable Title"
-level: 0
 parent: null
 ---
 ```

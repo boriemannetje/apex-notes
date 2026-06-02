@@ -1426,14 +1426,28 @@ h2 {
 }
 
 .infoGrid input,
-.infoGrid select {
+.infoGrid select,
+.infoGrid output {
   width: 100%;
   min-width: 0;
   padding: 0 9px;
 }
 
-.infoGrid input[readonly] {
+.infoGrid input[readonly],
+.infoGrid output {
   color: var(--muted);
+}
+
+.infoGrid output {
+  display: block;
+  height: 31px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  line-height: 29px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .editorWrap {

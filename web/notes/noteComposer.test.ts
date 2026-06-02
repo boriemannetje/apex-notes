@@ -11,35 +11,43 @@ import {
   titleFromText
 } from "./noteComposer.ts";
 
-test("composeRaw writes the canonical three-field frontmatter and preserves unknown metadata", () => {
+test("composeRaw writes canonical title and parent frontmatter and removes schema extras", () => {
   const raw = composeRaw(
     {
       frontmatterEntries: [
         { key: "title", lines: ['title: "Old"'] },
+        { key: "level", lines: ["level: 4"] },
         { key: "group", lines: ["group: legacy"] },
         { key: "custom", lines: ["custom: keep-me"] }
       ]
     },
     "# Body\n",
-    { title: 'New "Title"', level: 3, parentRef: "[[parent-note]]" }
+    { title: 'New "Title"', parentRef: "[[parent-note]]" }
   );
 
   assert.equal(
     raw,
-    "---\ntitle: \"New \\\"Title\\\"\"\nlevel: 3\nparent: \"[[parent-note]]\"\ncustom: keep-me\n---\n\n# Body\n"
+    "---\ntitle: \"New \\\"Title\\\"\"\nparent: \"[[parent-note]]\"\n---\n\n# Body\n"
   );
 });
 
 test("createNoteRaw creates loose/root notes without schema extras", () => {
   assert.equal(
-    createNoteRaw({ title: "Loose", level: 0, parent: null, body: "# Loose\n" }),
-    "---\ntitle: \"Loose\"\nlevel: 0\nparent: null\n---\n\n# Loose\n"
+    createNoteRaw({ title: "Loose", parent: null, body: "# Loose\n" }),
+    "---\ntitle: \"Loose\"\nparent: null\n---\n\n# Loose\n"
+  );
+});
+
+test("createNoteRaw starts blank notes without duplicating the title heading", () => {
+  assert.equal(
+    createNoteRaw({ title: "Loose", parent: null }),
+    "---\ntitle: \"Loose\"\nparent: null\n---\n\n"
   );
 });
 
 test("createNoteRaw creates immediate child frontmatter from parent basename", () => {
   assert.match(
-    createNoteRaw({ title: "Child", level: 2, parent: { basename: "parent-note" } }),
+    createNoteRaw({ title: "Child", parent: { basename: "parent-note" } }),
     /parent: "\[\[parent-note\]\]"/
   );
 });
@@ -49,6 +57,7 @@ test("titleFromText and bodyFromText preserve pasted Markdown content", () => {
 
   assert.equal(titleFromText(text), "Pasted Loose");
   assert.equal(bodyFromText(text, "Pasted Loose"), "# Pasted Loose\n\nA loose pasted note.\n");
+  assert.equal(bodyFromText("", "Empty Note"), "");
 });
 
 test("available display titles and filenames avoid collisions deterministically", () => {

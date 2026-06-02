@@ -6,7 +6,7 @@ Use this when preparing a public Apex Notes release.
 
 - Confirm the public app repo does not include private notes, separate marketing-site source, or generated bundles.
 - Confirm `notes/` contains only neutral sample data.
-- Confirm note frontmatter uses only `title`, `level`, and `parent`.
+- Confirm note frontmatter uses only `title` and `parent`; legacy `level` fields are ignored and may be removed on rewrite.
 - Decide the release version and update every versioned file in the same change.
 
 ## Validate

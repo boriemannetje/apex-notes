@@ -45,6 +45,7 @@ test("core Tauri workspace flows keep working", async () => {
   assert.equal(await textContent(page, ".workspaceTab.active .workspaceTabTitle"), "Smoke Notes");
   assert.equal(await textContent(page, "#noteTitle"), "Root");
   assert.equal(await textContent(page, "#notePath"), "root.md");
+  assert.equal(await textContent(page, "#validationStatus"), "Valid");
 
   await assertMainWorkspaceGeometry(page);
   await assertGraphNode(page, "root.md");
@@ -63,20 +64,26 @@ test("core Tauri workspace flows keep working", async () => {
 
   const createdRaw = await noteRaw(page, "grandchild.md");
   assert.match(createdRaw, /title: "Grandchild"/);
-  assert.match(createdRaw, /level: 2/);
+  assert.doesNotMatch(createdRaw, /\nlevel:/);
   assert.match(createdRaw, /parent: "\[\[child\]\]"/);
+  assert.doesNotMatch(createdRaw, /\n# Grandchild\n/);
+  await page.locator(".cm-placeholder").waitFor();
+  assert.equal(await textContent(page, ".cm-placeholder"), "Write down your thoughts...");
   assert.equal(await textContent(page, "#editorStatus"), "Note created");
 
+  assert.equal(await page.locator("#infoTitle").count(), 0);
+  await renameSelectedNoteTitle(page, "Renamed Grandchild");
   await page.locator("#noteInfo summary").click();
-  await page.locator("#infoTitle").fill("Renamed Grandchild");
   await page.locator("#infoParent").selectOption("root.md");
-  await page.waitForFunction(() => window.__apexTestState.calls.some(
-    (call) => call.command === "write_note" && call.args.path === "grandchild.md"
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "grandchild.md" &&
+      note.raw.includes('title: "Renamed Grandchild"') &&
+      note.raw.includes('parent: "[[root]]"')
   ));
 
   const renamedRaw = await noteRaw(page, "grandchild.md");
   assert.match(renamedRaw, /title: "Renamed Grandchild"/);
-  assert.match(renamedRaw, /level: 1/);
+  assert.doesNotMatch(renamedRaw, /\nlevel:/);
   assert.match(renamedRaw, /parent: "\[\[root\]\]"/);
   assert.equal(await textContent(page, "#noteTitle"), "Renamed Grandchild");
 
@@ -146,7 +153,7 @@ test("pasting plain text into the graph creates a loose note", async () => {
 
   const pastedRaw = await noteRaw(page, "pasted-loose.md");
   assert.match(pastedRaw, /title: "Pasted Loose"/);
-  assert.match(pastedRaw, /level: 0/);
+  assert.doesNotMatch(pastedRaw, /\nlevel:/);
   assert.match(pastedRaw, /parent: null/);
   assert.equal(await textContent(page, "#editorStatus"), "Pasted text as note");
 
@@ -204,6 +211,90 @@ test("editor command z and command y undo and redo text edits", async () => {
 
   await pressShortcut(page, "Y");
   await page.waitForFunction(() => document.querySelector(".cm-content")?.textContent?.includes("Undo body line"));
+
+  await page.close();
+});
+
+test("renaming a note updates body wiki links that point to it", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#searchInput").fill("child");
+  await page.locator("[data-search-result-path='child.md']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
+
+  await renameSelectedNoteTitle(page, "Renamed Child");
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "root.md" && note.raw.includes("[[Renamed Child]]")
+  ));
+
+  assert.match(await noteRaw(page, "root.md"), /\[\[Renamed Child\]\]/);
+  assert.doesNotMatch(await noteRaw(page, "root.md"), /\[\[child\]\]/);
+  assert.equal(await textContent(page, "#editorStatus"), "Updated 1 wiki link");
+
+  await page.close();
+});
+
+test("deleting a note removes wiki brackets from linked notes", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#searchInput").fill("child");
+  await page.locator("[data-search-result-path='child.md']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
+  await page.locator("#deleteNoteButton").click();
+  await page.locator("#confirmDeleteButton").click();
+  await page.waitForFunction(() => !window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "child.md"
+  ));
+
+  const rootRaw = await noteRaw(page, "root.md");
+  assert.match(rootRaw, /This root links to child\./);
+  assert.doesNotMatch(rootRaw, /\[\[child\]\]/);
+  assert.equal(await page.locator(".node[data-path='child.md']").count(), 0);
+
+  await page.close();
+});
+
+test("typing a missing wiki link in the editor creates a loose graph note", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#searchInput").fill("child");
+  await page.locator("[data-search-result-path='child.md']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
+  await page.locator("#searchInput").fill("");
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("\n[[New Linked Note]]");
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "new-linked-note.md"
+  ));
+  await page.waitForFunction(() => document.querySelector("#editorStatus")?.textContent === "Created 1 linked note");
+
+  const childRaw = await noteRaw(page, "child.md");
+  const linkedRaw = await noteRaw(page, "new-linked-note.md");
+  assert.match(childRaw, /\[\[New Linked Note\]\]/);
+  assert.match(linkedRaw, /title: "New Linked Note"/);
+  assert.doesNotMatch(linkedRaw, /\nlevel:/);
+  assert.match(linkedRaw, /parent: null/);
+  assert.doesNotMatch(linkedRaw, /\n# New Linked Note\n/);
+  assert.equal(await textContent(page, "#notePath"), "child.md");
+  await assertGraphNode(page, "new-linked-note.md");
+  const positions = await page.evaluate(() => window.__apexTestState.workspace.positions);
+  assert(positions["child.md"]);
+  assert(positions["new-linked-note.md"]);
+  assert.equal(Math.round(positions["new-linked-note.md"].x - positions["child.md"].x), 168);
+  assert.equal(Math.round(positions["new-linked-note.md"].y - positions["child.md"].y), 0);
 
   await page.close();
 });
@@ -599,7 +690,7 @@ function sampleWorkspace() {
         raw: [
           "---",
           'title: "Child"',
-          "level: 1",
+          "level: 99",
           'parent: "[[root]]"',
           "---",
           "",
@@ -722,6 +813,14 @@ async function noteRaw(page, path) {
     const note = window.__apexTestState.workspace.notes.find((item) => item.path === notePath);
     return note?.raw || "";
   }, path);
+}
+
+async function renameSelectedNoteTitle(page, title) {
+  await page.locator("#noteTitle").evaluate((element, nextTitle) => {
+    element.focus();
+    element.textContent = nextTitle;
+    element.dispatchEvent(new Event("blur"));
+  }, title);
 }
 
 async function textContent(page, selector) {

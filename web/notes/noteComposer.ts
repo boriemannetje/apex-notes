@@ -1,13 +1,10 @@
 import { normalizeKey, slugify } from "../noteRefs.ts";
-import { parseFrontmatter, splitMarkdown, type FrontmatterEntry } from "./noteParser.ts";
+import { parseFrontmatter, splitMarkdown } from "./noteParser.ts";
 
-interface ComposeNote {
-  frontmatterEntries?: FrontmatterEntry[];
-}
+type ComposeNote = object;
 
 interface ComposeValues {
   title: string;
-  level: number;
   parentRef?: string | null;
 }
 
@@ -15,18 +12,11 @@ interface NoteParent {
   basename: string;
 }
 
-export function composeRaw(note: ComposeNote, body: string, values: ComposeValues): string {
-  const knownKeys = new Set(["title", "level", "parent", "group"]);
+export function composeRaw(_note: ComposeNote, body: string, values: ComposeValues): string {
   const lines = [
     `title: "${escapeYaml(values.title)}"`,
-    `level: ${values.level}`,
     values.parentRef ? `parent: "${escapeYaml(values.parentRef)}"` : "parent: null"
   ];
-
-  for (const entry of note.frontmatterEntries || []) {
-    if (!entry.key || knownKeys.has(entry.key)) continue;
-    lines.push(...entry.lines);
-  }
 
   const cleanBody = body || "";
   return `---\n${lines.join("\n")}\n---\n\n${cleanBody}${cleanBody.endsWith("\n") ? "" : "\n"}`;
@@ -34,23 +24,20 @@ export function composeRaw(note: ComposeNote, body: string, values: ComposeValue
 
 export function createNoteRaw({
   title,
-  level,
   parent,
   body
 }: {
   title: string;
-  level: number;
   parent: NoteParent | null;
   body?: string;
 }): string {
   return [
     "---",
     `title: "${escapeYaml(title)}"`,
-    `level: ${level}`,
     parent ? `parent: "[[${parent.basename}]]"` : "parent: null",
     "---",
     "",
-    body || `# ${title}\n`
+    body ?? ""
   ].join("\n");
 }
 
@@ -102,10 +89,10 @@ export function cleanTitleText(text: string, fallback: string): string {
   return title || fallback;
 }
 
-export function bodyFromText(text: string, title: string): string {
+export function bodyFromText(text: string, _title: string): string {
   const parsed = splitMarkdown(text);
   const body = (parsed.hasFrontmatter ? parsed.body : text).trim();
-  return body ? `${body}\n` : `# ${title}\n`;
+  return body ? `${body}\n` : "";
 }
 
 export function escapeYaml(value: string): string {

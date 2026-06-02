@@ -58,14 +58,15 @@ Keep the schema intentionally small:
 ```yaml
 ---
 title: "Human Readable Title"
-level: 0
 parent: null
 ---
 ```
 
 `parent` is the only hierarchy edge when present. Parentless notes are valid loose notes or roots of independent hierarchies. Body `[[wiki links]]` are contextual references and render as solid, semi-transparent graph lines.
 
-When editing existing notes, preserve filenames. When adding or deleting Markdown files under `notes/`, update `notes/manifest.json` in the same PR. Do not add frontmatter fields beyond `title`, `level`, and `parent` unless the schema is intentionally changed.
+Legacy `level` frontmatter is ignored and may be removed when a note is rewritten. Runtime graph depth is derived from `parent`.
+
+When editing existing notes, preserve filenames. When adding or deleting Markdown files under `notes/`, update `notes/manifest.json` in the same PR. Do not add frontmatter fields beyond `title` and `parent` unless the schema is intentionally changed.
 
 ## Safety Boundaries
 

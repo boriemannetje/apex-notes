@@ -5,7 +5,6 @@ export const ISSUE_TYPES = Object.freeze({
   MISSING_PARENT: "missing-parent",
   CYCLE: "cycle",
   DISCONNECTED: "disconnected",
-  LEVEL_MISMATCH: "level-mismatch",
   DUPLICATE_ALIAS: "duplicate-alias"
 });
 
@@ -116,9 +115,7 @@ export function createGraphIndex(notes, options = {}) {
   for (const [path, level] of derivedLevels) {
     const vertex = V.get(path);
     vertex.derivedLevel = level;
-    if (!Number.isFinite(vertex.declaredLevel)) {
-      vertex.level = level;
-    }
+    vertex.level = level;
   }
 
   const validation = validateGraph({
@@ -222,36 +219,6 @@ export function validateGraph({
     issues.push(issue);
   }
 
-  for (const [path, vertex] of V) {
-    const parentPath = parents.get(path);
-    const declaredLevel = vertex.declaredLevel;
-    const derivedLevel = derivedLevels.get(path);
-
-    if (Number.isFinite(declaredLevel) && Number.isFinite(derivedLevel) && declaredLevel !== derivedLevel) {
-      issues.push({
-        type: ISSUE_TYPES.LEVEL_MISMATCH,
-        path,
-        level: declaredLevel,
-        derivedLevel,
-        message: `${vertex.title} is level ${declaredLevel}, expected ${derivedLevel}`
-      });
-    }
-
-    if (parentPath && derivedLevels.has(parentPath) && derivedLevels.has(path)) {
-      const expected = derivedLevels.get(parentPath) + 1;
-      if (derivedLevels.get(path) !== expected) {
-        issues.push({
-          type: ISSUE_TYPES.LEVEL_MISMATCH,
-          path,
-          parentPath,
-          derivedLevel: derivedLevels.get(path),
-          expected,
-          message: `${vertex.title} is not one level below its parent`
-        });
-      }
-    }
-  }
-
   for (const edge of E_tree) {
     if (!V.has(edge.from) || !V.has(edge.to)) {
       issues.push({
@@ -267,7 +234,6 @@ export function validateGraph({
 
 function normalizeVertex(note, path, index) {
   const title = getTitle(note, path);
-  const declaredLevel = getDeclaredLevel(note);
 
   return {
     path,
@@ -275,8 +241,7 @@ function normalizeVertex(note, path, index) {
     index,
     note,
     title,
-    declaredLevel,
-    level: Number.isFinite(declaredLevel) ? declaredLevel : null,
+    level: null,
     derivedLevel: null,
     parentRef: cleanWikiRef(getParentRef(note)),
     aliases: []
@@ -301,12 +266,6 @@ function getPath(value) {
 
 function getTitle(note, fallbackPath) {
   return String(note && note.title ? note.title : fallbackPath.split("/").pop() || fallbackPath);
-}
-
-function getDeclaredLevel(note) {
-  if (!note || !Object.prototype.hasOwnProperty.call(note, "level")) return null;
-  const level = Number(note.level);
-  return Number.isFinite(level) ? level : null;
 }
 
 function getParentRef(note) {

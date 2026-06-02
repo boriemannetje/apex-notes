@@ -3,7 +3,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoEdito
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap } from "@codemirror/view";
+import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap, placeholder } from "@codemirror/view";
 import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
@@ -79,8 +79,8 @@ const EDITOR_PANE_WIDTH_LARGE_STEP = 96;
 const HIERARCHY_AGENT_INSTRUCTIONS = `Custom hierarchy guidance:
 - check for pre-existing hierarchy, sometimes only a few files don't have the correct formatting
 - Build sensible hierarchy edges from the notes in this folder following the note writing skill.
-- Parentless level 0 notes are allowed as loose notes or roots of independent hierarchies.
-- When a note is connected to a parent, the parent must be one level above it.
+- Parentless notes are allowed as loose notes or roots of independent hierarchies.
+- When a note is connected to a parent, its depth is derived from the parent chain.
 - Moving down a connected hierarchy should become progressively less abstract and more concrete: principles -> themes -> projects/areas -> concrete notes, examples, tasks, or observations.
 - Use body wiki links only for contextual references between related notes, not as hierarchy.
 
@@ -120,8 +120,10 @@ const POSITIONING_OPTIONS = {
   precision: 2
 };
 const PERF_ENABLED = isPerfEnabled();
+const EMPTY_NOTE_PLACEHOLDER = "Write down your thoughts...";
 
 const editorEditable = new Compartment();
+const editorPlaceholder = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
 
 const state = createWorkspaceStore(loadRecentProjects());
@@ -257,6 +259,7 @@ function initializeEditor() {
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         wikiLinkField,
         editorEditable.of(EditorView.editable.of(false)),
+        editorPlaceholder.of([]),
         EditorView.updateListener.of((update) => {
           if (!update.docChanged || state.editorHydrating) return;
           markSelectedDirty();
@@ -522,7 +525,6 @@ function bindEvents() {
   els.noteTitle.addEventListener("keydown", onHeaderNoteTitleKeydown);
   els.noteTitle.addEventListener("paste", onHeaderNoteTitlePaste);
   els.noteInfo.addEventListener("toggle", keepDisabledInfoClosed);
-  els.infoTitle.addEventListener("input", onInfoChanged);
   els.infoParent.addEventListener("change", onInfoChanged);
   els.fullscreenEditorButton.addEventListener("click", toggleEditorFullscreen);
   els.deleteNoteButton.addEventListener("click", deleteSelectedNote);
@@ -812,8 +814,8 @@ function commitHeaderNoteTitle() {
     return;
   }
 
-  els.infoTitle.value = title;
-  els.infoTitle.dispatchEvent(new Event("input", { bubbles: true }));
+  els.noteTitle.textContent = title;
+  markSelectedDirty();
 }
 
 function onHeaderNoteTitleKeydown(event) {
@@ -2399,17 +2401,9 @@ function applyGraphIndexToNotes(graphIndex) {
     note.children = [];
     note.parentNote = null;
     note.bodyRefNotes = [];
-    note.declaredLevel = vertex ? vertex.declaredLevel : (note.hasLevel ? note.level : null);
     note.derivedLevel = vertex ? vertex.derivedLevel : null;
-    const inferredRootWithoutLevel =
-      vertex &&
-      vertex.derivedLevel === 0 &&
-      !note.hasLevel &&
-      !cleanWikiRef(note.parentRef);
-    if (vertex && Number.isFinite(vertex.derivedLevel) && !inferredRootWithoutLevel) {
+    if (vertex && Number.isFinite(vertex.derivedLevel)) {
       note.level = vertex.derivedLevel;
-    } else if (Number.isFinite(note.declaredLevel)) {
-      note.level = note.declaredLevel;
     } else {
       note.level = 4;
     }
@@ -2447,11 +2441,11 @@ function rebuildAliasLookup(graphIndex) {
 function isHierarchyComplete(notes) {
   if (!notes.length) return true;
 
-  for (const note of notes) {
-    if (!note.hasFrontmatter || !note.hasLevel || !note.hasTitle) {
-      return false;
-    }
-  }
+	for (const note of notes) {
+	  if (!note.hasFrontmatter || !note.hasTitle || !note.hasParent) {
+	    return false;
+	  }
+	}
 
   if (state.graphIndex && state.graphIndex.validation.length) {
     return false;
@@ -2461,11 +2455,11 @@ function isHierarchyComplete(notes) {
 }
 
 function isValidApex(note) {
-  if (!note || cleanWikiRef(note.parentRef) || !note.hasLevel) return false;
+  if (!note || !note.hasFrontmatter || !note.hasTitle || !note.hasParent || cleanWikiRef(note.parentRef)) return false;
   if (state.graphIndex && state.graphIndex.derivedLevels.has(note.path)) {
     return state.graphIndex.derivedLevels.get(note.path) === 0;
   }
-  return Boolean(note.hasLevel && note.level === 0);
+  return Boolean(note.level === 0);
 }
 
 function hasValidHierarchyEdge(note) {
@@ -2478,8 +2472,6 @@ function hasValidHierarchyEdge(note) {
   return Boolean(
     note &&
     parent &&
-    note.hasLevel &&
-    parent.hasLevel &&
     Number.isFinite(note.level) &&
     Number.isFinite(parent.level) &&
     parent.level === note.level - 1
@@ -2500,9 +2492,10 @@ function isIncompleteHierarchyNote(note) {
   return Boolean(
     note &&
     (
-      !note.hasFrontmatter ||
-      !note.hasTitle ||
-      !hasUsableHierarchySlot(note)
+	      !note.hasFrontmatter ||
+	      !note.hasTitle ||
+	      !note.hasParent ||
+	      !hasUsableHierarchySlot(note)
     )
   );
 }
@@ -2523,11 +2516,11 @@ function countParentlessHierarchyNotes() {
 
 function isValidParentlessHierarchyNote(note) {
   return Boolean(
-    note &&
-    note.hasFrontmatter &&
-    note.hasTitle &&
-    note.hasLevel &&
-    Number.isFinite(note.level) &&
+	    note &&
+	    note.hasFrontmatter &&
+	    note.hasTitle &&
+	    note.hasParent &&
+	    Number.isFinite(note.level) &&
     !cleanWikiRef(note.parentRef)
   );
 }
@@ -2690,6 +2683,7 @@ function renderGraphSelectionSummary(statusMessage) {
   els.noteTitle.textContent = `${count} note${count === 1 ? "" : "s"} selected`;
   const onlyPath = count === 1 ? [...state.selectedPaths][0] : "";
   els.notePath.textContent = onlyPath || "";
+  setEditorPlaceholder(false);
   setEditorBody("");
   renderInfoPanel(null);
   setStatus(statusMessage || selectionStatus(count));
@@ -2717,6 +2711,7 @@ function renderSelectedNote(statusMessage) {
   if (!note) {
     els.noteTitle.textContent = "Select a note";
     els.notePath.textContent = "";
+    setEditorPlaceholder(false);
     setEditorBody("");
     renderInfoPanel(null);
     setStatus(statusMessage || "Select a note");
@@ -2725,6 +2720,7 @@ function renderSelectedNote(statusMessage) {
 
   els.noteTitle.textContent = note.title;
   els.notePath.textContent = note.path;
+  setEditorPlaceholder(true);
   setEditorBody(note.body);
   renderInfoPanel(note);
   setStatus(statusMessage);
@@ -2757,23 +2753,28 @@ function refreshEditorDecorations() {
   state.editorView.dispatch({ effects: wikiLinkRefreshEffect.of(null) });
 }
 
+function setEditorPlaceholder(isVisible) {
+  if (!state.editorView) return;
+  state.editorView.dispatch({
+    effects: editorPlaceholder.reconfigure(isVisible ? placeholder(EMPTY_NOTE_PLACEHOLDER) : [])
+  });
+}
+
 function renderInfoPanel(note) {
   state.infoHydrating = true;
 
   if (!note) {
-    els.infoTitle.value = "";
+    els.notePath.textContent = "";
     els.infoParent.innerHTML = "";
-    els.infoLevel.value = "";
     els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
     els.noteInfo.open = false;
     state.infoHydrating = false;
     return;
   }
 
-  els.infoTitle.value = note.title;
+  els.notePath.textContent = note.path;
   els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
   renderInfoParents(note);
-  updateInfoDerivedFields();
   state.infoHydrating = false;
 }
 
@@ -2808,46 +2809,21 @@ function isDescendant(candidate, parent) {
   return false;
 }
 
-function collectDescendants(parent) {
-  const descendants = [];
-  const stack = [...(parent.children || [])];
-  const seen = new Set([parent.path]);
-
-  for (let index = 0; index < stack.length; index += 1) {
-    const note = stack[index];
-    if (!note || seen.has(note.path)) continue;
-    seen.add(note.path);
-    descendants.push(note);
-    stack.push(...(note.children || []));
-  }
-
-  return descendants;
-}
-
 function onInfoChanged() {
   if (state.infoHydrating) return;
-  updateInfoDerivedFields();
-  const note = getSelectedNote();
-  if (note) {
-    els.noteTitle.textContent = els.infoTitle.value.trim() || note.title;
-  }
   markSelectedDirty();
-}
-
-function updateInfoDerivedFields() {
-  const parent = state.byPath.get(els.infoParent.value) || null;
-  const level = parent ? parent.level + 1 : 0;
-  els.infoLevel.value = String(level);
 }
 
 function getInfoValues(note) {
   const parent = state.byPath.get(els.infoParent.value) || null;
-  const level = parent ? parent.level + 1 : 0;
   return {
-    title: els.infoTitle.value.trim() || note.title,
-    level,
+    title: getHeaderTitleValue(note),
     parentRef: parent ? `[[${parent.basename}]]` : null
   };
+}
+
+function getHeaderTitleValue(note) {
+  return normalizeHeaderTitleText(els.noteTitle.textContent) || note.title;
 }
 
 function markSelectedDirty() {
@@ -2929,6 +2905,7 @@ async function deleteGraphSelection() {
 
   const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
+  const previousGraphIndex = state.graphIndex;
 
   try {
     await invokeNative("trash_notes", {
@@ -2942,6 +2919,7 @@ async function deleteGraphSelection() {
     for (const path of deletedPaths) {
       delete state.manualPositions[path];
     }
+    const cleanedLinks = await removeDeletedNoteLinks(notes, previousGraphIndex);
     const parentStillExists = deletedParent && state.notes.some((item) => item.path === deletedParent.path);
     const nextPath = notes.length === 1
       ? ((parentStillExists && deletedParent.path) || (state.notes[0] && state.notes[0].path) || null)
@@ -2953,7 +2931,11 @@ async function deleteGraphSelection() {
     state.validation = validateNotes();
     freezeGraphPositions(layoutSnapshot, { excludePaths: deletedPaths });
     await updateManifestFile();
-    renderCurrentSelection(`Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`);
+    renderCurrentSelection(
+      cleanedLinks
+        ? `Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash and cleaned links`
+        : `Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`
+    );
     renderNewNoteParents();
     renderGraph({ preserveView: true });
     await savePositionPatch({
@@ -3005,6 +2987,7 @@ async function autosaveSelectedNote() {
   const path = note.path;
   const token = ++state.saveToken;
   const layoutSnapshot = snapshotGraphPositions();
+  const previousGraphIndex = state.graphIndex;
   setStatus("Saving...");
 
   try {
@@ -3041,9 +3024,12 @@ async function autosaveSelectedNote() {
       patchBodyOnlyNote(note, updated);
     }
 
+    const updatedLinkCount = await updateRenamedNoteLinks(note, updated, previousGraphIndex);
+    const latestNote = state.byPath.get(path) || updated;
+    const createdLinkedNotes = await createMissingWikiLinkNotes(latestNote, note, layoutSnapshot);
     updateSourceStatus();
     recordWorkspaceHistory("note edit", historyBefore);
-    setStatus("Saved automatically");
+    setStatus(saveStatusMessage({ createdLinkedNotes, updatedLinkCount }));
   } catch (error) {
     state.dirty = true;
     setStatus("Autosave failed");
@@ -3054,11 +3040,10 @@ async function autosaveSelectedNote() {
 function noteNeedsFullRefresh(current, updated) {
   return (
     current.title !== updated.title ||
-    current.level !== updated.level ||
     current.parentRef !== updated.parentRef ||
     current.hasFrontmatter !== updated.hasFrontmatter ||
-    current.hasLevel !== updated.hasLevel ||
     current.hasTitle !== updated.hasTitle ||
+    current.hasParent !== updated.hasParent ||
     !sameWikiRefs(current.bodyRefs, updated.bodyRefs)
   );
 }
@@ -3076,17 +3061,290 @@ function patchBodyOnlyNote(note, updated) {
   note.frontmatterRaw = updated.frontmatterRaw;
   note.frontmatterEntries = updated.frontmatterEntries;
   note.frontmatterValues = updated.frontmatterValues;
-  note.declaredLevel = updated.declaredLevel;
   note.derivedLevel = updated.derivedLevel;
-  note.rawLevel = updated.rawLevel;
   note.hasFrontmatter = updated.hasFrontmatter;
-  note.hasLevel = updated.hasLevel;
   note.hasTitle = updated.hasTitle;
+  note.hasParent = updated.hasParent;
   note.body = updated.body;
   note.bodyRefs = updated.bodyRefs;
   note.searchText = updated.searchText;
   state.searchIndex = createSearchIndex(state.notes);
   updateSearchResults();
+}
+
+function saveStatusMessage({ createdLinkedNotes = 0, updatedLinkCount = 0 } = {}) {
+  if (createdLinkedNotes > 0) {
+    return `Created ${createdLinkedNotes} linked note${createdLinkedNotes === 1 ? "" : "s"}`;
+  }
+  if (updatedLinkCount > 0) {
+    return `Updated ${updatedLinkCount} wiki link${updatedLinkCount === 1 ? "" : "s"}`;
+  }
+  return "Saved automatically";
+}
+
+async function updateRenamedNoteLinks(previousNote, updatedNote, previousGraphIndex) {
+  if (!previousNote || !updatedNote || previousNote.title === updatedNote.title) return 0;
+  const targetPath = previousNote.path;
+  let updatedLinkCount = 0;
+  const writes = [];
+
+  for (const note of state.notes) {
+    const rewrite = rewriteBodyWikiLinks(note.body, ({ parsed, inner }) => {
+      if (previousGraphIndex?.resolvePath(parsed.ref) !== targetPath) return null;
+      return wikiLinkMarkup(updatedNote.title, wikiAliasFromInner(inner));
+    });
+
+    if (!rewrite.changed) continue;
+    updatedLinkCount += rewrite.count;
+    writes.push({
+      path: note.path,
+      raw: composeRaw(note, rewrite.body, frontmatterValuesForNote(note))
+    });
+  }
+
+  if (!writes.length) return 0;
+  await writeNoteUpdates(writes);
+  rebuildIndex();
+  state.validation = validateNotes();
+  renderSelectedNote();
+  renderNewNoteParents();
+  renderGraph({ preserveView: true });
+  renderValidationStatus();
+  refreshEditorDecorations();
+  saveActiveWorkspaceState();
+  return updatedLinkCount;
+}
+
+async function removeDeletedNoteLinks(deletedNotes, previousGraphIndex) {
+  const deletedByPath = new Map((deletedNotes || []).map((note) => [note.path, note]));
+  let cleanedLinkCount = 0;
+  const writes = [];
+
+  for (const note of state.notes) {
+    const rewrite = rewriteBodyWikiLinks(note.body, ({ parsed }) => {
+      const targetPath = previousGraphIndex?.resolvePath(parsed.ref);
+      if (!deletedByPath.has(targetPath)) return null;
+      return parsed.label || parsed.ref;
+    });
+    const nextParentRef = deletedByPath.has(previousGraphIndex?.parents?.get(note.path))
+      ? null
+      : frontmatterValuesForNote(note).parentRef;
+    const raw = composeRaw(note, rewrite.body, {
+      title: note.title,
+      parentRef: nextParentRef
+    });
+
+    if (raw === note.raw) continue;
+    cleanedLinkCount += rewrite.count;
+    writes.push({ path: note.path, raw });
+  }
+
+  if (writes.length) {
+    await writeNoteUpdates(writes);
+  }
+  return cleanedLinkCount;
+}
+
+async function writeNoteUpdates(writes) {
+  for (const write of writes) {
+    await invokeNative("write_note", {
+      notesPath: state.notesPath,
+      path: write.path,
+      raw: write.raw
+    });
+    replaceNoteInState(parseNote(write.path, write.raw));
+  }
+  state.notes.sort((a, b) => compareText(a.path, b.path));
+}
+
+function rewriteBodyWikiLinks(body, transform) {
+  const original = String(body || "");
+  const masked = replaceFencedCodeWithSpaces(original);
+  const regex = /\[\[([^\]\n]{1,240})\]\]/g;
+  let rewritten = "";
+  let lastIndex = 0;
+  let count = 0;
+  let match;
+
+  while ((match = regex.exec(masked)) !== null) {
+    if (original[match.index - 1] === "!") continue;
+    const originalMarkup = original.slice(match.index, match.index + match[0].length);
+    const inner = original.slice(match.index + 2, match.index + match[0].length - 2);
+    const parsed = parseWikiTarget(inner);
+    const replacement = transform({ parsed, inner, originalMarkup });
+    if (replacement === null || replacement === undefined || replacement === originalMarkup) continue;
+
+    rewritten += original.slice(lastIndex, match.index) + replacement;
+    lastIndex = match.index + match[0].length;
+    count += 1;
+  }
+
+  if (!count) return { body: original, changed: false, count: 0 };
+  return {
+    body: `${rewritten}${original.slice(lastIndex)}`,
+    changed: true,
+    count
+  };
+}
+
+function wikiAliasFromInner(inner) {
+  const parts = String(inner || "").split("|");
+  return parts.length > 1 ? parts.slice(1).join("|").trim() : "";
+}
+
+function wikiLinkMarkup(target, alias = "") {
+  const cleanTarget = String(target || "").trim();
+  const cleanAlias = String(alias || "").trim();
+  return cleanAlias ? `[[${cleanTarget}|${cleanAlias}]]` : `[[${cleanTarget}]]`;
+}
+
+async function createMissingWikiLinkNotes(sourceNote, previousNote, layoutSnapshot) {
+  const specs = missingWikiLinkNoteSpecs(sourceNote, previousNote);
+  if (!specs.length) return 0;
+
+  const createdPaths = specs.map((spec) => spec.path);
+
+  try {
+    await invokeNative("create_notes", {
+      notesPath: state.notesPath,
+      notes: specs.map((spec) => ({
+        path: spec.path,
+        raw: spec.raw
+      }))
+    });
+
+    for (const spec of specs) {
+      state.notes.push(parseNote(spec.path, spec.raw));
+    }
+
+    state.notes.sort((a, b) => compareText(a.path, b.path));
+    state.selectedPath = sourceNote.path;
+    state.selectedPaths = new Set([sourceNote.path]);
+    rebuildIndex();
+    state.validation = validateNotes();
+    state.manualPositions = pruneStoredPositions(state.manualPositions);
+    seedLinkedNotePositions(createdPaths, sourceNote.path, layoutSnapshot);
+    await updateManifestFile();
+    renderNewNoteParents();
+    renderGraph({ preserveView: true });
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, createdPaths)));
+    renderValidationStatus();
+    refreshEditorDecorations();
+    saveActiveWorkspaceState();
+    return createdPaths.length;
+  } catch (error) {
+    setStatus("Could not create linked note");
+    console.error(error);
+    return 0;
+  }
+}
+
+function missingWikiLinkNoteSpecs(sourceNote, previousNote) {
+  const reservedPaths = new Set(state.notePaths);
+  const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
+  const seenRefs = new Set();
+  const specs = [];
+  const previousRefs = new Set(autoCreateWikiRefs(previousNote ? previousNote.body : "").map((ref) => normalizeKey(ref.ref)));
+
+  for (const ref of autoCreateWikiRefs(sourceNote.body || "")) {
+    const key = normalizeKey(ref.ref);
+    if (!key || seenRefs.has(key) || previousRefs.has(key)) continue;
+    seenRefs.add(key);
+    if (resolveWikiNote(ref.ref)) continue;
+
+    const title = getAvailableDisplayTitle(titleFromWikiRef(ref.ref), reservedTitles);
+    const path = getAvailableWikiLinkNotePath(ref.ref, title, reservedPaths);
+    const raw = createNoteRaw({
+      title,
+      parent: null
+    });
+
+    reservedPaths.add(path);
+    reservedTitles.add(normalizeKey(title));
+    specs.push({ path, raw });
+  }
+
+  return specs;
+}
+
+function autoCreateWikiRefs(body) {
+  const text = replaceFencedCodeWithSpaces(String(body || ""));
+  const refs = [];
+  const seen = new Set();
+  const regex = /\[\[([^\]\n]{1,120})\]\]/g;
+  let match;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (text[match.index - 1] === "!") continue;
+    const parsed = parseWikiTarget(match[1]);
+    const key = normalizeKey(parsed.ref);
+    if (!key || seen.has(key) || !isAutoCreatableWikiTarget(parsed.ref)) continue;
+    seen.add(key);
+    refs.push(parsed);
+  }
+
+  return refs;
+}
+
+function replaceFencedCodeWithSpaces(text) {
+  return text.replace(/```[\s\S]*?```/g, (match) => " ".repeat(match.length));
+}
+
+function isAutoCreatableWikiTarget(ref) {
+  const target = String(ref || "").trim();
+  if (!target || target.length > 120) return false;
+  if (target.startsWith("/") || target.startsWith("../") || target.startsWith("./")) return false;
+  if (target.includes("\\") || target.includes("#") || target.includes("`")) return false;
+  if (/^attachments\//i.test(target)) return false;
+  if (/\.(avif|gif|jpe?g|md|mp3|mp4|pdf|png|wav|webm)$/i.test(target)) return false;
+  return true;
+}
+
+function titleFromWikiRef(ref) {
+  const target = String(ref || "")
+    .replace(/^notes\//i, "")
+    .replace(/\.md$/i, "")
+    .split("/")
+    .pop();
+  return String(target || "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() || "Untitled note";
+}
+
+function getAvailableWikiLinkNotePath(ref, title, reservedPaths) {
+  const candidate = markdownPathFromWikiRef(ref);
+  if (candidate) return getAvailableMarkdownPath(candidate, reservedPaths);
+  return getAvailableNewNotePath(title, reservedPaths);
+}
+
+function markdownPathFromWikiRef(ref) {
+  const clean = String(ref || "")
+    .replace(/^notes\//i, "")
+    .replace(/\.md$/i, "")
+    .trim();
+  if (!clean || clean.startsWith("/") || clean.includes("\\")) return "";
+
+  const rawSegments = clean.split("/");
+  if (rawSegments.some((segment) => !segment || segment === "." || segment === "..")) return "";
+
+  const segments = rawSegments.map((segment) => slugify(segment)).filter(Boolean);
+  return segments.length ? `${segments.join("/")}.md` : "";
+}
+
+function getAvailableMarkdownPath(candidate, reservedPaths) {
+  const existing = new Set([...reservedPaths].map((path) => path.toLowerCase()));
+  const normalized = String(candidate || "").replace(/^notes\//i, "").replace(/\.md$/i, "");
+  const parts = normalized.split("/");
+  const stem = parts.pop() || "untitled";
+  const directory = parts.length ? `${parts.join("/")}/` : "";
+  let suffix = 0;
+
+  while (true) {
+    const path = `${directory}${stem}${suffix ? `-${suffix + 1}` : ""}.md`;
+    if (!existing.has(path.toLowerCase())) return path;
+    suffix += 1;
+  }
 }
 
 function renderGraph({ preserveView } = { preserveView: true }) {
@@ -3505,7 +3763,6 @@ function renderGraphNode(canvas, note) {
 
 function graphNodeAriaLabel(note, { loose = false, nodeSize = getNodeSize(note.path) } = {}) {
   const parts = [note.title];
-  parts.push(Number.isFinite(note.level) ? `level ${note.level}` : "no level");
   parts.push(`${nodeSize.connectionCount} connection${nodeSize.connectionCount === 1 ? "" : "s"}`);
   if (loose) parts.push("loose note");
   if (state.armedRope && state.armedRope.sourcePath === note.path) parts.push("connection ready");
@@ -3664,19 +3921,7 @@ function seedAddedNotePositions(paths, layoutSnapshot = new Map()) {
   const addedPaths = paths instanceof Set ? [...paths] : [...(paths || [])];
   if (!addedPaths.length) return;
 
-  const occupied = new Map();
-  for (const [path, position] of layoutSnapshot.entries()) {
-    if (state.notePaths.has(path)) {
-      occupied.set(path, absolutePosition(position));
-    }
-  }
-
-  for (const [path, stored] of Object.entries(state.manualPositions)) {
-    const resolved = resolveStoredPosition(path, stored, state.autoPositions);
-    if (resolved && state.notePaths.has(path)) {
-      occupied.set(path, absolutePosition(resolved));
-    }
-  }
+  const occupied = occupiedPositionsFromSnapshot(layoutSnapshot);
 
   const sortedAddedPaths = addedPaths
     .filter((path) => state.notePaths.has(path))
@@ -3711,6 +3956,107 @@ function seedAddedNotePositions(paths, layoutSnapshot = new Map()) {
     state.manualPositions[path] = position;
     occupied.set(path, position);
   }
+}
+
+function seedLinkedNotePositions(paths, sourcePath, layoutSnapshot = new Map()) {
+  const addedPaths = (paths instanceof Set ? [...paths] : [...(paths || [])])
+    .filter((path) => state.notePaths.has(path))
+    .sort(compareText);
+  if (!addedPaths.length) return;
+
+  const occupied = occupiedPositionsFromSnapshot(layoutSnapshot);
+  const sourcePosition = occupied.get(sourcePath);
+  if (!sourcePosition) {
+    seedAddedNotePositions(addedPaths, layoutSnapshot);
+    return;
+  }
+
+  for (let index = 0; index < addedPaths.length; index += 1) {
+    const path = addedPaths[index];
+    if (occupied.has(path)) continue;
+    const position = nearestOpenLinkedNotePosition(
+      linkedNoteBasePosition(sourcePosition, index, addedPaths.length),
+      occupied
+    );
+    state.manualPositions[path] = position;
+    occupied.set(path, position);
+  }
+}
+
+function occupiedPositionsFromSnapshot(layoutSnapshot = new Map()) {
+  const occupied = new Map();
+  for (const [path, position] of layoutSnapshot.entries()) {
+    if (state.notePaths.has(path)) {
+      occupied.set(path, absolutePosition(position));
+    }
+  }
+
+  for (const [path, stored] of Object.entries(state.manualPositions)) {
+    const resolved = resolveStoredPosition(path, stored, state.autoPositions);
+    if (resolved && state.notePaths.has(path)) {
+      occupied.set(path, absolutePosition(resolved));
+    }
+  }
+
+  return occupied;
+}
+
+function linkedNoteBasePosition(sourcePosition, index, count) {
+  const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
+  const row = Math.floor(index / columns);
+  const column = index % columns;
+  return absolutePosition({
+    x: sourcePosition.x + POSITIONING_OPTIONS.looseMarginX / 2 + column * POSITIONING_OPTIONS.looseGapX,
+    y: sourcePosition.y + row * POSITIONING_OPTIONS.looseGapY
+  });
+}
+
+function nearestOpenLinkedNotePosition(base, occupied) {
+  if (!hasPositionCollision(base, occupied)) return base;
+
+  const stepX = POSITIONING_OPTIONS.collisionGap;
+  const stepY = Math.min(POSITIONING_OPTIONS.levelGap, POSITIONING_OPTIONS.collisionGap);
+  const limit = Math.max(8, occupied.size + 2);
+
+  for (let radius = 1; radius <= limit; radius += 1) {
+    for (const candidate of linkedNoteCandidatePositions(base, radius, stepX, stepY)) {
+      if (!hasPositionCollision(candidate, occupied)) return candidate;
+    }
+  }
+
+  return absolutePosition({
+    x: base.x + (limit + 1) * stepX,
+    y: base.y
+  });
+}
+
+function linkedNoteCandidatePositions(base, radius, stepX, stepY) {
+  const x = radius * stepX;
+  const y = radius * stepY;
+  return [
+    { x: base.x + x, y: base.y },
+    { x: base.x, y: base.y + y },
+    { x: base.x, y: base.y - y },
+    { x: base.x + x, y: base.y + y },
+    { x: base.x + x, y: base.y - y },
+    { x: base.x - x, y: base.y + y },
+    { x: base.x - x, y: base.y - y },
+    { x: base.x - x, y: base.y }
+  ].map(absolutePosition);
+}
+
+function hasPositionCollision(candidate, occupied) {
+  const gapX = POSITIONING_OPTIONS.collisionGap;
+  const gapY = Math.min(POSITIONING_OPTIONS.levelGap, POSITIONING_OPTIONS.collisionGap);
+  for (const position of occupied.values()) {
+    if (
+      Math.abs(position.x - candidate.x) < gapX &&
+      Math.abs(position.y - candidate.y) < gapY
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function positionForAddedNote(note, occupied) {
@@ -5412,9 +5758,7 @@ async function createLooseGraphNote(title, position) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level: 0,
-    parent: null,
-    body: `# ${title}\n`
+    parent: null
   });
 
   try {
@@ -5475,12 +5819,8 @@ async function connectLooseNoteToParent(child, parent) {
 
   const historyBefore = snapshotWorkspaceForHistory();
   const parentPlan = getParentConnectionPlan(parent, child);
-  const nextChildLevel = parentPlan.level + 1;
-  const currentChildLevel = Number.isFinite(child.level) ? child.level : 0;
-  const levelDelta = nextChildLevel - currentChildLevel;
   const childRaw = composeRaw(child, child.body, {
     title: child.title,
-    level: nextChildLevel,
     parentRef: `[[${parent.basename}]]`
   });
 
@@ -5490,18 +5830,6 @@ async function connectLooseNoteToParent(child, parent) {
   }
   if (childRaw !== child.raw) {
     writes.push({ path: child.path, raw: childRaw });
-  }
-  if (levelDelta !== 0) {
-    for (const descendant of collectDescendants(child)) {
-      const level = Number.isFinite(descendant.level) ? descendant.level + levelDelta : levelDelta;
-      const raw = composeRaw(descendant, descendant.body, {
-        ...frontmatterValuesForNote(descendant),
-        level
-      });
-      if (raw !== descendant.raw) {
-        writes.push({ path: descendant.path, raw });
-      }
-    }
   }
 
   if (!writes.length) {
@@ -5623,7 +5951,6 @@ function frontmatterValuesForNote(note) {
     : cleanWikiRef(note.parentRef);
   return {
     title: note.title,
-    level: Number.isFinite(note.level) ? note.level : 0,
     parentRef: parentRef ? (parentRef.startsWith("[[") ? parentRef : `[[${parentRef}]]`) : null
   };
 }
@@ -5649,7 +5976,6 @@ function getParentConnectionValues(parent, child) {
   if (hasUsableHierarchySlot(parent)) {
     return {
       title: parent.title,
-      level: parent.level,
       parentRef: parent.parentNote ? `[[${parent.parentNote.basename}]]` : null
     };
   }
@@ -5658,14 +5984,12 @@ function getParentConnectionValues(parent, child) {
   if (apex) {
     return {
       title: parent.title,
-      level: apex.level + 1,
       parentRef: `[[${apex.basename}]]`
     };
   }
 
   return {
     title: parent.title,
-    level: 0,
     parentRef: null
   };
 }
@@ -5857,9 +6181,8 @@ async function pasteCopiedNodes(clipboard, point) {
     const path = getAvailableNewNotePath(title, reservedPaths);
     const raw = createNoteRaw({
       title,
-      level,
       parent: nextParent,
-      body: source.body || `# ${title}\n`
+      body: source.body || ""
     });
 
     reservedPaths.add(path);
@@ -5887,7 +6210,6 @@ async function createNoteFromPastedText(text, point) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level: 0,
     parent: null,
     body: bodyFromText(text, title)
   });
@@ -6066,11 +6388,9 @@ async function importMarkdownFiles(files, point) {
     const text = await file.text();
     const fallbackTitle = file.name.replace(/\.md$/i, "").replace(/[-_]+/g, " ");
     const title = getAvailableDisplayTitle(titleFromText(text, fallbackTitle), reservedTitles);
-    const level = parent.level + 1;
     const path = getAvailableNewNotePath(title, reservedPaths);
     const raw = createNoteRaw({
       title,
-      level,
       parent,
       body: bodyFromText(text, title)
     });
@@ -6170,7 +6490,7 @@ function renderValidationStatus() {
   if (!state.validation.length) {
     if (state.graphHasHierarchy) {
       els.validationStatus.textContent = "Valid";
-      els.validationStatus.title = "No broken parents or missing levels";
+      els.validationStatus.title = "No broken parents or missing frontmatter";
       return;
     }
 
@@ -6185,7 +6505,6 @@ function renderValidationStatus() {
   }, {});
   const parts = [
     counts.parent ? `${counts.parent} parent` : "",
-    counts.level ? `${counts.level} level` : "",
     counts.duplicate ? `${counts.duplicate} duplicate` : "",
     counts.frontmatter ? `${counts.frontmatter} frontmatter` : ""
   ].filter(Boolean);
@@ -6253,18 +6572,17 @@ function closeNewNoteDialog() {
 
 function updateNewNoteHint() {
   if (!state.notes.length) {
-    els.newNoteHint.textContent = "Creates the first level 0 root note.";
+    els.newNoteHint.textContent = "Creates the first root note.";
     return;
   }
 
   const parent = state.byPath.get(els.newNoteParent.value);
   if (!parent) {
-    els.newNoteHint.textContent = "Creates a level 0 root or loose note.";
+    els.newNoteHint.textContent = "Creates a root or loose note.";
     return;
   }
 
-  const nextLevel = parent.level + 1;
-  els.newNoteHint.textContent = `Level ${nextLevel}, parent [[${parent.basename}]].`;
+  els.newNoteHint.textContent = `Creates a child of [[${parent.basename}]].`;
 }
 
 async function createNewNote(event) {
@@ -6279,13 +6597,10 @@ async function createNewNote(event) {
     return;
   }
 
-  const level = parent ? parent.level + 1 : 0;
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level,
-    parent,
-    body: `# ${title}\n`
+    parent
   });
   const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
@@ -6328,9 +6643,7 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    level: 0,
-    parent: null,
-    body: `# ${title}\n`
+    parent: null
   });
 
   try {
@@ -6391,8 +6704,7 @@ function getLevelColor(level) {
 
 function parentOptionLabel(note) {
   const indent = "  ".repeat(Math.min(note.level, 12));
-  const overflow = note.level > 12 ? `L${note.level} ` : "";
-  return `${indent}${overflow}${note.title}`;
+  return `${indent}${note.title}`;
 }
 
 function setStatus(message) {
@@ -6410,7 +6722,6 @@ function updateSourceStatus() {
   els.sourceStatus.title = isFolder ? (state.rootPath || state.workspaceName || "Folder open") : "Open or create a folder to edit notes";
   els.newNoteButton.disabled = !isFolder;
   els.newNoteButton.title = isFolder ? "Create a note in this folder" : "Open or create a folder first";
-  els.infoTitle.disabled = !isFolder || !hasSelection;
   els.infoParent.disabled = !isFolder || !hasSelection;
   els.noteInfo.setAttribute("aria-disabled", String(!isFolder || !hasSelection));
   keepDisabledInfoClosed();

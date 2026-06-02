@@ -1,6 +1,6 @@
 ---
 name: apex-notes-writing
-description: use skill when writing .md for Apex Notes; create/edit/import/delete/connect notes; enforce title/level/parent frontmatter, parent-only hierarchy, body wikilink refs, manifest sync.
+description: use skill when writing .md for Apex Notes; create/edit/import/delete/connect notes; enforce title/parent frontmatter, parent-only hierarchy, body wikilink refs, manifest sync.
 ---
 
 # Apex Notes Writing
@@ -24,19 +24,18 @@ Every note starts with only:
 ```yaml
 ---
 title: "Human Readable Title"
-level: 0
 parent: null
 ---
 ```
 
 Rules:
-- keys: only `title`, `level`, `parent`; no schema fields unless schema task.
+- keys: only `title`, `parent`; no schema fields unless schema task.
 - `title` = graph label; filename is storage.
-- `level` = cached derived depth; integer; unbounded; no names for levels.
-- `parent: null` = loose note or independent root; level must be `0`.
-- `parent: "[[parent-stem]]"` = one immediate parent; child level = parent level + 1.
+- `parent: null` = loose note or independent root.
+- `parent: "[[parent-stem]]"` = one immediate parent; depth is derived from the parent chain.
 - Parent must exist, resolve uniquely, be outside child descendant chain.
 - Multiple roots/loose notes in one folder are valid.
+- Legacy `level` frontmatter is ignored by the app and may be removed when rewriting a note.
 
 ## Links
 
@@ -66,8 +65,8 @@ Rules:
 ## Edits
 
 - Before edit: read current note set + manifest; detect existing hierarchy.
-- Connect/reparent: change child `parent`; set child/descendant levels from parent chain.
-- Level mismatch alone: repair `level`; do not reparent.
+- Connect/reparent: change only the child `parent`; descendants derive depth automatically.
+- If an existing note has legacy `level`, remove it the next time you rewrite that note.
 - Delete parent: children may keep broken parents unless user asks reparent.
 - Avoid duplicate titles/aliases; duplicate aliases make refs ambiguous.
 - Keep unknown/private content out of repo sample notes.
@@ -75,9 +74,9 @@ Rules:
 ## Validate
 
 Before done:
-- all notes: frontmatter present; only 3 keys; title present; level valid.
+- all notes: frontmatter present; only 2 keys; title present.
 - parents: null or exactly one `[[...]]`; resolves uniquely; no missing parent; no cycles.
-- connected notes: declared level == derived depth; parent exactly one level above.
+- connected notes: every child has exactly one immediate parent.
 - body links: references only; no hierarchy encoded in body text.
 - manifest: missing/extra paths fixed; all paths `.md`, relative, sorted.
 - layout: no stale path keys if edited.

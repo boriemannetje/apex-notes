@@ -22,12 +22,10 @@ export interface ParsedNote {
   basename: string;
   title: string;
   level: number;
-  declaredLevel: number | null;
   derivedLevel: number | null;
-  rawLevel: string | undefined;
   hasFrontmatter: boolean;
-  hasLevel: boolean;
   hasTitle: boolean;
+  hasParent: boolean;
   parentRef: string | null;
   raw: string;
   frontmatterRaw: string;
@@ -50,7 +48,6 @@ export function parseNote(path: string, raw: string): ParsedNote {
   const basename = pathNoExt.split("/").pop() || pathNoExt;
   const heading = body.match(/^#\s+(.+)$/m);
   const title = frontmatter.values.title || (heading && heading[1].trim()) || basename;
-  const level = Number.parseInt(frontmatter.values.level, 10);
   const bodyRefs = parseWikiRefs(body);
   const searchText = `${title} ${path} ${raw}`.toLowerCase();
   const keys = new Set(getNoteAliasKeys(path, title));
@@ -60,13 +57,11 @@ export function parseNote(path: string, raw: string): ParsedNote {
     pathNoExt,
     basename,
     title,
-    level: Number.isFinite(level) ? level : 4,
-    declaredLevel: Number.isFinite(level) ? level : null,
+    level: 0,
     derivedLevel: null,
-    rawLevel: frontmatter.values.level,
     hasFrontmatter: parsed.hasFrontmatter,
-    hasLevel: Object.prototype.hasOwnProperty.call(frontmatter.values, "level") && Number.isFinite(level),
     hasTitle: Object.prototype.hasOwnProperty.call(frontmatter.values, "title"),
+    hasParent: Object.prototype.hasOwnProperty.call(frontmatter.values, "parent"),
     parentRef: frontmatter.values.parent || null,
     raw,
     frontmatterRaw: parsed.frontmatterRaw,
