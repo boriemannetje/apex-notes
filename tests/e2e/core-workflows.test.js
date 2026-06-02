@@ -209,6 +209,54 @@ test("editor command z and command y undo and redo text edits", async () => {
   await page.close();
 });
 
+test("renaming a note updates body wiki links that point to it", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#searchInput").fill("child");
+  await page.locator("[data-search-result-path='child.md']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
+
+  await page.locator("#noteInfo summary").click();
+  await page.locator("#infoTitle").fill("Renamed Child");
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "root.md" && note.raw.includes("[[Renamed Child]]")
+  ));
+
+  assert.match(await noteRaw(page, "root.md"), /\[\[Renamed Child\]\]/);
+  assert.doesNotMatch(await noteRaw(page, "root.md"), /\[\[child\]\]/);
+  assert.equal(await textContent(page, "#editorStatus"), "Updated 1 wiki link");
+
+  await page.close();
+});
+
+test("deleting a note removes wiki brackets from linked notes", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#searchInput").fill("child");
+  await page.locator("[data-search-result-path='child.md']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
+  await page.locator("#deleteNoteButton").click();
+  await page.locator("#confirmDeleteButton").click();
+  await page.waitForFunction(() => !window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "child.md"
+  ));
+
+  const rootRaw = await noteRaw(page, "root.md");
+  assert.match(rootRaw, /This root links to child\./);
+  assert.doesNotMatch(rootRaw, /\[\[child\]\]/);
+  assert.equal(await page.locator(".node[data-path='child.md']").count(), 0);
+
+  await page.close();
+});
+
 test("typing a missing wiki link in the editor creates a loose graph note", async () => {
   const page = await newMockedTauriPage();
 

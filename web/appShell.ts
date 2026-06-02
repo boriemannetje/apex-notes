@@ -2893,6 +2893,7 @@ async function deleteGraphSelection() {
 
   const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
+  const previousGraphIndex = state.graphIndex;
 
   try {
     await invokeNative("trash_notes", {
@@ -2906,6 +2907,7 @@ async function deleteGraphSelection() {
     for (const path of deletedPaths) {
       delete state.manualPositions[path];
     }
+    const cleanedLinks = await removeDeletedNoteLinks(notes, previousGraphIndex);
     const parentStillExists = deletedParent && state.notes.some((item) => item.path === deletedParent.path);
     const nextPath = notes.length === 1
       ? ((parentStillExists && deletedParent.path) || (state.notes[0] && state.notes[0].path) || null)
@@ -2917,7 +2919,11 @@ async function deleteGraphSelection() {
     state.validation = validateNotes();
     freezeGraphPositions(layoutSnapshot, { excludePaths: deletedPaths });
     await updateManifestFile();
-    renderCurrentSelection(`Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`);
+    renderCurrentSelection(
+      cleanedLinks
+        ? `Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash and cleaned links`
+        : `Moved ${notes.length} note${notes.length === 1 ? "" : "s"} to Trash`
+    );
     renderNewNoteParents();
     renderGraph({ preserveView: true });
     await savePositionPatch({
@@ -2969,6 +2975,7 @@ async function autosaveSelectedNote() {
   const path = note.path;
   const token = ++state.saveToken;
   const layoutSnapshot = snapshotGraphPositions();
+  const previousGraphIndex = state.graphIndex;
   setStatus("Saving...");
 
   try {
@@ -2983,11 +2990,11 @@ async function autosaveSelectedNote() {
     const needsFullRefresh = noteNeedsFullRefresh(note, updated);
     state.dirty = false;
 
-	    if (needsFullRefresh) {
-	      const index = state.notes.findIndex((item) => item.path === path);
-	      if (index !== -1) {
-	        state.notes.splice(index, 1, updated);
-	      }
+    if (needsFullRefresh) {
+      const index = state.notes.findIndex((item) => item.path === path);
+      if (index !== -1) {
+        state.notes.splice(index, 1, updated);
+      }
 
       rebuildIndex();
       state.validation = validateNotes();
@@ -3001,33 +3008,33 @@ async function autosaveSelectedNote() {
       renderGraph({ preserveView: true });
       void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
       renderValidationStatus();
-	    } else {
-	      patchBodyOnlyNote(note, updated);
-	    }
+    } else {
+      patchBodyOnlyNote(note, updated);
+    }
 
-	    const createdLinkedNotes = await createMissingWikiLinkNotes(updated, layoutSnapshot);
-	    updateSourceStatus();
-	    recordWorkspaceHistory("note edit", historyBefore);
-	    setStatus(createdLinkedNotes > 0
-	      ? `Created ${createdLinkedNotes} linked note${createdLinkedNotes === 1 ? "" : "s"}`
-	      : "Saved automatically");
-	  } catch (error) {
-	    state.dirty = true;
-	    setStatus("Autosave failed");
-	    console.error(error);
-	  }
+    const updatedLinkCount = await updateRenamedNoteLinks(note, updated, previousGraphIndex);
+    const latestNote = state.byPath.get(path) || updated;
+    const createdLinkedNotes = await createMissingWikiLinkNotes(latestNote, note, layoutSnapshot);
+    updateSourceStatus();
+    recordWorkspaceHistory("note edit", historyBefore);
+    setStatus(saveStatusMessage({ createdLinkedNotes, updatedLinkCount }));
+  } catch (error) {
+    state.dirty = true;
+    setStatus("Autosave failed");
+    console.error(error);
+  }
 }
 
 function noteNeedsFullRefresh(current, updated) {
   return (
     current.title !== updated.title ||
-	    current.parentRef !== updated.parentRef ||
-	    current.hasFrontmatter !== updated.hasFrontmatter ||
-	    current.hasTitle !== updated.hasTitle ||
-	    current.hasParent !== updated.hasParent ||
-	    !sameWikiRefs(current.bodyRefs, updated.bodyRefs)
-	  );
-	}
+    current.parentRef !== updated.parentRef ||
+    current.hasFrontmatter !== updated.hasFrontmatter ||
+    current.hasTitle !== updated.hasTitle ||
+    current.hasParent !== updated.hasParent ||
+    !sameWikiRefs(current.bodyRefs, updated.bodyRefs)
+  );
+}
 
 function sameWikiRefs(a, b) {
   if (a.length !== b.length) return false;
@@ -3042,19 +3049,145 @@ function patchBodyOnlyNote(note, updated) {
   note.frontmatterRaw = updated.frontmatterRaw;
   note.frontmatterEntries = updated.frontmatterEntries;
   note.frontmatterValues = updated.frontmatterValues;
-	  note.derivedLevel = updated.derivedLevel;
-	  note.hasFrontmatter = updated.hasFrontmatter;
-	  note.hasTitle = updated.hasTitle;
-	  note.hasParent = updated.hasParent;
-	  note.body = updated.body;
-	  note.bodyRefs = updated.bodyRefs;
-	  note.searchText = updated.searchText;
-	  state.searchIndex = createSearchIndex(state.notes);
-	  updateSearchResults();
-	}
+  note.derivedLevel = updated.derivedLevel;
+  note.hasFrontmatter = updated.hasFrontmatter;
+  note.hasTitle = updated.hasTitle;
+  note.hasParent = updated.hasParent;
+  note.body = updated.body;
+  note.bodyRefs = updated.bodyRefs;
+  note.searchText = updated.searchText;
+  state.searchIndex = createSearchIndex(state.notes);
+  updateSearchResults();
+}
 
-async function createMissingWikiLinkNotes(sourceNote, layoutSnapshot) {
-  const specs = missingWikiLinkNoteSpecs(sourceNote);
+function saveStatusMessage({ createdLinkedNotes = 0, updatedLinkCount = 0 } = {}) {
+  if (createdLinkedNotes > 0) {
+    return `Created ${createdLinkedNotes} linked note${createdLinkedNotes === 1 ? "" : "s"}`;
+  }
+  if (updatedLinkCount > 0) {
+    return `Updated ${updatedLinkCount} wiki link${updatedLinkCount === 1 ? "" : "s"}`;
+  }
+  return "Saved automatically";
+}
+
+async function updateRenamedNoteLinks(previousNote, updatedNote, previousGraphIndex) {
+  if (!previousNote || !updatedNote || previousNote.title === updatedNote.title) return 0;
+  const targetPath = previousNote.path;
+  let updatedLinkCount = 0;
+  const writes = [];
+
+  for (const note of state.notes) {
+    const rewrite = rewriteBodyWikiLinks(note.body, ({ parsed, inner }) => {
+      if (previousGraphIndex?.resolvePath(parsed.ref) !== targetPath) return null;
+      return wikiLinkMarkup(updatedNote.title, wikiAliasFromInner(inner));
+    });
+
+    if (!rewrite.changed) continue;
+    updatedLinkCount += rewrite.count;
+    writes.push({
+      path: note.path,
+      raw: composeRaw(note, rewrite.body, frontmatterValuesForNote(note))
+    });
+  }
+
+  if (!writes.length) return 0;
+  await writeNoteUpdates(writes);
+  rebuildIndex();
+  state.validation = validateNotes();
+  renderSelectedNote();
+  renderNewNoteParents();
+  renderGraph({ preserveView: true });
+  renderValidationStatus();
+  refreshEditorDecorations();
+  saveActiveWorkspaceState();
+  return updatedLinkCount;
+}
+
+async function removeDeletedNoteLinks(deletedNotes, previousGraphIndex) {
+  const deletedByPath = new Map((deletedNotes || []).map((note) => [note.path, note]));
+  let cleanedLinkCount = 0;
+  const writes = [];
+
+  for (const note of state.notes) {
+    const rewrite = rewriteBodyWikiLinks(note.body, ({ parsed }) => {
+      const targetPath = previousGraphIndex?.resolvePath(parsed.ref);
+      if (!deletedByPath.has(targetPath)) return null;
+      return parsed.label || parsed.ref;
+    });
+    const nextParentRef = deletedByPath.has(previousGraphIndex?.parents?.get(note.path))
+      ? null
+      : frontmatterValuesForNote(note).parentRef;
+    const raw = composeRaw(note, rewrite.body, {
+      title: note.title,
+      parentRef: nextParentRef
+    });
+
+    if (raw === note.raw) continue;
+    cleanedLinkCount += rewrite.count;
+    writes.push({ path: note.path, raw });
+  }
+
+  if (writes.length) {
+    await writeNoteUpdates(writes);
+  }
+  return cleanedLinkCount;
+}
+
+async function writeNoteUpdates(writes) {
+  for (const write of writes) {
+    await invokeNative("write_note", {
+      notesPath: state.notesPath,
+      path: write.path,
+      raw: write.raw
+    });
+    replaceNoteInState(parseNote(write.path, write.raw));
+  }
+  state.notes.sort((a, b) => compareText(a.path, b.path));
+}
+
+function rewriteBodyWikiLinks(body, transform) {
+  const original = String(body || "");
+  const masked = replaceFencedCodeWithSpaces(original);
+  const regex = /\[\[([^\]\n]{1,240})\]\]/g;
+  let rewritten = "";
+  let lastIndex = 0;
+  let count = 0;
+  let match;
+
+  while ((match = regex.exec(masked)) !== null) {
+    if (original[match.index - 1] === "!") continue;
+    const originalMarkup = original.slice(match.index, match.index + match[0].length);
+    const inner = original.slice(match.index + 2, match.index + match[0].length - 2);
+    const parsed = parseWikiTarget(inner);
+    const replacement = transform({ parsed, inner, originalMarkup });
+    if (replacement === null || replacement === undefined || replacement === originalMarkup) continue;
+
+    rewritten += original.slice(lastIndex, match.index) + replacement;
+    lastIndex = match.index + match[0].length;
+    count += 1;
+  }
+
+  if (!count) return { body: original, changed: false, count: 0 };
+  return {
+    body: `${rewritten}${original.slice(lastIndex)}`,
+    changed: true,
+    count
+  };
+}
+
+function wikiAliasFromInner(inner) {
+  const parts = String(inner || "").split("|");
+  return parts.length > 1 ? parts.slice(1).join("|").trim() : "";
+}
+
+function wikiLinkMarkup(target, alias = "") {
+  const cleanTarget = String(target || "").trim();
+  const cleanAlias = String(alias || "").trim();
+  return cleanAlias ? `[[${cleanTarget}|${cleanAlias}]]` : `[[${cleanTarget}]]`;
+}
+
+async function createMissingWikiLinkNotes(sourceNote, previousNote, layoutSnapshot) {
+  const specs = missingWikiLinkNoteSpecs(sourceNote, previousNote);
   if (!specs.length) return 0;
 
   const createdPaths = specs.map((spec) => spec.path);
@@ -3094,15 +3227,16 @@ async function createMissingWikiLinkNotes(sourceNote, layoutSnapshot) {
   }
 }
 
-function missingWikiLinkNoteSpecs(sourceNote) {
+function missingWikiLinkNoteSpecs(sourceNote, previousNote) {
   const reservedPaths = new Set(state.notePaths);
   const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
   const seenRefs = new Set();
   const specs = [];
+  const previousRefs = new Set(autoCreateWikiRefs(previousNote ? previousNote.body : "").map((ref) => normalizeKey(ref.ref)));
 
-  for (const ref of sourceNote.bodyRefs || []) {
+  for (const ref of autoCreateWikiRefs(sourceNote.body || "")) {
     const key = normalizeKey(ref.ref);
-    if (!key || seenRefs.has(key)) continue;
+    if (!key || seenRefs.has(key) || previousRefs.has(key)) continue;
     seenRefs.add(key);
     if (resolveWikiNote(ref.ref)) continue;
 
@@ -3120,6 +3254,39 @@ function missingWikiLinkNoteSpecs(sourceNote) {
   }
 
   return specs;
+}
+
+function autoCreateWikiRefs(body) {
+  const text = replaceFencedCodeWithSpaces(String(body || ""));
+  const refs = [];
+  const seen = new Set();
+  const regex = /\[\[([^\]\n]{1,120})\]\]/g;
+  let match;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (text[match.index - 1] === "!") continue;
+    const parsed = parseWikiTarget(match[1]);
+    const key = normalizeKey(parsed.ref);
+    if (!key || seen.has(key) || !isAutoCreatableWikiTarget(parsed.ref)) continue;
+    seen.add(key);
+    refs.push(parsed);
+  }
+
+  return refs;
+}
+
+function replaceFencedCodeWithSpaces(text) {
+  return text.replace(/```[\s\S]*?```/g, (match) => " ".repeat(match.length));
+}
+
+function isAutoCreatableWikiTarget(ref) {
+  const target = String(ref || "").trim();
+  if (!target || target.length > 120) return false;
+  if (target.startsWith("/") || target.startsWith("../") || target.startsWith("./")) return false;
+  if (target.includes("\\") || target.includes("#") || target.includes("`")) return false;
+  if (/^attachments\//i.test(target)) return false;
+  if (/\.(avif|gif|jpe?g|md|mp3|mp4|pdf|png|wav|webm)$/i.test(target)) return false;
+  return true;
 }
 
 function titleFromWikiRef(ref) {
