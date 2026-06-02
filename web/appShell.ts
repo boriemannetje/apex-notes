@@ -522,7 +522,6 @@ function bindEvents() {
   els.noteTitle.addEventListener("keydown", onHeaderNoteTitleKeydown);
   els.noteTitle.addEventListener("paste", onHeaderNoteTitlePaste);
   els.noteInfo.addEventListener("toggle", keepDisabledInfoClosed);
-  els.infoTitle.addEventListener("input", onInfoChanged);
   els.infoParent.addEventListener("change", onInfoChanged);
   els.fullscreenEditorButton.addEventListener("click", toggleEditorFullscreen);
   els.deleteNoteButton.addEventListener("click", deleteSelectedNote);
@@ -812,8 +811,8 @@ function commitHeaderNoteTitle() {
     return;
   }
 
-  els.infoTitle.value = title;
-  els.infoTitle.dispatchEvent(new Event("input", { bubbles: true }));
+  els.noteTitle.textContent = title;
+  markSelectedDirty();
 }
 
 function onHeaderNoteTitleKeydown(event) {
@@ -2752,7 +2751,7 @@ function renderInfoPanel(note) {
   state.infoHydrating = true;
 
   if (!note) {
-    els.infoTitle.value = "";
+    els.notePath.textContent = "";
     els.infoParent.innerHTML = "";
     els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
     els.noteInfo.open = false;
@@ -2760,7 +2759,7 @@ function renderInfoPanel(note) {
     return;
   }
 
-  els.infoTitle.value = note.title;
+  els.notePath.textContent = note.path;
   els.deleteNoteButton.disabled = !canDeleteCurrentSelection();
   renderInfoParents(note);
   state.infoHydrating = false;
@@ -2799,19 +2798,19 @@ function isDescendant(candidate, parent) {
 
 function onInfoChanged() {
   if (state.infoHydrating) return;
-  const note = getSelectedNote();
-  if (note) {
-    els.noteTitle.textContent = els.infoTitle.value.trim() || note.title;
-  }
   markSelectedDirty();
 }
 
 function getInfoValues(note) {
   const parent = state.byPath.get(els.infoParent.value) || null;
   return {
-    title: els.infoTitle.value.trim() || note.title,
+    title: getHeaderTitleValue(note),
     parentRef: parent ? `[[${parent.basename}]]` : null
   };
+}
+
+function getHeaderTitleValue(note) {
+  return normalizeHeaderTitleText(els.noteTitle.textContent) || note.title;
 }
 
 function markSelectedDirty() {
@@ -3244,8 +3243,7 @@ function missingWikiLinkNoteSpecs(sourceNote, previousNote) {
     const path = getAvailableWikiLinkNotePath(ref.ref, title, reservedPaths);
     const raw = createNoteRaw({
       title,
-      parent: null,
-      body: `# ${title}\n`
+      parent: null
     });
 
     reservedPaths.add(path);
@@ -5658,8 +5656,7 @@ async function createLooseGraphNote(title, position) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    parent: null,
-    body: `# ${title}\n`
+    parent: null
   });
 
   try {
@@ -6083,7 +6080,7 @@ async function pasteCopiedNodes(clipboard, point) {
     const raw = createNoteRaw({
       title,
       parent: nextParent,
-      body: source.body || `# ${title}\n`
+      body: source.body || ""
     });
 
     reservedPaths.add(path);
@@ -6501,8 +6498,7 @@ async function createNewNote(event) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    parent,
-    body: `# ${title}\n`
+    parent
   });
   const historyBefore = snapshotWorkspaceForHistory();
   const layoutSnapshot = snapshotGraphPositions();
@@ -6545,8 +6541,7 @@ async function createFirstNote(title, position = getGraphViewportCenter()) {
   const path = getAvailableNewNotePath(title);
   const raw = createNoteRaw({
     title,
-    parent: null,
-    body: `# ${title}\n`
+    parent: null
   });
 
   try {
@@ -6625,7 +6620,6 @@ function updateSourceStatus() {
   els.sourceStatus.title = isFolder ? (state.rootPath || state.workspaceName || "Folder open") : "Open or create a folder to edit notes";
   els.newNoteButton.disabled = !isFolder;
   els.newNoteButton.title = isFolder ? "Create a note in this folder" : "Open or create a folder first";
-  els.infoTitle.disabled = !isFolder || !hasSelection;
   els.infoParent.disabled = !isFolder || !hasSelection;
   els.noteInfo.setAttribute("aria-disabled", String(!isFolder || !hasSelection));
   keepDisabledInfoClosed();

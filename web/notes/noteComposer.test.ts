@@ -38,6 +38,13 @@ test("createNoteRaw creates loose/root notes without schema extras", () => {
   );
 });
 
+test("createNoteRaw starts blank notes without duplicating the title heading", () => {
+  assert.equal(
+    createNoteRaw({ title: "Loose", parent: null }),
+    "---\ntitle: \"Loose\"\nparent: null\n---\n\n"
+  );
+});
+
 test("createNoteRaw creates immediate child frontmatter from parent basename", () => {
   assert.match(
     createNoteRaw({ title: "Child", parent: { basename: "parent-note" } }),
@@ -50,6 +57,7 @@ test("titleFromText and bodyFromText preserve pasted Markdown content", () => {
 
   assert.equal(titleFromText(text), "Pasted Loose");
   assert.equal(bodyFromText(text, "Pasted Loose"), "# Pasted Loose\n\nA loose pasted note.\n");
+  assert.equal(bodyFromText("", "Empty Note"), "");
 });
 
 test("available display titles and filenames avoid collisions deterministically", () => {

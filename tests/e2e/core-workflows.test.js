@@ -66,13 +66,17 @@ test("core Tauri workspace flows keep working", async () => {
   assert.match(createdRaw, /title: "Grandchild"/);
   assert.doesNotMatch(createdRaw, /\nlevel:/);
   assert.match(createdRaw, /parent: "\[\[child\]\]"/);
+  assert.doesNotMatch(createdRaw, /\n# Grandchild\n/);
   assert.equal(await textContent(page, "#editorStatus"), "Note created");
 
+  assert.equal(await page.locator("#infoTitle").count(), 0);
+  await renameSelectedNoteTitle(page, "Renamed Grandchild");
   await page.locator("#noteInfo summary").click();
-  await page.locator("#infoTitle").fill("Renamed Grandchild");
   await page.locator("#infoParent").selectOption("root.md");
-  await page.waitForFunction(() => window.__apexTestState.calls.some(
-    (call) => call.command === "write_note" && call.args.path === "grandchild.md"
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "grandchild.md" &&
+      note.raw.includes('title: "Renamed Grandchild"') &&
+      note.raw.includes('parent: "[[root]]"')
   ));
 
   const renamedRaw = await noteRaw(page, "grandchild.md");
@@ -220,8 +224,7 @@ test("renaming a note updates body wiki links that point to it", async () => {
   await page.locator("[data-search-result-path='child.md']").click();
   await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
 
-  await page.locator("#noteInfo summary").click();
-  await page.locator("#infoTitle").fill("Renamed Child");
+  await renameSelectedNoteTitle(page, "Renamed Child");
   await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
     (note) => note.path === "root.md" && note.raw.includes("[[Renamed Child]]")
   ));
@@ -282,6 +285,7 @@ test("typing a missing wiki link in the editor creates a loose graph note", asyn
   assert.match(linkedRaw, /title: "New Linked Note"/);
   assert.doesNotMatch(linkedRaw, /\nlevel:/);
   assert.match(linkedRaw, /parent: null/);
+  assert.doesNotMatch(linkedRaw, /\n# New Linked Note\n/);
   assert.equal(await textContent(page, "#notePath"), "child.md");
   await assertGraphNode(page, "new-linked-note.md");
 
@@ -802,6 +806,14 @@ async function noteRaw(page, path) {
     const note = window.__apexTestState.workspace.notes.find((item) => item.path === notePath);
     return note?.raw || "";
   }, path);
+}
+
+async function renameSelectedNoteTitle(page, title) {
+  await page.locator("#noteTitle").evaluate((element, nextTitle) => {
+    element.focus();
+    element.textContent = nextTitle;
+    element.dispatchEvent(new Event("blur"));
+  }, title);
 }
 
 async function textContent(page, selector) {

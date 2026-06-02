@@ -37,7 +37,7 @@ export function createNoteRaw({
     parent ? `parent: "[[${parent.basename}]]"` : "parent: null",
     "---",
     "",
-    body || `# ${title}\n`
+    body ?? ""
   ].join("\n");
 }
 
@@ -89,10 +89,10 @@ export function cleanTitleText(text: string, fallback: string): string {
   return title || fallback;
 }
 
-export function bodyFromText(text: string, title: string): string {
+export function bodyFromText(text: string, _title: string): string {
   const parsed = splitMarkdown(text);
   const body = (parsed.hasFrontmatter ? parsed.body : text).trim();
-  return body ? `${body}\n` : `# ${title}\n`;
+  return body ? `${body}\n` : "";
 }
 
 export function escapeYaml(value: string): string {
