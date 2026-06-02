@@ -67,6 +67,8 @@ test("core Tauri workspace flows keep working", async () => {
   assert.doesNotMatch(createdRaw, /\nlevel:/);
   assert.match(createdRaw, /parent: "\[\[child\]\]"/);
   assert.doesNotMatch(createdRaw, /\n# Grandchild\n/);
+  await page.locator(".cm-placeholder").waitFor();
+  assert.equal(await textContent(page, ".cm-placeholder"), "Write down your thoughts...");
   assert.equal(await textContent(page, "#editorStatus"), "Note created");
 
   assert.equal(await page.locator("#infoTitle").count(), 0);

@@ -3,7 +3,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoEdito
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap } from "@codemirror/view";
+import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap, placeholder } from "@codemirror/view";
 import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
@@ -120,8 +120,10 @@ const POSITIONING_OPTIONS = {
   precision: 2
 };
 const PERF_ENABLED = isPerfEnabled();
+const EMPTY_NOTE_PLACEHOLDER = "Write down your thoughts...";
 
 const editorEditable = new Compartment();
+const editorPlaceholder = new Compartment();
 const wikiLinkRefreshEffect = StateEffect.define();
 
 const state = createWorkspaceStore(loadRecentProjects());
@@ -257,6 +259,7 @@ function initializeEditor() {
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         wikiLinkField,
         editorEditable.of(EditorView.editable.of(false)),
+        editorPlaceholder.of([]),
         EditorView.updateListener.of((update) => {
           if (!update.docChanged || state.editorHydrating) return;
           markSelectedDirty();
@@ -2680,6 +2683,7 @@ function renderGraphSelectionSummary(statusMessage) {
   els.noteTitle.textContent = `${count} note${count === 1 ? "" : "s"} selected`;
   const onlyPath = count === 1 ? [...state.selectedPaths][0] : "";
   els.notePath.textContent = onlyPath || "";
+  setEditorPlaceholder(false);
   setEditorBody("");
   renderInfoPanel(null);
   setStatus(statusMessage || selectionStatus(count));
@@ -2707,6 +2711,7 @@ function renderSelectedNote(statusMessage) {
   if (!note) {
     els.noteTitle.textContent = "Select a note";
     els.notePath.textContent = "";
+    setEditorPlaceholder(false);
     setEditorBody("");
     renderInfoPanel(null);
     setStatus(statusMessage || "Select a note");
@@ -2715,6 +2720,7 @@ function renderSelectedNote(statusMessage) {
 
   els.noteTitle.textContent = note.title;
   els.notePath.textContent = note.path;
+  setEditorPlaceholder(true);
   setEditorBody(note.body);
   renderInfoPanel(note);
   setStatus(statusMessage);
@@ -2745,6 +2751,13 @@ function getEditorBody() {
 function refreshEditorDecorations() {
   if (!state.editorView) return;
   state.editorView.dispatch({ effects: wikiLinkRefreshEffect.of(null) });
+}
+
+function setEditorPlaceholder(isVisible) {
+  if (!state.editorView) return;
+  state.editorView.dispatch({
+    effects: editorPlaceholder.reconfigure(isVisible ? placeholder(EMPTY_NOTE_PLACEHOLDER) : [])
+  });
 }
 
 function renderInfoPanel(note) {
