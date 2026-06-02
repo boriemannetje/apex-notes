@@ -290,6 +290,11 @@ test("typing a missing wiki link in the editor creates a loose graph note", asyn
   assert.doesNotMatch(linkedRaw, /\n# New Linked Note\n/);
   assert.equal(await textContent(page, "#notePath"), "child.md");
   await assertGraphNode(page, "new-linked-note.md");
+  const positions = await page.evaluate(() => window.__apexTestState.workspace.positions);
+  assert(positions["child.md"]);
+  assert(positions["new-linked-note.md"]);
+  assert.equal(Math.round(positions["new-linked-note.md"].x - positions["child.md"].x), 168);
+  assert.equal(Math.round(positions["new-linked-note.md"].y - positions["child.md"].y), 0);
 
   await page.close();
 });

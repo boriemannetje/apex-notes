@@ -3223,7 +3223,7 @@ async function createMissingWikiLinkNotes(sourceNote, previousNote, layoutSnapsh
     rebuildIndex();
     state.validation = validateNotes();
     state.manualPositions = pruneStoredPositions(state.manualPositions);
-    seedAddedNotePositions(createdPaths, layoutSnapshot);
+    seedLinkedNotePositions(createdPaths, sourceNote.path, layoutSnapshot);
     await updateManifestFile();
     renderNewNoteParents();
     renderGraph({ preserveView: true });
@@ -3921,19 +3921,7 @@ function seedAddedNotePositions(paths, layoutSnapshot = new Map()) {
   const addedPaths = paths instanceof Set ? [...paths] : [...(paths || [])];
   if (!addedPaths.length) return;
 
-  const occupied = new Map();
-  for (const [path, position] of layoutSnapshot.entries()) {
-    if (state.notePaths.has(path)) {
-      occupied.set(path, absolutePosition(position));
-    }
-  }
-
-  for (const [path, stored] of Object.entries(state.manualPositions)) {
-    const resolved = resolveStoredPosition(path, stored, state.autoPositions);
-    if (resolved && state.notePaths.has(path)) {
-      occupied.set(path, absolutePosition(resolved));
-    }
-  }
+  const occupied = occupiedPositionsFromSnapshot(layoutSnapshot);
 
   const sortedAddedPaths = addedPaths
     .filter((path) => state.notePaths.has(path))
@@ -3968,6 +3956,107 @@ function seedAddedNotePositions(paths, layoutSnapshot = new Map()) {
     state.manualPositions[path] = position;
     occupied.set(path, position);
   }
+}
+
+function seedLinkedNotePositions(paths, sourcePath, layoutSnapshot = new Map()) {
+  const addedPaths = (paths instanceof Set ? [...paths] : [...(paths || [])])
+    .filter((path) => state.notePaths.has(path))
+    .sort(compareText);
+  if (!addedPaths.length) return;
+
+  const occupied = occupiedPositionsFromSnapshot(layoutSnapshot);
+  const sourcePosition = occupied.get(sourcePath);
+  if (!sourcePosition) {
+    seedAddedNotePositions(addedPaths, layoutSnapshot);
+    return;
+  }
+
+  for (let index = 0; index < addedPaths.length; index += 1) {
+    const path = addedPaths[index];
+    if (occupied.has(path)) continue;
+    const position = nearestOpenLinkedNotePosition(
+      linkedNoteBasePosition(sourcePosition, index, addedPaths.length),
+      occupied
+    );
+    state.manualPositions[path] = position;
+    occupied.set(path, position);
+  }
+}
+
+function occupiedPositionsFromSnapshot(layoutSnapshot = new Map()) {
+  const occupied = new Map();
+  for (const [path, position] of layoutSnapshot.entries()) {
+    if (state.notePaths.has(path)) {
+      occupied.set(path, absolutePosition(position));
+    }
+  }
+
+  for (const [path, stored] of Object.entries(state.manualPositions)) {
+    const resolved = resolveStoredPosition(path, stored, state.autoPositions);
+    if (resolved && state.notePaths.has(path)) {
+      occupied.set(path, absolutePosition(resolved));
+    }
+  }
+
+  return occupied;
+}
+
+function linkedNoteBasePosition(sourcePosition, index, count) {
+  const columns = Math.max(1, Math.ceil(Math.sqrt(count)));
+  const row = Math.floor(index / columns);
+  const column = index % columns;
+  return absolutePosition({
+    x: sourcePosition.x + POSITIONING_OPTIONS.looseMarginX / 2 + column * POSITIONING_OPTIONS.looseGapX,
+    y: sourcePosition.y + row * POSITIONING_OPTIONS.looseGapY
+  });
+}
+
+function nearestOpenLinkedNotePosition(base, occupied) {
+  if (!hasPositionCollision(base, occupied)) return base;
+
+  const stepX = POSITIONING_OPTIONS.collisionGap;
+  const stepY = Math.min(POSITIONING_OPTIONS.levelGap, POSITIONING_OPTIONS.collisionGap);
+  const limit = Math.max(8, occupied.size + 2);
+
+  for (let radius = 1; radius <= limit; radius += 1) {
+    for (const candidate of linkedNoteCandidatePositions(base, radius, stepX, stepY)) {
+      if (!hasPositionCollision(candidate, occupied)) return candidate;
+    }
+  }
+
+  return absolutePosition({
+    x: base.x + (limit + 1) * stepX,
+    y: base.y
+  });
+}
+
+function linkedNoteCandidatePositions(base, radius, stepX, stepY) {
+  const x = radius * stepX;
+  const y = radius * stepY;
+  return [
+    { x: base.x + x, y: base.y },
+    { x: base.x, y: base.y + y },
+    { x: base.x, y: base.y - y },
+    { x: base.x + x, y: base.y + y },
+    { x: base.x + x, y: base.y - y },
+    { x: base.x - x, y: base.y + y },
+    { x: base.x - x, y: base.y - y },
+    { x: base.x - x, y: base.y }
+  ].map(absolutePosition);
+}
+
+function hasPositionCollision(candidate, occupied) {
+  const gapX = POSITIONING_OPTIONS.collisionGap;
+  const gapY = Math.min(POSITIONING_OPTIONS.levelGap, POSITIONING_OPTIONS.collisionGap);
+  for (const position of occupied.values()) {
+    if (
+      Math.abs(position.x - candidate.x) < gapX &&
+      Math.abs(position.y - candidate.y) < gapY
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function positionForAddedNote(note, occupied) {
