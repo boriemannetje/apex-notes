@@ -5,6 +5,8 @@ If this file is sent to you, the user wants to manually test the native Apex Not
 1. Check the repo state first.
    - Run `git status --short --branch`.
    - If the working tree contains unrelated local note edits, do not stage or overwrite them. Build from a clean temporary worktree at the current branch HEAD instead.
+   - After creating a temporary worktree, `cd` into it or set the command working directory to that path before running install or package commands.
+   - Confirm `git rev-parse --show-toplevel` prints the temporary worktree path, not the original dirty checkout.
 
 2. Close old running copies.
    - Quit `Apex Notes` if it is running.
