@@ -12,6 +12,9 @@ export function validateNotes(notes, graphIndex, byPath) {
       issues.push({ type: "frontmatter", note, message: `${note.title} is missing a title` });
     }
 
+    if (!note.hasParent) {
+      issues.push({ type: "frontmatter", note, message: `${note.title} is missing a parent` });
+    }
   }
 
   if (graphIndex) {

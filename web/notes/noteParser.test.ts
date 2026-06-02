@@ -43,6 +43,7 @@ test("parseNote parses title, parent, refs, aliases, search text, and ignores le
   assert.equal(note.parentRef, "[[parent]]");
   assert.equal(note.hasFrontmatter, true);
   assert.equal(note.hasTitle, true);
+  assert.equal(note.hasParent, true);
   assert.equal(note.frontmatterValues.level, "99");
   assert.deepEqual(note.bodyRefs.map((ref) => ref.ref), ["Sibling", "Other"]);
   assert.ok(note.keys.includes("child note"));
@@ -57,6 +58,7 @@ test("parseNote falls back to heading/path for loose malformed notes", () => {
   assert.equal(note.parentRef, null);
   assert.equal(note.hasFrontmatter, false);
   assert.equal(note.hasTitle, false);
+  assert.equal(note.hasParent, false);
 });
 
 test("stripQuotes only removes matching outer quote pairs", () => {

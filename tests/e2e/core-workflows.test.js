@@ -209,6 +209,37 @@ test("editor command z and command y undo and redo text edits", async () => {
   await page.close();
 });
 
+test("typing a missing wiki link in the editor creates a loose graph note", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  await page.locator("#searchInput").fill("child");
+  await page.locator("[data-search-result-path='child.md']").click();
+  await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
+  await page.locator("#searchInput").fill("");
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("\n[[New Linked Note]]");
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.some(
+    (note) => note.path === "new-linked-note.md"
+  ));
+  await page.waitForFunction(() => document.querySelector("#editorStatus")?.textContent === "Created 1 linked note");
+
+  const childRaw = await noteRaw(page, "child.md");
+  const linkedRaw = await noteRaw(page, "new-linked-note.md");
+  assert.match(childRaw, /\[\[New Linked Note\]\]/);
+  assert.match(linkedRaw, /title: "New Linked Note"/);
+  assert.doesNotMatch(linkedRaw, /\nlevel:/);
+  assert.match(linkedRaw, /parent: null/);
+  assert.equal(await textContent(page, "#notePath"), "child.md");
+  await assertGraphNode(page, "new-linked-note.md");
+
+  await page.close();
+});
+
 test("main-production update button appears and invokes native update install", async () => {
   const page = await newMockedTauriPage(sampleWorkspace(), {
     holdInstallUpdate: true,

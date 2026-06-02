@@ -1,3 +1,8 @@
+---
+title: "Supporting Media In Apex Notes"
+parent: "[[device-support-roadmap-nailing-mac-first]]"
+---
+
 # Supporting Media In Apex Notes
 
 Apex Notes can launch without media support. The core product is a local-first Markdown hierarchy tool: Markdown notes are graph nodes, frontmatter defines hierarchy, and body links add contextual references. Media support should preserve that model instead of becoming a second graph or schema layer.
@@ -39,8 +44,8 @@ Important existing constraints to preserve:
 - Note files are `.md` files.
 - `manifest.json` lists Markdown note paths only.
 - `layout.json` stores graph positions keyed by note path.
-- Frontmatter uses only `title` and `parent`.
-- Graph hierarchy and depth are derived from `parent`.
+- Frontmatter uses only `title`, `level`, and `parent`.
+- Graph hierarchy is derived from `parent`.
 - Solid, semi-transparent contextual graph edges are derived from body wiki links to notes.
 - Native filesystem commands already guard against traversal and symlink escapes for note paths.
 
@@ -127,7 +132,7 @@ parent: null
 ---
 ```
 
-No new schema fields should be added for media. Legacy `level` fields are ignored by the app and may be removed when a note is rewritten.
+No new schema fields should be added for media.
 
 Rejected examples:
 

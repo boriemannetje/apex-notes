@@ -11,7 +11,7 @@ import {
   titleFromText
 } from "./noteComposer.ts";
 
-test("composeRaw writes canonical title and parent frontmatter and removes legacy level", () => {
+test("composeRaw writes canonical title and parent frontmatter and removes schema extras", () => {
   const raw = composeRaw(
     {
       frontmatterEntries: [
@@ -27,7 +27,7 @@ test("composeRaw writes canonical title and parent frontmatter and removes legac
 
   assert.equal(
     raw,
-    "---\ntitle: \"New \\\"Title\\\"\"\nparent: \"[[parent-note]]\"\ncustom: keep-me\n---\n\n# Body\n"
+    "---\ntitle: \"New \\\"Title\\\"\"\nparent: \"[[parent-note]]\"\n---\n\n# Body\n"
   );
 });
 

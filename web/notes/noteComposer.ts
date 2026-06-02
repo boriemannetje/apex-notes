@@ -1,9 +1,7 @@
 import { normalizeKey, slugify } from "../noteRefs.ts";
-import { parseFrontmatter, splitMarkdown, type FrontmatterEntry } from "./noteParser.ts";
+import { parseFrontmatter, splitMarkdown } from "./noteParser.ts";
 
-interface ComposeNote {
-  frontmatterEntries?: FrontmatterEntry[];
-}
+type ComposeNote = object;
 
 interface ComposeValues {
   title: string;
@@ -14,17 +12,11 @@ interface NoteParent {
   basename: string;
 }
 
-export function composeRaw(note: ComposeNote, body: string, values: ComposeValues): string {
-  const knownKeys = new Set(["title", "level", "parent", "group"]);
+export function composeRaw(_note: ComposeNote, body: string, values: ComposeValues): string {
   const lines = [
     `title: "${escapeYaml(values.title)}"`,
     values.parentRef ? `parent: "${escapeYaml(values.parentRef)}"` : "parent: null"
   ];
-
-  for (const entry of note.frontmatterEntries || []) {
-    if (!entry.key || knownKeys.has(entry.key)) continue;
-    lines.push(...entry.lines);
-  }
 
   const cleanBody = body || "";
   return `---\n${lines.join("\n")}\n---\n\n${cleanBody}${cleanBody.endsWith("\n") ? "" : "\n"}`;

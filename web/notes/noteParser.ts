@@ -25,6 +25,7 @@ export interface ParsedNote {
   derivedLevel: number | null;
   hasFrontmatter: boolean;
   hasTitle: boolean;
+  hasParent: boolean;
   parentRef: string | null;
   raw: string;
   frontmatterRaw: string;
@@ -60,6 +61,7 @@ export function parseNote(path: string, raw: string): ParsedNote {
     derivedLevel: null,
     hasFrontmatter: parsed.hasFrontmatter,
     hasTitle: Object.prototype.hasOwnProperty.call(frontmatter.values, "title"),
+    hasParent: Object.prototype.hasOwnProperty.call(frontmatter.values, "parent"),
     parentRef: frontmatter.values.parent || null,
     raw,
     frontmatterRaw: parsed.frontmatterRaw,

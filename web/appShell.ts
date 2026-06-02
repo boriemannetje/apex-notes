@@ -2439,11 +2439,11 @@ function rebuildAliasLookup(graphIndex) {
 function isHierarchyComplete(notes) {
   if (!notes.length) return true;
 
-  for (const note of notes) {
-    if (!note.hasFrontmatter || !note.hasTitle) {
-      return false;
-    }
-  }
+	for (const note of notes) {
+	  if (!note.hasFrontmatter || !note.hasTitle || !note.hasParent) {
+	    return false;
+	  }
+	}
 
   if (state.graphIndex && state.graphIndex.validation.length) {
     return false;
@@ -2453,7 +2453,7 @@ function isHierarchyComplete(notes) {
 }
 
 function isValidApex(note) {
-  if (!note || !note.hasFrontmatter || !note.hasTitle || cleanWikiRef(note.parentRef)) return false;
+  if (!note || !note.hasFrontmatter || !note.hasTitle || !note.hasParent || cleanWikiRef(note.parentRef)) return false;
   if (state.graphIndex && state.graphIndex.derivedLevels.has(note.path)) {
     return state.graphIndex.derivedLevels.get(note.path) === 0;
   }
@@ -2490,9 +2490,10 @@ function isIncompleteHierarchyNote(note) {
   return Boolean(
     note &&
     (
-      !note.hasFrontmatter ||
-      !note.hasTitle ||
-      !hasUsableHierarchySlot(note)
+	      !note.hasFrontmatter ||
+	      !note.hasTitle ||
+	      !note.hasParent ||
+	      !hasUsableHierarchySlot(note)
     )
   );
 }
@@ -2513,10 +2514,11 @@ function countParentlessHierarchyNotes() {
 
 function isValidParentlessHierarchyNote(note) {
   return Boolean(
-    note &&
-    note.hasFrontmatter &&
-    note.hasTitle &&
-    Number.isFinite(note.level) &&
+	    note &&
+	    note.hasFrontmatter &&
+	    note.hasTitle &&
+	    note.hasParent &&
+	    Number.isFinite(note.level) &&
     !cleanWikiRef(note.parentRef)
   );
 }
@@ -2981,11 +2983,11 @@ async function autosaveSelectedNote() {
     const needsFullRefresh = noteNeedsFullRefresh(note, updated);
     state.dirty = false;
 
-    if (needsFullRefresh) {
-      const index = state.notes.findIndex((item) => item.path === path);
-      if (index !== -1) {
-        state.notes.splice(index, 1, updated);
-      }
+	    if (needsFullRefresh) {
+	      const index = state.notes.findIndex((item) => item.path === path);
+	      if (index !== -1) {
+	        state.notes.splice(index, 1, updated);
+	      }
 
       rebuildIndex();
       state.validation = validateNotes();
@@ -2999,29 +3001,33 @@ async function autosaveSelectedNote() {
       renderGraph({ preserveView: true });
       void savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot)));
       renderValidationStatus();
-    } else {
-      patchBodyOnlyNote(note, updated);
-    }
+	    } else {
+	      patchBodyOnlyNote(note, updated);
+	    }
 
-    updateSourceStatus();
-    recordWorkspaceHistory("note edit", historyBefore);
-    setStatus("Saved automatically");
-  } catch (error) {
-    state.dirty = true;
-    setStatus("Autosave failed");
-    console.error(error);
-  }
+	    const createdLinkedNotes = await createMissingWikiLinkNotes(updated, layoutSnapshot);
+	    updateSourceStatus();
+	    recordWorkspaceHistory("note edit", historyBefore);
+	    setStatus(createdLinkedNotes > 0
+	      ? `Created ${createdLinkedNotes} linked note${createdLinkedNotes === 1 ? "" : "s"}`
+	      : "Saved automatically");
+	  } catch (error) {
+	    state.dirty = true;
+	    setStatus("Autosave failed");
+	    console.error(error);
+	  }
 }
 
 function noteNeedsFullRefresh(current, updated) {
   return (
     current.title !== updated.title ||
-    current.parentRef !== updated.parentRef ||
-    current.hasFrontmatter !== updated.hasFrontmatter ||
-    current.hasTitle !== updated.hasTitle ||
-    !sameWikiRefs(current.bodyRefs, updated.bodyRefs)
-  );
-}
+	    current.parentRef !== updated.parentRef ||
+	    current.hasFrontmatter !== updated.hasFrontmatter ||
+	    current.hasTitle !== updated.hasTitle ||
+	    current.hasParent !== updated.hasParent ||
+	    !sameWikiRefs(current.bodyRefs, updated.bodyRefs)
+	  );
+	}
 
 function sameWikiRefs(a, b) {
   if (a.length !== b.length) return false;
@@ -3036,14 +3042,131 @@ function patchBodyOnlyNote(note, updated) {
   note.frontmatterRaw = updated.frontmatterRaw;
   note.frontmatterEntries = updated.frontmatterEntries;
   note.frontmatterValues = updated.frontmatterValues;
-  note.derivedLevel = updated.derivedLevel;
-  note.hasFrontmatter = updated.hasFrontmatter;
-  note.hasTitle = updated.hasTitle;
-  note.body = updated.body;
-  note.bodyRefs = updated.bodyRefs;
-  note.searchText = updated.searchText;
-  state.searchIndex = createSearchIndex(state.notes);
-  updateSearchResults();
+	  note.derivedLevel = updated.derivedLevel;
+	  note.hasFrontmatter = updated.hasFrontmatter;
+	  note.hasTitle = updated.hasTitle;
+	  note.hasParent = updated.hasParent;
+	  note.body = updated.body;
+	  note.bodyRefs = updated.bodyRefs;
+	  note.searchText = updated.searchText;
+	  state.searchIndex = createSearchIndex(state.notes);
+	  updateSearchResults();
+	}
+
+async function createMissingWikiLinkNotes(sourceNote, layoutSnapshot) {
+  const specs = missingWikiLinkNoteSpecs(sourceNote);
+  if (!specs.length) return 0;
+
+  const createdPaths = specs.map((spec) => spec.path);
+
+  try {
+    await invokeNative("create_notes", {
+      notesPath: state.notesPath,
+      notes: specs.map((spec) => ({
+        path: spec.path,
+        raw: spec.raw
+      }))
+    });
+
+    for (const spec of specs) {
+      state.notes.push(parseNote(spec.path, spec.raw));
+    }
+
+    state.notes.sort((a, b) => compareText(a.path, b.path));
+    state.selectedPath = sourceNote.path;
+    state.selectedPaths = new Set([sourceNote.path]);
+    rebuildIndex();
+    state.validation = validateNotes();
+    state.manualPositions = pruneStoredPositions(state.manualPositions);
+    seedAddedNotePositions(createdPaths, layoutSnapshot);
+    await updateManifestFile();
+    renderNewNoteParents();
+    renderGraph({ preserveView: true });
+    await savePositionPatch(positionPatchForPaths(layoutPathsFromSnapshot(layoutSnapshot, createdPaths)));
+    renderValidationStatus();
+    refreshEditorDecorations();
+    saveActiveWorkspaceState();
+    return createdPaths.length;
+  } catch (error) {
+    setStatus("Could not create linked note");
+    console.error(error);
+    return 0;
+  }
+}
+
+function missingWikiLinkNoteSpecs(sourceNote) {
+  const reservedPaths = new Set(state.notePaths);
+  const reservedTitles = new Set(state.notes.map((note) => normalizeKey(note.title)));
+  const seenRefs = new Set();
+  const specs = [];
+
+  for (const ref of sourceNote.bodyRefs || []) {
+    const key = normalizeKey(ref.ref);
+    if (!key || seenRefs.has(key)) continue;
+    seenRefs.add(key);
+    if (resolveWikiNote(ref.ref)) continue;
+
+    const title = getAvailableDisplayTitle(titleFromWikiRef(ref.ref), reservedTitles);
+    const path = getAvailableWikiLinkNotePath(ref.ref, title, reservedPaths);
+    const raw = createNoteRaw({
+      title,
+      parent: null,
+      body: `# ${title}\n`
+    });
+
+    reservedPaths.add(path);
+    reservedTitles.add(normalizeKey(title));
+    specs.push({ path, raw });
+  }
+
+  return specs;
+}
+
+function titleFromWikiRef(ref) {
+  const target = String(ref || "")
+    .replace(/^notes\//i, "")
+    .replace(/\.md$/i, "")
+    .split("/")
+    .pop();
+  return String(target || "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() || "Untitled note";
+}
+
+function getAvailableWikiLinkNotePath(ref, title, reservedPaths) {
+  const candidate = markdownPathFromWikiRef(ref);
+  if (candidate) return getAvailableMarkdownPath(candidate, reservedPaths);
+  return getAvailableNewNotePath(title, reservedPaths);
+}
+
+function markdownPathFromWikiRef(ref) {
+  const clean = String(ref || "")
+    .replace(/^notes\//i, "")
+    .replace(/\.md$/i, "")
+    .trim();
+  if (!clean || clean.startsWith("/") || clean.includes("\\")) return "";
+
+  const rawSegments = clean.split("/");
+  if (rawSegments.some((segment) => !segment || segment === "." || segment === "..")) return "";
+
+  const segments = rawSegments.map((segment) => slugify(segment)).filter(Boolean);
+  return segments.length ? `${segments.join("/")}.md` : "";
+}
+
+function getAvailableMarkdownPath(candidate, reservedPaths) {
+  const existing = new Set([...reservedPaths].map((path) => path.toLowerCase()));
+  const normalized = String(candidate || "").replace(/^notes\//i, "").replace(/\.md$/i, "");
+  const parts = normalized.split("/");
+  const stem = parts.pop() || "untitled";
+  const directory = parts.length ? `${parts.join("/")}/` : "";
+  let suffix = 0;
+
+  while (true) {
+    const path = `${directory}${stem}${suffix ? `-${suffix + 1}` : ""}.md`;
+    if (!existing.has(path.toLowerCase())) return path;
+    suffix += 1;
+  }
 }
 
 function renderGraph({ preserveView } = { preserveView: true }) {
