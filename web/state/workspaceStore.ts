@@ -1,4 +1,16 @@
-export function createWorkspaceStore(recentProjects = []) {
+export interface WorkspaceView {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+export interface RecentProjectLike {
+  [key: string]: unknown;
+}
+
+export function createWorkspaceStore<TRecentProject = RecentProjectLike>(
+  recentProjects: TRecentProject[] = []
+) {
   return {
     workspaces: [],
     recentProjects,
@@ -21,6 +33,8 @@ export function createWorkspaceStore(recentProjects = []) {
     notesPath: "",
     source: "none",
     workspaceName: "",
+    workspaceMetrics: null,
+    searchIndexMode: "full",
     dirty: false,
     saveTimer: null,
     saveToken: 0,
@@ -77,7 +91,7 @@ export function createWorkspaceStore(recentProjects = []) {
       x: 0,
       y: 0,
       scale: 1
-    },
+    } satisfies WorkspaceView,
     activeInteraction: null,
     interactionFrame: 0,
     queuedInteractionEvent: null,
@@ -90,6 +104,7 @@ export function createWorkspaceStore(recentProjects = []) {
     workspaceRenameDraft: "",
     editorPaneWidth: null,
     editorResizeDrag: null,
+    graphResizeObserver: null,
     appUpdate: null,
     appUpdateCheckTimer: 0,
     appUpdateCheckInFlight: false,

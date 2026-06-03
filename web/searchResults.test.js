@@ -44,6 +44,60 @@ test("empty search browses notes alphabetically", () => {
   ]);
 });
 
+test("search index defaults include body content", () => {
+  const notes = [
+    note("alpha.md", "Alpha", "quiet body with citrine marker"),
+    note("beta.md", "Beta", "ordinary body text")
+  ];
+  const results = new SearchIndex(notes).search("citrine", {
+    includeTrigramFallback: false
+  });
+
+  assert.equal(results[0].path, "alpha.md");
+});
+
+test("search index can skip body-derived fields", () => {
+  const notes = [
+    note("alpha.md", "Alpha", "quiet body with jasper marker")
+  ];
+  const index = new SearchIndex(notes, { includeBody: false });
+  const doc = index.byPath.get("alpha.md");
+
+  assert.equal(doc.fields.body, undefined);
+  assert.equal(doc.fields.searchText, undefined);
+  assert.deepEqual(index.search("jasper", { includeTrigramFallback: false }), []);
+  assert.equal(index.search("alpha", { includeTrigramFallback: false })[0].path, "alpha.md");
+});
+
+test("ranked search respects title-path-only reduced mode", () => {
+  const notes = [
+    note("alpha.md", "Alpha", "quiet body with amber marker")
+  ];
+  const index = new SearchIndex(notes, { includeBody: false });
+
+  assert.deepEqual(
+    buildSearchResults(notes, index, "amber", { includeBody: false }),
+    []
+  );
+  assert.equal(
+    buildSearchResults(notes, index, "alpha", { includeBody: false })[0].path,
+    "alpha.md"
+  );
+});
+
+test("search index can skip trigram indexing", () => {
+  const notes = [
+    note("alpha.md", "Alpha", "quiet body with topaz marker")
+  ];
+  const index = new SearchIndex(notes, { includeTrigrams: false });
+  const doc = index.byPath.get("alpha.md");
+
+  assert.equal(index.trigramIndex.size, 0);
+  assert.equal(doc.trigrams.size, 0);
+  assert.deepEqual(index.trigramSearch("topaz"), []);
+  assert.equal(index.search("topaz")[0].path, "alpha.md");
+});
+
 function note(path, title, body) {
   return {
     path,

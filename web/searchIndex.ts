@@ -1,5 +1,75 @@
-// @ts-nocheck
-const DEFAULT_FIELD_WEIGHTS = {
+type SearchNoteObject = {
+  path?: unknown;
+  id?: unknown;
+  title?: unknown;
+  searchText?: unknown;
+  body?: unknown;
+  content?: unknown;
+  text?: unknown;
+  markdown?: unknown;
+};
+
+type SearchNote = string | SearchNoteObject;
+type SearchNoteCollection = Iterable<SearchNote> | SearchNote[];
+type SearchFields = Record<string, string>;
+type FieldWeights = Record<string, number>;
+
+export interface SearchIndexOptions {
+  fieldWeights?: Partial<FieldWeights>;
+  k1?: number;
+  b?: number;
+  includeBody?: boolean;
+  includeTrigrams?: boolean;
+}
+
+interface ResolvedSearchIndexOptions {
+  fieldWeights: FieldWeights;
+  k1: number;
+  b: number;
+  includeBody: boolean;
+  includeTrigrams: boolean;
+}
+
+export interface SearchQueryOptions {
+  limit?: number;
+  minScore?: number;
+  includeTrigramFallback?: boolean;
+  minTrigramScore?: number;
+  alwaysIncludeTrigram?: boolean;
+  trigramLimit?: number;
+}
+
+export interface SearchResult {
+  path: string;
+  title: string;
+  note: SearchNote;
+  score: number;
+  bm25Score: number;
+  trigramScore: number;
+  matchedTerms: string[];
+  matchedTrigrams: string[];
+}
+
+interface SearchDocument {
+  id: number;
+  path: string;
+  title: string;
+  note: SearchNote;
+  fields: SearchFields;
+  length: number;
+  termCounts: Map<string, number>;
+  trigrams: Set<string>;
+}
+
+interface FormatResultOptions {
+  limit: number;
+  minScore: number;
+  matchedTerms?: Map<number, string[]>;
+  matchedTrigrams?: Map<number, string[]>;
+  scoreKind: "bm25" | "trigram";
+}
+
+const DEFAULT_FIELD_WEIGHTS: FieldWeights = {
   title: 3,
   path: 1.4,
   body: 1,
@@ -12,17 +82,26 @@ const MIN_TOKEN_LENGTH = 2;
 const MIN_TRIGRAM_SOURCE_LENGTH = 3;
 
 export class SearchIndex {
-  constructor(notes = [], options = {}) {
+  options: ResolvedSearchIndexOptions;
+  documents: SearchDocument[] = [];
+  byPath: Map<string, SearchDocument> = new Map();
+  inverted: Map<string, Map<number, number>> = new Map();
+  trigramIndex: Map<string, Set<number>> = new Map();
+  documentFrequency: Map<string, number> = new Map();
+  averageLength = 0;
+
+  constructor(notes: SearchNoteCollection | null | undefined = [], options: SearchIndexOptions = {}) {
     this.options = {
       fieldWeights: { ...DEFAULT_FIELD_WEIGHTS, ...(options.fieldWeights || {}) },
       k1: finiteNumber(options.k1, DEFAULT_BM25_K1),
       b: finiteNumber(options.b, DEFAULT_BM25_B),
-      includeBody: options.includeBody !== false
+      includeBody: options.includeBody !== false,
+      includeTrigrams: options.includeTrigrams !== false
     };
     this.rebuild(notes);
   }
 
-  rebuild(notes = []) {
+  rebuild(notes: SearchNoteCollection | null | undefined = []): this {
     this.documents = [];
     this.byPath = new Map();
     this.inverted = new Map();
@@ -30,8 +109,8 @@ export class SearchIndex {
     this.documentFrequency = new Map();
     this.averageLength = 0;
 
-    const seen = new Set();
-    for (const note of Array.isArray(notes) ? notes : [...notes || []]) {
+    const seen = new Set<string>();
+    for (const note of normalizeNoteList(notes)) {
       const path = getPath(note);
       if (!path || seen.has(path)) continue;
       seen.add(path);
@@ -45,12 +124,12 @@ export class SearchIndex {
     return this;
   }
 
-  addDocument(note) {
+  addDocument(note: SearchNote): SearchDocument | null {
     const path = getPath(note);
     if (!path || this.byPath.has(path)) return null;
 
     const fields = getSearchFields(note, this.options);
-    const termCounts = new Map();
+    const termCounts = new Map<string, number>();
     let length = 0;
 
     for (const [field, value] of Object.entries(fields)) {
@@ -63,8 +142,9 @@ export class SearchIndex {
       }
     }
 
-    const trigramSource = normalizeForTrigrams(Object.values(fields).join(" "));
-    const trigrams = getTrigrams(trigramSource);
+    const trigrams = this.options.includeTrigrams
+      ? getTrigrams(Object.values(fields).join(" "))
+      : new Set<string>();
     const doc = {
       id: this.documents.length,
       path,
@@ -80,27 +160,35 @@ export class SearchIndex {
     this.byPath.set(path, doc);
 
     for (const [term, count] of termCounts) {
-      if (!this.inverted.has(term)) this.inverted.set(term, new Map());
-      this.inverted.get(term).set(doc.id, count);
+      let postings = this.inverted.get(term);
+      if (!postings) {
+        postings = new Map<number, number>();
+        this.inverted.set(term, postings);
+      }
+      postings.set(doc.id, count);
       this.documentFrequency.set(term, (this.documentFrequency.get(term) || 0) + 1);
     }
 
     for (const trigram of trigrams) {
-      if (!this.trigramIndex.has(trigram)) this.trigramIndex.set(trigram, new Set());
-      this.trigramIndex.get(trigram).add(doc.id);
+      let docIds = this.trigramIndex.get(trigram);
+      if (!docIds) {
+        docIds = new Set<number>();
+        this.trigramIndex.set(trigram, docIds);
+      }
+      docIds.add(doc.id);
     }
 
     return doc;
   }
 
-  search(query, options = {}) {
+  search(query: unknown, options: SearchQueryOptions = {}): SearchResult[] {
     const limit = positiveInteger(options.limit, 50);
     const minScore = finiteNumber(options.minScore, 0);
     const includeTrigramFallback = options.includeTrigramFallback !== false;
     const minTrigramScore = finiteNumber(options.minTrigramScore, 0.18);
     const bm25Results = this.bm25Search(query, { limit, minScore });
 
-    if (!includeTrigramFallback) return bm25Results;
+    if (!includeTrigramFallback || !this.options.includeTrigrams) return bm25Results;
     if (bm25Results.length >= limit && !options.alwaysIncludeTrigram) return bm25Results;
 
     const merged = new Map(bm25Results.map((result) => [result.path, result]));
@@ -131,12 +219,12 @@ export class SearchIndex {
       .slice(0, limit);
   }
 
-  bm25Search(query, options = {}) {
+  bm25Search(query: unknown, options: SearchQueryOptions = {}): SearchResult[] {
     const queryTerms = [...new Set(tokenizeSearchText(query))];
     if (!queryTerms.length || !this.documents.length) return [];
 
-    const scores = new Map();
-    const matchedTerms = new Map();
+    const scores = new Map<number, number>();
+    const matchedTerms = new Map<number, string[]>();
     for (const term of queryTerms) {
       const postings = this.inverted.get(term);
       if (!postings) continue;
@@ -145,8 +233,12 @@ export class SearchIndex {
         const doc = this.documents[docId];
         const score = idf * bm25TermScore(tf, doc.length, this.averageLength, this.options);
         scores.set(docId, (scores.get(docId) || 0) + score);
-        if (!matchedTerms.has(docId)) matchedTerms.set(docId, []);
-        matchedTerms.get(docId).push(term);
+        let terms = matchedTerms.get(docId);
+        if (!terms) {
+          terms = [];
+          matchedTerms.set(docId, terms);
+        }
+        terms.push(term);
       }
     }
 
@@ -158,23 +250,29 @@ export class SearchIndex {
     });
   }
 
-  trigramSearch(query, options = {}) {
+  trigramSearch(query: unknown, options: SearchQueryOptions = {}): SearchResult[] {
+    if (!this.options.includeTrigrams) return [];
+
     const queryTrigrams = getTrigrams(normalizeForTrigrams(query));
     if (!queryTrigrams.size || !this.documents.length) return [];
 
-    const overlapCounts = new Map();
-    const matchedTrigrams = new Map();
+    const overlapCounts = new Map<number, number>();
+    const matchedTrigrams = new Map<number, string[]>();
     for (const trigram of queryTrigrams) {
       const docIds = this.trigramIndex.get(trigram);
       if (!docIds) continue;
       for (const docId of docIds) {
         overlapCounts.set(docId, (overlapCounts.get(docId) || 0) + 1);
-        if (!matchedTrigrams.has(docId)) matchedTrigrams.set(docId, []);
-        matchedTrigrams.get(docId).push(trigram);
+        let trigrams = matchedTrigrams.get(docId);
+        if (!trigrams) {
+          trigrams = [];
+          matchedTrigrams.set(docId, trigrams);
+        }
+        trigrams.push(trigram);
       }
     }
 
-    const scores = new Map();
+    const scores = new Map<number, number>();
     for (const [docId, overlap] of overlapCounts) {
       const doc = this.documents[docId];
       const union = queryTrigrams.size + doc.trigrams.size - overlap;
@@ -190,13 +288,13 @@ export class SearchIndex {
     });
   }
 
-  getIdf(term) {
+  getIdf(term: string): number {
     const totalDocs = this.documents.length;
     const docsWithTerm = this.documentFrequency.get(term) || 0;
     return Math.log(1 + (totalDocs - docsWithTerm + 0.5) / (docsWithTerm + 0.5));
   }
 
-  formatResults(scores, options) {
+  formatResults(scores: Map<number, number>, options: FormatResultOptions): SearchResult[] {
     return [...scores.entries()]
       .map(([docId, score]) => {
         const doc = this.documents[docId];
@@ -217,19 +315,22 @@ export class SearchIndex {
   }
 }
 
-export function createSearchIndex(notes = [], options = {}) {
+export function createSearchIndex(
+  notes: SearchNoteCollection | null | undefined = [],
+  options: SearchIndexOptions = {}
+): SearchIndex {
   return new SearchIndex(notes, options);
 }
 
-export function tokenizeSearchText(value) {
+export function tokenizeSearchText(value: unknown): string[] {
   return normalizeSearchText(value)
     .split(/[^a-z0-9]+/u)
     .filter((token) => token.length >= MIN_TOKEN_LENGTH);
 }
 
-export function getTrigrams(value) {
+export function getTrigrams(value: unknown): Set<string> {
   const source = normalizeForTrigrams(value);
-  const trigrams = new Set();
+  const trigrams = new Set<string>();
   if (source.length < MIN_TRIGRAM_SOURCE_LENGTH) return trigrams;
   for (let index = 0; index <= source.length - MIN_TRIGRAM_SOURCE_LENGTH; index += 1) {
     trigrams.add(source.slice(index, index + MIN_TRIGRAM_SOURCE_LENGTH));
@@ -237,17 +338,22 @@ export function getTrigrams(value) {
   return trigrams;
 }
 
-function getSearchFields(note, options) {
+function normalizeNoteList(notes: SearchNoteCollection | null | undefined): SearchNote[] {
+  if (!notes) return [];
+  return Array.isArray(notes) ? notes : [...notes];
+}
+
+function getSearchFields(note: SearchNote, options: ResolvedSearchIndexOptions): SearchFields {
   const path = getPath(note);
-  const fields = {
+  const fields: SearchFields = {
     title: getTitle(note, path),
-    path,
-    searchText: note && note.searchText ? String(note.searchText) : ""
+    path
   };
 
   if (options.includeBody) {
+    fields.searchText = isSearchNoteObject(note) && note.searchText ? String(note.searchText) : "";
     fields.body = String(
-      (note && (note.body || note.content || note.text || note.markdown)) ||
+      (isSearchNoteObject(note) && (note.body || note.content || note.text || note.markdown)) ||
       ""
     );
   }
@@ -255,46 +361,55 @@ function getSearchFields(note, options) {
   return fields;
 }
 
-function bm25TermScore(tf, docLength, averageLength, options) {
+function bm25TermScore(
+  tf: number,
+  docLength: number,
+  averageLength: number,
+  options: ResolvedSearchIndexOptions
+): number {
   const k1 = finiteNumber(options.k1, DEFAULT_BM25_K1);
   const b = finiteNumber(options.b, DEFAULT_BM25_B);
   const normalizedLength = averageLength > 0 ? docLength / averageLength : 1;
   return (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * normalizedLength));
 }
 
-function getPath(note) {
+function getPath(note: SearchNote | null | undefined): string {
   if (!note) return "";
   if (typeof note === "string") return note;
   return String(note.path || note.id || "");
 }
 
-function getTitle(note, fallbackPath) {
-  if (note && note.title) return String(note.title);
+function getTitle(note: SearchNote | null | undefined, fallbackPath: string): string {
+  if (isSearchNoteObject(note) && note.title) return String(note.title);
   return String(fallbackPath || "").split("/").pop() || String(fallbackPath || "");
 }
 
-function normalizeSearchText(value) {
+function isSearchNoteObject(note: SearchNote | null | undefined): note is SearchNoteObject {
+  return Boolean(note && typeof note === "object");
+}
+
+function normalizeSearchText(value: unknown): string {
   return String(value || "")
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase();
 }
 
-function normalizeForTrigrams(value) {
+function normalizeForTrigrams(value: unknown): string {
   return normalizeSearchText(value).replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function finiteNumber(value, fallback) {
+function finiteNumber(value: unknown, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
 
-function positiveInteger(value, fallback) {
+function positiveInteger(value: unknown, fallback: number): number {
   const number = Math.floor(Number(value));
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
-function compareSearchResults(a, b) {
+function compareSearchResults(a: SearchResult, b: SearchResult): number {
   return (
     b.score - a.score ||
     b.bm25Score - a.bm25Score ||

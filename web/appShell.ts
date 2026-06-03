@@ -63,6 +63,7 @@ import {
 } from "./notes/noteComposer.ts";
 import { parseNote } from "./notes/noteParser.ts";
 import { validateNotes as validateNoteCollection } from "./notes/noteValidation.ts";
+import { trimWorkspaceHistoryStack, trimWorkspaceHistoryStacks } from "./state/historyBudget.ts";
 import { createWorkspaceStore } from "./state/workspaceStore.ts";
 import { getDomElements } from "./ui/domElements.ts";
 import apexNotesWritingSkill from "../skills/apex-notes-writing/SKILL.md";
@@ -108,6 +109,13 @@ const SPATIAL_CELL_SIZE = 240;
 const LIVE_SYNC_INTERVAL_MS = 1500;
 const APP_UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const MAX_WORKSPACE_HISTORY_ENTRIES = 80;
+const MAX_WORKSPACE_HISTORY_BYTES = 12 * 1024 * 1024;
+const LARGE_FOLDER_NOTE_WARNING_THRESHOLD = 1000;
+const LARGE_FOLDER_TOTAL_BYTES_WARNING_THRESHOLD = 50 * 1024 * 1024;
+const LARGE_NOTE_BYTE_WARNING_THRESHOLD = 2 * 1024 * 1024;
+const SEARCH_BODY_NOTE_THRESHOLD = 1000;
+const SEARCH_BODY_TOTAL_BYTES_THRESHOLD = 25 * 1024 * 1024;
+const SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD = 3_000_000;
 const BROWSE_PROJECT_LOCATION_VALUE = "__browse_project_location__";
 const POSITIONING_OPTIONS = {
   levelGap: LEVEL_GAP,
@@ -120,6 +128,7 @@ const POSITIONING_OPTIONS = {
   precision: 2
 };
 const PERF_ENABLED = isPerfEnabled();
+const workspaceMetricEncoder = new TextEncoder();
 const EMPTY_NOTE_PLACEHOLDER = "Write down your thoughts...";
 
 const editorEditable = new Compartment();
@@ -129,6 +138,9 @@ const wikiLinkRefreshEffect = StateEffect.define();
 const state = createWorkspaceStore(loadRecentProjects());
 
 let suppressWorkspaceRenameCommit = false;
+let appEventController = null;
+let resizeDebounceTimer = 0;
+let largeGraphRefreshTimer = 0;
 
 const els = getDomElements();
 
@@ -158,6 +170,12 @@ function scheduleWikiLinkRefresh() {
     wikiLinkRefreshTimer = 0;
     refreshEditorDecorations();
   }, 140);
+}
+
+function clearWikiLinkRefreshTimer() {
+  if (!wikiLinkRefreshTimer) return;
+  window.clearTimeout(wikiLinkRefreshTimer);
+  wikiLinkRefreshTimer = 0;
 }
 
 function isPerfEnabled() {
@@ -216,6 +234,9 @@ class WikiLinkWidget extends WidgetType {
 }
 
 export function initializeApp() {
+  if (appEventController || state.editorView || state.graphResizeObserver) {
+    disposeApp();
+  }
   initializeEditor();
   initializeIcons();
   initializeEditorPaneWidth();
@@ -224,6 +245,39 @@ export function initializeApp() {
   startEmpty();
   void hydrateRecentProjects();
   startAppUpdateChecks();
+}
+
+export function disposeApp() {
+  stopLiveSync();
+  cancelQueuedGraphRender();
+  cancelGraphViewAnimation();
+  cancelLabelVisibilityRefresh();
+  clearResizeDebounceTimer();
+  clearLargeGraphRefreshTimer();
+  cancelInteraction();
+  cancelEditorResizeDrag();
+  clearWikiLinkRefreshTimer();
+
+  if (state.appUpdateCheckTimer) {
+    window.clearInterval(state.appUpdateCheckTimer);
+    state.appUpdateCheckTimer = 0;
+  }
+  if (state.saveTimer) {
+    window.clearTimeout(state.saveTimer);
+    state.saveTimer = null;
+  }
+  if (appEventController) {
+    appEventController.abort();
+    appEventController = null;
+  }
+  if (state.graphResizeObserver) {
+    state.graphResizeObserver.disconnect();
+    state.graphResizeObserver = null;
+  }
+  if (state.editorView) {
+    state.editorView.destroy();
+    state.editorView = null;
+  }
 }
 
 function initializeIcons() {
@@ -235,7 +289,7 @@ function initializeIcons() {
   setButtonIcon(els.graphCreateProjectButton, "createProject", "Create project");
   setButtonIcon(els.closeGraphProjectLauncherButton, "close");
   setButtonIcon(els.updateButton, "download", "Update");
-  els.searchFieldIcon.appendChild(createIcon("search"));
+  els.searchFieldIcon.replaceChildren(createIcon("search"));
   setButtonIcon(els.zoomOutButton, "zoomOut");
   setButtonIcon(els.resetViewButton, "fit");
   setButtonIcon(els.zoomInButton, "zoomIn");
@@ -319,10 +373,13 @@ function initializeEditorPaneWidth() {
 
 function initializeGraphResizeObserver() {
   if (!els.graphScroller || typeof ResizeObserver !== "function") return;
-  const observer = new ResizeObserver(() => {
+  if (state.graphResizeObserver) {
+    state.graphResizeObserver.disconnect();
+  }
+  state.graphResizeObserver = new ResizeObserver(() => {
     scheduleResizeRender();
   });
-  observer.observe(els.graphScroller);
+  state.graphResizeObserver.observe(els.graphScroller);
 }
 
 function readStoredEditorPaneWidth() {
@@ -460,13 +517,24 @@ function onEditorResizePointerMove(event) {
 function endEditorResize(event) {
   const drag = state.editorResizeDrag;
   if (!drag || drag.pointerId !== event.pointerId) return;
+  cancelEditorResizeDrag();
+  syncEditorPaneWidthForViewport();
+}
+
+function cancelEditorResizeDrag() {
+  const drag = state.editorResizeDrag;
   state.editorResizeDrag = null;
-  if (els.editorResizeHandle.hasPointerCapture(event.pointerId)) {
-    els.editorResizeHandle.releasePointerCapture(event.pointerId);
+  if (drag && drag.pointerId !== undefined && drag.pointerId !== null) {
+    try {
+      if (els.editorResizeHandle.hasPointerCapture(drag.pointerId)) {
+        els.editorResizeHandle.releasePointerCapture(drag.pointerId);
+      }
+    } catch {
+      // Pointer capture may already be gone after cancellation or disposal.
+    }
   }
   els.editorResizeHandle.classList.remove("isDragging");
   document.body.classList.remove("isResizingEditor");
-  syncEditorPaneWidthForViewport();
 }
 
 function onEditorResizeKeydown(event) {
@@ -490,82 +558,91 @@ function onEditorResizeKeydown(event) {
 }
 
 function bindEvents() {
-  els.graphHelpButton.addEventListener("click", openGraphHelpDialog);
-  els.closeGraphHelpButton.addEventListener("click", closeGraphHelpDialog);
-  els.launchOpenProjectButton.addEventListener("click", openNotesFolder);
-  els.launchCreateProjectButton.addEventListener("click", openCreateFolderDialog);
-  els.launchRecentList.addEventListener("click", onLaunchRecentClick);
-  els.graphOpenProjectButton.addEventListener("click", openNotesFolder);
-  els.graphCreateProjectButton.addEventListener("click", openCreateFolderDialog);
-  els.graphRecentList.addEventListener("click", onLaunchRecentClick);
-  els.closeGraphProjectLauncherButton.addEventListener("click", closeGraphProjectLauncher);
-  els.updateButton.addEventListener("click", installAvailableUpdate);
-  els.workspaceTabs.addEventListener("click", onWorkspaceTabsClick);
-  els.workspaceTabs.addEventListener("dblclick", onWorkspaceTabsDoubleClick);
-  els.workspaceTabs.addEventListener("focusout", onWorkspaceTabsFocusOut);
-  els.workspaceTabs.addEventListener("input", onWorkspaceTabsInput);
-  els.workspaceTabs.addEventListener("keydown", onWorkspaceTabsKeydown);
-  els.newNoteButton.addEventListener("click", openNewNoteDialog);
-  els.zoomInButton.addEventListener("click", () => zoomAtCenter(1.18));
-  els.zoomOutButton.addEventListener("click", () => zoomAtCenter(1 / 1.18));
-  els.resetViewButton.addEventListener("click", fitGraphViewFromControl);
-  els.fullscreenGraphButton.addEventListener("click", toggleGraphFullscreen);
-  els.cancelNewNoteButton.addEventListener("click", () => closeNewNoteDialog());
-  els.cancelCreateFolderButton.addEventListener("click", () => closeCreateFolderDialog());
-  els.createFolderLocationSelect.addEventListener("change", onCreateProjectLocationChange);
-  els.closeHierarchyPromptButton.addEventListener("click", () => closeHierarchyPromptDialog());
-  els.copyHierarchyPromptButton.addEventListener("click", () => copyHierarchyPrompt());
-  els.cancelDeleteButton.addEventListener("click", () => settleDeleteConfirm(false));
-  els.confirmDeleteButton.addEventListener("click", () => settleDeleteConfirm(true));
-  els.deleteConfirmDialog.addEventListener("close", () => settleDeleteConfirm(false));
-  els.newNoteParent.addEventListener("change", updateNewNoteHint);
-  els.newNoteForm.addEventListener("submit", createNewNote);
-  els.createFolderForm.addEventListener("submit", createGraphFolder);
-  els.noteTitle.addEventListener("blur", commitHeaderNoteTitle);
-  els.noteTitle.addEventListener("keydown", onHeaderNoteTitleKeydown);
-  els.noteTitle.addEventListener("paste", onHeaderNoteTitlePaste);
-  els.noteInfo.addEventListener("toggle", keepDisabledInfoClosed);
-  els.infoParent.addEventListener("change", onInfoChanged);
-  els.fullscreenEditorButton.addEventListener("click", toggleEditorFullscreen);
-  els.deleteNoteButton.addEventListener("click", deleteSelectedNote);
-  els.graphCreatePopover.addEventListener("submit", createGraphNoteFromPopover);
-  els.cancelGraphCreateButton.addEventListener("click", closeGraphCreatePopover);
-  els.editorResizeHandle.addEventListener("pointerdown", startEditorResize);
-  els.editorResizeHandle.addEventListener("pointermove", onEditorResizePointerMove);
-  els.editorResizeHandle.addEventListener("pointerup", endEditorResize);
-  els.editorResizeHandle.addEventListener("pointercancel", endEditorResize);
-  els.editorResizeHandle.addEventListener("keydown", onEditorResizeKeydown);
+  if (appEventController) appEventController.abort();
+  appEventController = new AbortController();
+  const on = (target, type, listener, options = {}) => {
+    target.addEventListener(type, listener, {
+      ...(typeof options === "boolean" ? { capture: options } : options),
+      signal: appEventController.signal
+    });
+  };
 
-  els.searchInput.addEventListener("focus", openSearchResults);
-  els.searchInput.addEventListener("click", openSearchResults);
-  els.searchInput.addEventListener("input", onSearchInput);
-  els.searchInput.addEventListener("keydown", onSearchKeydown);
-  els.searchResults.addEventListener("pointerdown", (event) => event.preventDefault());
-  els.searchResults.addEventListener("click", onSearchResultsClick);
-  els.searchField.addEventListener("focusout", onSearchFocusOut);
-  document.addEventListener("pointerdown", onDocumentSearchPointerDown);
+  on(els.graphHelpButton, "click", openGraphHelpDialog);
+  on(els.closeGraphHelpButton, "click", closeGraphHelpDialog);
+  on(els.launchOpenProjectButton, "click", openNotesFolder);
+  on(els.launchCreateProjectButton, "click", openCreateFolderDialog);
+  on(els.launchRecentList, "click", onLaunchRecentClick);
+  on(els.graphOpenProjectButton, "click", openNotesFolder);
+  on(els.graphCreateProjectButton, "click", openCreateFolderDialog);
+  on(els.graphRecentList, "click", onLaunchRecentClick);
+  on(els.closeGraphProjectLauncherButton, "click", closeGraphProjectLauncher);
+  on(els.updateButton, "click", installAvailableUpdate);
+  on(els.workspaceTabs, "click", onWorkspaceTabsClick);
+  on(els.workspaceTabs, "dblclick", onWorkspaceTabsDoubleClick);
+  on(els.workspaceTabs, "focusout", onWorkspaceTabsFocusOut);
+  on(els.workspaceTabs, "input", onWorkspaceTabsInput);
+  on(els.workspaceTabs, "keydown", onWorkspaceTabsKeydown);
+  on(els.newNoteButton, "click", openNewNoteDialog);
+  on(els.zoomInButton, "click", () => zoomAtCenter(1.18));
+  on(els.zoomOutButton, "click", () => zoomAtCenter(1 / 1.18));
+  on(els.resetViewButton, "click", fitGraphViewFromControl);
+  on(els.fullscreenGraphButton, "click", toggleGraphFullscreen);
+  on(els.cancelNewNoteButton, "click", () => closeNewNoteDialog());
+  on(els.cancelCreateFolderButton, "click", () => closeCreateFolderDialog());
+  on(els.createFolderLocationSelect, "change", onCreateProjectLocationChange);
+  on(els.closeHierarchyPromptButton, "click", () => closeHierarchyPromptDialog());
+  on(els.copyHierarchyPromptButton, "click", () => copyHierarchyPrompt());
+  on(els.cancelDeleteButton, "click", () => settleDeleteConfirm(false));
+  on(els.confirmDeleteButton, "click", () => settleDeleteConfirm(true));
+  on(els.deleteConfirmDialog, "close", () => settleDeleteConfirm(false));
+  on(els.newNoteParent, "change", updateNewNoteHint);
+  on(els.newNoteForm, "submit", createNewNote);
+  on(els.createFolderForm, "submit", createGraphFolder);
+  on(els.noteTitle, "blur", commitHeaderNoteTitle);
+  on(els.noteTitle, "keydown", onHeaderNoteTitleKeydown);
+  on(els.noteTitle, "paste", onHeaderNoteTitlePaste);
+  on(els.noteInfo, "toggle", keepDisabledInfoClosed);
+  on(els.infoParent, "change", onInfoChanged);
+  on(els.fullscreenEditorButton, "click", toggleEditorFullscreen);
+  on(els.deleteNoteButton, "click", deleteSelectedNote);
+  on(els.graphCreatePopover, "submit", createGraphNoteFromPopover);
+  on(els.cancelGraphCreateButton, "click", closeGraphCreatePopover);
+  on(els.editorResizeHandle, "pointerdown", startEditorResize);
+  on(els.editorResizeHandle, "pointermove", onEditorResizePointerMove);
+  on(els.editorResizeHandle, "pointerup", endEditorResize);
+  on(els.editorResizeHandle, "pointercancel", endEditorResize);
+  on(els.editorResizeHandle, "keydown", onEditorResizeKeydown);
 
-  els.graph.addEventListener("wheel", onGraphWheel, { passive: false });
-  els.graph.addEventListener("dblclick", onGraphDoubleClick);
-  els.graph.addEventListener("pointerdown", startGraphPointerDown);
-  els.graph.addEventListener("pointerover", onGraphPointerOver);
-  els.graph.addEventListener("pointerout", onGraphPointerOut);
-  els.graph.addEventListener("focusin", onGraphFocusIn);
-  els.graph.addEventListener("focusout", onGraphFocusOut);
-  els.graph.addEventListener("pointermove", queueInteraction);
-  els.graph.addEventListener("pointerup", endInteraction);
-  els.graph.addEventListener("pointercancel", cancelInteraction);
-  els.graph.addEventListener("keydown", onGraphKeydown);
-  els.graph.addEventListener("dragover", onGraphDragOver);
-  els.graph.addEventListener("dragleave", onGraphDragLeave);
-  els.graph.addEventListener("drop", onGraphDrop);
-  document.addEventListener("keydown", onDocumentKeydown);
-  document.addEventListener("pointerdown", onDocumentPointerDown);
-  window.addEventListener("resize", scheduleResizeRender);
-  window.addEventListener("focus", refreshAppUpdateOnFocus);
-  document.addEventListener("visibilitychange", refreshAppUpdateOnVisibilityChange);
-  document.addEventListener("fullscreenchange", syncFullscreenState);
-  window.addEventListener("keydown", (event) => {
+  on(els.searchInput, "focus", openSearchResults);
+  on(els.searchInput, "click", openSearchResults);
+  on(els.searchInput, "input", onSearchInput);
+  on(els.searchInput, "keydown", onSearchKeydown);
+  on(els.searchResults, "pointerdown", (event) => event.preventDefault());
+  on(els.searchResults, "click", onSearchResultsClick);
+  on(els.searchField, "focusout", onSearchFocusOut);
+  on(document, "pointerdown", onDocumentSearchPointerDown);
+
+  on(els.graph, "wheel", onGraphWheel, { passive: false });
+  on(els.graph, "dblclick", onGraphDoubleClick);
+  on(els.graph, "pointerdown", startGraphPointerDown);
+  on(els.graph, "pointerover", onGraphPointerOver);
+  on(els.graph, "pointerout", onGraphPointerOut);
+  on(els.graph, "focusin", onGraphFocusIn);
+  on(els.graph, "focusout", onGraphFocusOut);
+  on(els.graph, "pointermove", queueInteraction);
+  on(els.graph, "pointerup", endInteraction);
+  on(els.graph, "pointercancel", cancelInteraction);
+  on(els.graph, "keydown", onGraphKeydown);
+  on(els.graph, "dragover", onGraphDragOver);
+  on(els.graph, "dragleave", onGraphDragLeave);
+  on(els.graph, "drop", onGraphDrop);
+  on(document, "keydown", onDocumentKeydown);
+  on(document, "pointerdown", onDocumentPointerDown);
+  on(window, "resize", scheduleResizeRender);
+  on(window, "focus", refreshAppUpdateOnFocus);
+  on(document, "visibilitychange", refreshAppUpdateOnVisibilityChange);
+  on(document, "fullscreenchange", syncFullscreenState);
+  on(window, "keydown", (event) => {
     if (event.key === "Escape") {
       if (state.editorFullscreenFallback && document.body.classList.contains("editorFullscreen") && !document.fullscreenElement) {
         event.preventDefault();
@@ -1055,6 +1132,8 @@ function startEmpty() {
   state.notesPath = "";
   state.source = "none";
   state.workspaceName = "";
+  state.workspaceMetrics = null;
+  state.searchIndexMode = "full";
   state.dirty = false;
   state.saveToken += 1;
   state.undoStack = [];
@@ -1677,6 +1756,8 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {})
   target.workspaceName = workspaceName;
   target.layoutKey = layoutKey;
   target.notes = (workspace.notes || []).map((note) => parseNote(note.path, note.raw));
+  target.workspaceMetrics = buildWorkspaceMetricsFromFiles(workspace.notes || []);
+  target.searchIndexMode = searchIndexModeForMetrics(target.workspaceMetrics);
   target.fileSignatures = buildFileSignatureMap(workspace.notes || []);
   target.dirty = false;
   const targetNotePaths = new Set(target.notes.map((note) => note.path));
@@ -1690,6 +1771,133 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {})
 
   restoreWorkspaceState(target, statusMessage, { preserveView: target.hasView });
   rememberWorkspaceRecent({ rootPath, workspaceName }, previousRootPath);
+}
+
+function buildWorkspaceMetricsFromFiles(files = []) {
+  const metrics = emptyWorkspaceMetrics();
+  for (const file of files || []) {
+    const raw = String(file?.raw || "");
+    const byteLen = Number(file?.byteLen);
+    addWorkspaceMetric(metrics, Number.isFinite(byteLen) ? byteLen : approximateRawBytes(raw), raw.length);
+  }
+  return finalizeWorkspaceMetrics(metrics);
+}
+
+function buildWorkspaceMetricsFromParsedNotes(notes = []) {
+  const metrics = emptyWorkspaceMetrics();
+  for (const note of notes || []) {
+    const raw = String(note?.raw || "");
+    addWorkspaceMetric(metrics, approximateRawBytes(raw), raw.length);
+  }
+  return finalizeWorkspaceMetrics(metrics);
+}
+
+function emptyWorkspaceMetrics() {
+  return {
+    noteCount: 0,
+    totalBytes: 0,
+    totalChars: 0,
+    largestNoteBytes: 0,
+    largeNoteCount: 0
+  };
+}
+
+function addWorkspaceMetric(metrics, bytes, chars) {
+  const byteCount = Math.max(0, Math.floor(Number(bytes) || 0));
+  metrics.noteCount += 1;
+  metrics.totalBytes += byteCount;
+  metrics.totalChars += Math.max(0, Math.floor(Number(chars) || 0));
+  metrics.largestNoteBytes = Math.max(metrics.largestNoteBytes, byteCount);
+  if (byteCount >= LARGE_NOTE_BYTE_WARNING_THRESHOLD) {
+    metrics.largeNoteCount += 1;
+  }
+}
+
+function finalizeWorkspaceMetrics(metrics) {
+  return {
+    ...metrics,
+    pressure: isWorkspaceUnderMemoryPressure(metrics)
+  };
+}
+
+function approximateRawBytes(raw) {
+  return workspaceMetricEncoder.encode(String(raw || "")).byteLength;
+}
+
+function isWorkspaceUnderMemoryPressure(metrics) {
+  return Boolean(
+    metrics &&
+    (
+      metrics.noteCount >= LARGE_FOLDER_NOTE_WARNING_THRESHOLD ||
+      metrics.totalBytes >= SEARCH_BODY_TOTAL_BYTES_THRESHOLD ||
+      metrics.totalChars >= SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD ||
+      metrics.totalBytes >= LARGE_FOLDER_TOTAL_BYTES_WARNING_THRESHOLD ||
+      metrics.largeNoteCount > 0
+    )
+  );
+}
+
+function searchIndexOptionsForMetrics(metrics) {
+  const noteCount = Number(metrics?.noteCount) || 0;
+  const totalBytes = Number(metrics?.totalBytes) || 0;
+  const totalChars = Number(metrics?.totalChars) || 0;
+  const largeNoteCount = Number(metrics?.largeNoteCount) || 0;
+  const includeBody =
+    largeNoteCount === 0 &&
+    noteCount <= SEARCH_BODY_NOTE_THRESHOLD &&
+    totalBytes <= SEARCH_BODY_TOTAL_BYTES_THRESHOLD;
+  const includeTrigrams =
+    includeBody &&
+    totalChars <= SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD;
+
+  return {
+    includeBody,
+    includeTrigrams
+  };
+}
+
+function searchIndexModeForMetrics(metrics) {
+  const options = searchIndexOptionsForMetrics(metrics);
+  if (options.includeBody && options.includeTrigrams) return "full";
+  if (options.includeBody) return "no-trigrams";
+  return "title-path";
+}
+
+function workspacePressureStatus(baseMessage = "") {
+  const metrics = state.workspaceMetrics;
+  if (!metrics || !metrics.pressure) return baseMessage;
+
+  const parts = [];
+  if (metrics.noteCount >= LARGE_FOLDER_NOTE_WARNING_THRESHOLD) {
+    parts.push(`${metrics.noteCount} notes`);
+  }
+  if (metrics.totalBytes >= SEARCH_BODY_TOTAL_BYTES_THRESHOLD) {
+    parts.push(`${formatBytes(metrics.totalBytes)} loaded`);
+  }
+  if (metrics.totalChars >= SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD && metrics.totalBytes < SEARCH_BODY_TOTAL_BYTES_THRESHOLD) {
+    parts.push(`${metrics.totalChars.toLocaleString()} characters indexed`);
+  }
+  if (metrics.largeNoteCount) {
+    parts.push(`${metrics.largeNoteCount} large note${metrics.largeNoteCount === 1 ? "" : "s"}`);
+  }
+
+  const suffix = state.searchIndexMode === "full"
+    ? `Large folder: ${parts.join(", ")}`
+    : `Large folder: ${parts.join(", ")}; ${searchIndexModeLabel(state.searchIndexMode)}`;
+  return baseMessage ? `${baseMessage}. ${suffix}` : suffix;
+}
+
+function searchIndexModeLabel(mode) {
+  if (mode === "title-path") return "search reduced to titles and paths";
+  if (mode === "no-trigrams") return "fuzzy search reduced";
+  return "full search enabled";
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024) return `${Math.round(value / 1024 / 1024)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
 }
 
 function hasWritableWorkspace() {
@@ -1746,11 +1954,28 @@ function recordWorkspaceHistory(label, before, after = snapshotWorkspaceForHisto
   if (!entry) return;
 
   state.undoStack.push(entry);
-  if (state.undoStack.length > MAX_WORKSPACE_HISTORY_ENTRIES) {
-    state.undoStack.shift();
-  }
+  state.undoStack = trimWorkspaceHistoryStack(state.undoStack, workspaceHistoryBudgetOptions());
   state.redoStack = [];
   saveActiveWorkspaceState();
+}
+
+function workspaceHistoryBudgetOptions() {
+  return {
+    maxEntries: MAX_WORKSPACE_HISTORY_ENTRIES,
+    maxBytes: MAX_WORKSPACE_HISTORY_BYTES
+  };
+}
+
+function trimCurrentWorkspaceHistory() {
+  const trimmed = trimWorkspaceHistoryStacks(
+    {
+      undoStack: state.undoStack,
+      redoStack: state.redoStack
+    },
+    workspaceHistoryBudgetOptions()
+  );
+  state.undoStack = trimmed.undoStack;
+  state.redoStack = trimmed.redoStack;
 }
 
 function buildWorkspaceHistoryEntry(label, before, after) {
@@ -1865,9 +2090,7 @@ async function stepWorkspaceHistory(direction) {
     await applyWorkspaceHistoryEntry(entry, undo ? "before" : "after");
     fromStack.pop();
     toStack.push(entry);
-    if (toStack.length > MAX_WORKSPACE_HISTORY_ENTRIES) {
-      toStack.shift();
-    }
+    trimCurrentWorkspaceHistory();
     setStatus(`${undo ? "Undid" : "Redid"} ${entry.label}`);
     saveActiveWorkspaceState();
     return true;
@@ -1969,6 +2192,7 @@ function saveActiveWorkspaceState() {
   const workspace = getActiveWorkspace();
   if (!workspace) return;
 
+  trimCurrentWorkspaceHistory();
   workspace.notes = state.notes;
   workspace.selectedPath = state.selectedPath;
   workspace.selectedPaths = [...state.selectedPaths].filter((path) => state.notePaths.has(path));
@@ -1976,6 +2200,8 @@ function saveActiveWorkspaceState() {
   workspace.notesPath = state.notesPath;
   workspace.source = state.source;
   workspace.workspaceName = state.workspaceName;
+  workspace.workspaceMetrics = state.workspaceMetrics;
+  workspace.searchIndexMode = state.searchIndexMode;
   workspace.dirty = state.dirty;
   workspace.undoStack = state.undoStack;
   workspace.redoStack = state.redoStack;
@@ -1998,6 +2224,8 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   cancelGraphViewAnimation();
   cancelLabelVisibilityRefresh();
   cancelQueuedInteraction();
+  clearResizeDebounceTimer();
+  clearLargeGraphRefreshTimer();
   if (state.saveTimer) {
     window.clearTimeout(state.saveTimer);
     state.saveTimer = null;
@@ -2013,10 +2241,13 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.notesPath = workspace.notesPath || "";
   state.source = workspace.source || "folder";
   state.workspaceName = workspace.workspaceName || workspace.rootPath || "Folder";
+  state.workspaceMetrics = workspace.workspaceMetrics || buildWorkspaceMetricsFromParsedNotes(state.notes);
+  state.searchIndexMode = workspace.searchIndexMode || searchIndexModeForMetrics(state.workspaceMetrics);
   state.dirty = Boolean(workspace.dirty);
   state.saveToken += 1;
   state.undoStack = workspace.undoStack || [];
   state.redoStack = workspace.redoStack || [];
+  trimCurrentWorkspaceHistory();
   state.historyApplying = false;
   state.fileSignatures = cloneFileSignatures(workspace.fileSignatures);
   state.filter = workspace.filter || "";
@@ -2063,7 +2294,7 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   els.searchInput.value = state.filter;
   updateSearchResults();
   renderSearchResults();
-  renderCurrentSelection(statusMessage);
+  renderCurrentSelection(workspacePressureStatus(statusMessage));
   renderNewNoteParents();
   renderLaunchScreen();
   renderGraph({ preserveView });
@@ -2361,6 +2592,8 @@ function rebuildIndex() {
     state.notePaths.add(note.path);
   }
 
+  state.workspaceMetrics = buildWorkspaceMetricsFromParsedNotes(state.notes);
+  state.searchIndexMode = searchIndexModeForMetrics(state.workspaceMetrics);
   state.graphIndex = createGraphIndex(state.notes);
   applyGraphIndexToNotes(state.graphIndex);
   rebuildAliasLookup(state.graphIndex);
@@ -2385,7 +2618,10 @@ function rebuildIndex() {
       referenceEdgeCount: state.referenceEdgeCount
     }
   );
-  state.searchIndex = createSearchIndex(state.notes);
+  state.searchIndex = createSearchIndex(
+    state.notes,
+    searchIndexOptionsForMetrics(state.workspaceMetrics)
+  );
   updateSearchResults();
   state.labelStats = computeNoteLinkStats(state.sortedNotes);
   state.labelVisibilityCache = prepareLabelVisibilityCache(state.sortedNotes, state.labelStats);
@@ -3068,7 +3304,12 @@ function patchBodyOnlyNote(note, updated) {
   note.body = updated.body;
   note.bodyRefs = updated.bodyRefs;
   note.searchText = updated.searchText;
-  state.searchIndex = createSearchIndex(state.notes);
+  state.workspaceMetrics = buildWorkspaceMetricsFromParsedNotes(state.notes);
+  state.searchIndexMode = searchIndexModeForMetrics(state.workspaceMetrics);
+  state.searchIndex = createSearchIndex(
+    state.notes,
+    searchIndexOptionsForMetrics(state.workspaceMetrics)
+  );
   updateSearchResults();
 }
 
@@ -3526,7 +3767,6 @@ function getGraphOverlayWidth() {
   return Math.max(0, layoutRect.right - Math.max(layoutRect.left, overlayLeft));
 }
 
-let resizeDebounceTimer = 0;
 function scheduleResizeRender() {
   if (resizeDebounceTimer) {
     window.clearTimeout(resizeDebounceTimer);
@@ -3536,6 +3776,12 @@ function scheduleResizeRender() {
     syncEditorPaneWidthForViewport();
     requestGraphRender({ preserveView: true });
   }, 120);
+}
+
+function clearResizeDebounceTimer() {
+  if (!resizeDebounceTimer) return;
+  window.clearTimeout(resizeDebounceTimer);
+  resizeDebounceTimer = 0;
 }
 
 function syncGraphViewportToLayout() {
@@ -3563,7 +3809,6 @@ function preserveGraphViewportCenter(previousViewport, nextViewport) {
   state.view.y = nextViewport.height / 2 - centerGraphY * state.view.scale;
 }
 
-let largeGraphRefreshTimer = 0;
 function scheduleLargeGraphRefresh() {
   if (!state.largeGraphMode) return;
   if (largeGraphRefreshTimer) {
@@ -3575,6 +3820,12 @@ function scheduleLargeGraphRefresh() {
       requestGraphRender({ preserveView: true });
     }
   }, 90);
+}
+
+function clearLargeGraphRefreshTimer() {
+  if (!largeGraphRefreshTimer) return;
+  window.clearTimeout(largeGraphRefreshTimer);
+  largeGraphRefreshTimer = 0;
 }
 
 function registerGraphEdge(edge) {
@@ -4371,8 +4622,10 @@ function setSearchFilter(value) {
 }
 
 function updateSearchResults() {
+  const searchOptions = searchIndexOptionsForMetrics(state.workspaceMetrics);
   state.searchResults = buildSearchResults(state.notes, state.searchIndex, state.filter, {
-    limit: 12
+    limit: 12,
+    includeBody: searchOptions.includeBody
   });
   if (state.searchActiveIndex >= state.searchResults.length) {
     state.searchActiveIndex = state.searchResults.length ? state.searchResults.length - 1 : -1;
@@ -6719,7 +6972,9 @@ function updateSourceStatus() {
   const canDelete = canDeleteCurrentSelection();
   updateGraphTitle();
   els.sourceStatus.textContent = isFolder ? "" : "No folder";
-  els.sourceStatus.title = isFolder ? (state.rootPath || state.workspaceName || "Folder open") : "Open or create a folder to edit notes";
+  els.sourceStatus.title = isFolder
+    ? [state.rootPath || state.workspaceName || "Folder open", searchIndexModeLabel(state.searchIndexMode)].filter(Boolean).join("\n")
+    : "Open or create a folder to edit notes";
   els.newNoteButton.disabled = !isFolder;
   els.newNoteButton.title = isFolder ? "Create a note in this folder" : "Open or create a folder first";
   els.infoParent.disabled = !isFolder || !hasSelection;
@@ -6776,6 +7031,9 @@ function finishPerfMeasure(measure) {
   window.performance.measure(measure.name, measure.start, measure.end);
   window.performance.clearMarks(measure.start);
   window.performance.clearMarks(measure.end);
+  if (typeof window.performance.clearMeasures === "function") {
+    window.performance.clearMeasures(measure.name);
+  }
 }
 
 function clamp(value, min, max) {

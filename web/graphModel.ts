@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { cleanWikiRef, getNoteAliasKeys, normalizeKey, parseWikiTarget, slugify } from "./noteRefs.ts";
 
 export const ISSUE_TYPES = Object.freeze({
@@ -8,15 +7,129 @@ export const ISSUE_TYPES = Object.freeze({
   DUPLICATE_ALIAS: "duplicate-alias"
 });
 
-export function createGraphIndex(notes, options = {}) {
-  const noteList = Array.isArray(notes) ? notes : [];
+type GraphNote = {
+  path?: unknown;
+  id?: unknown;
+  title?: unknown;
+  parentRef?: unknown;
+  parent?: unknown;
+  parentPath?: unknown;
+  frontmatterValues?: {
+    parent?: unknown;
+    [key: string]: unknown;
+  };
+  body?: unknown;
+  raw?: unknown;
+  bodyRefs?: unknown[];
+  refs?: unknown[];
+};
+
+interface CreateGraphIndexOptions {
+  getId?: (note: GraphNote, index: number) => string;
+  includeSelfRefs?: boolean;
+  includeParentRefs?: boolean;
+}
+
+interface GraphReference {
+  ref: string;
+  label?: string;
+  [key: string]: unknown;
+}
+
+export interface GraphVertex {
+  path: string;
+  id: string;
+  index: number;
+  note: GraphNote;
+  title: string;
+  level: number | null;
+  derivedLevel: number | null;
+  parentRef: string | null;
+  aliases: string[];
+}
+
+export interface TreeEdge {
+  from: string;
+  to: string;
+  parent: string;
+  child: string;
+  ref: string;
+  type: "tree";
+}
+
+export interface ReferenceEdge {
+  from: string;
+  to: string;
+  weight: number;
+  refs: GraphReference[];
+  type: "ref";
+}
+
+export interface GraphIssue {
+  type: string;
+  path?: string;
+  paths?: string[];
+  edge?: TreeEdge;
+  ref?: string;
+  message: string;
+  [key: string]: unknown;
+}
+
+interface WeightedReference {
+  from: string;
+  to: string;
+  weight: number;
+  refs: GraphReference[];
+}
+
+interface ValidateGraphInput {
+  V: Map<string, GraphVertex>;
+  parents: Map<string, string | null>;
+  children: Map<string, string[]>;
+  E_tree: TreeEdge[];
+  missingParentIssues?: GraphIssue[];
+  duplicateAliases?: Map<string, string[]>;
+  derivedLevels?: Map<string, number>;
+}
+
+export interface GraphIndex {
+  V: Map<string, GraphVertex>;
+  E_tree: TreeEdge[];
+  E_ref: ReferenceEdge[];
+  parents: Map<string, string | null>;
+  children: Map<string, string[]>;
+  refsOut: Map<string, Map<string, number>>;
+  refsIn: Map<string, Map<string, number>>;
+  byPath: Map<string, GraphVertex>;
+  aliases: Map<string, string>;
+  aliasBuckets: Map<string, string[]>;
+  duplicateAliases: Map<string, string[]>;
+  roots: string[];
+  derivedLevels: Map<string, number>;
+  validation: GraphIssue[];
+  issues: GraphIssue[];
+  resolvePath: (value: unknown) => string | null;
+  resolveNote: (value: unknown) => GraphVertex | null;
+  getParent: (path: string) => GraphVertex | null;
+  getChildren: (path: string) => GraphVertex[];
+  getRefsOut: (path: string) => Map<string, number>;
+  getRefsIn: (path: string) => Map<string, number>;
+}
+
+const NULLISH_PARENT_REFS = new Set(["", "null", "undefined", "~"]);
+
+export function createGraphIndex(
+  notes: GraphNote[] | null | undefined,
+  options: CreateGraphIndexOptions = {}
+): GraphIndex {
+  const noteList: GraphNote[] = Array.isArray(notes) ? notes : [];
   const getId = typeof options.getId === "function" ? options.getId : defaultGetId;
   const includeSelfRefs = options.includeSelfRefs === true;
   const includeParentRefs = options.includeParentRefs === true;
-  const V = new Map();
-  const byPath = new Map();
-  const aliasBuckets = new Map();
-  const duplicateAliases = new Map();
+  const V = new Map<string, GraphVertex>();
+  const byPath = new Map<string, GraphVertex>();
+  const aliasBuckets = new Map<string, string[]>();
+  const duplicateAliases = new Map<string, string[]>();
 
   for (let index = 0; index < noteList.length; index += 1) {
     const note = noteList[index];
@@ -28,8 +141,12 @@ export function createGraphIndex(notes, options = {}) {
 
   for (const vertex of V.values()) {
     for (const alias of getAliases(vertex)) {
-      if (!aliasBuckets.has(alias)) aliasBuckets.set(alias, []);
-      aliasBuckets.get(alias).push(vertex.path);
+      let paths = aliasBuckets.get(alias);
+      if (!paths) {
+        paths = [];
+        aliasBuckets.set(alias, paths);
+      }
+      paths.push(vertex.path);
     }
   }
 
@@ -39,20 +156,20 @@ export function createGraphIndex(notes, options = {}) {
     aliasBuckets.set(alias, uniquePaths);
   }
 
-  const aliasToPath = new Map();
+  const aliasToPath = new Map<string, string>();
   for (const [alias, paths] of aliasBuckets) {
     if (paths.length === 1) aliasToPath.set(alias, paths[0]);
   }
 
-  const resolvePath = (value) => resolveNotePath(value, byPath, aliasToPath);
-  const parents = new Map();
-  const children = new Map();
-  const refsOut = new Map();
-  const refsIn = new Map();
-  const E_tree = [];
-  const E_ref = [];
-  const refWeights = new Map();
-  const missingParentIssues = [];
+  const resolvePath = (value: unknown): string | null => resolveNotePath(value, byPath, aliasToPath);
+  const parents = new Map<string, string | null>();
+  const children = new Map<string, string[]>();
+  const refsOut = new Map<string, Map<string, number>>();
+  const refsIn = new Map<string, Map<string, number>>();
+  const E_tree: TreeEdge[] = [];
+  const E_ref: ReferenceEdge[] = [];
+  const refWeights = new Map<string, WeightedReference>();
+  const missingParentIssues: GraphIssue[] = [];
 
   for (const path of V.keys()) {
     parents.set(path, null);
@@ -62,7 +179,7 @@ export function createGraphIndex(notes, options = {}) {
   }
 
   for (const vertex of V.values()) {
-    const parentRef = cleanWikiRef(getParentRef(vertex.note));
+    const parentRef = cleanWikiRef(getParentRef(vertex.note)) || null;
     vertex.parentRef = parentRef;
     if (!parentRef) continue;
 
@@ -78,7 +195,7 @@ export function createGraphIndex(notes, options = {}) {
     }
 
     parents.set(vertex.path, parentPath);
-    children.get(parentPath).push(vertex.path);
+    children.get(parentPath)?.push(vertex.path);
     E_tree.push({
       from: parentPath,
       to: vertex.path,
@@ -147,27 +264,31 @@ export function createGraphIndex(notes, options = {}) {
     validation,
     issues: validation,
     resolvePath,
-    resolveNote(value) {
+    resolveNote(value: unknown) {
       const path = resolvePath(value);
       return path ? V.get(path) || null : null;
     },
-    getParent(path) {
+    getParent(path: string) {
       const parentPath = parents.get(path);
       return parentPath ? V.get(parentPath) || null : null;
     },
-    getChildren(path) {
+    getChildren(path: string) {
       return (children.get(path) || []).map((childPath) => V.get(childPath)).filter(Boolean);
     },
-    getRefsOut(path) {
+    getRefsOut(path: string) {
       return refsOut.get(path) || new Map();
     },
-    getRefsIn(path) {
+    getRefsIn(path: string) {
       return refsIn.get(path) || new Map();
     }
   };
 }
 
-export function resolveNotePath(value, byPath, aliases) {
+export function resolveNotePath(
+  value: unknown,
+  byPath: Map<string, unknown>,
+  aliases: Map<string, string>
+): string | null {
   const directPath = getPath(value);
   if (directPath && byPath.has(directPath)) return directPath;
 
@@ -185,10 +306,14 @@ export function resolveNotePath(value, byPath, aliases) {
   );
 }
 
-export function deriveLevels(V, parents, children) {
-  const levels = new Map();
+export function deriveLevels(
+  V: Map<string, GraphVertex>,
+  parents: Map<string, string | null>,
+  children: Map<string, string[]>
+): Map<string, number> {
+  const levels = new Map<string, number>();
   const roots = getRootPaths(V);
-  const queue = roots.map((path) => [path, 0]);
+  const queue: Array<[string, number]> = roots.map((path) => [path, 0]);
 
   for (let index = 0; index < queue.length; index += 1) {
     const [path, level] = queue[index];
@@ -210,8 +335,8 @@ export function validateGraph({
   E_tree,
   missingParentIssues = [],
   derivedLevels = new Map()
-}) {
-  const issues = [];
+}: ValidateGraphInput): GraphIssue[] {
+  const issues: GraphIssue[] = [];
 
   issues.push(...missingParentIssues);
 
@@ -232,7 +357,7 @@ export function validateGraph({
   return issues;
 }
 
-function normalizeVertex(note, path, index) {
+function normalizeVertex(note: GraphNote, path: string, index: number): GraphVertex {
   const title = getTitle(note, path);
 
   return {
@@ -248,38 +373,45 @@ function normalizeVertex(note, path, index) {
   };
 }
 
-function getRootPaths(V) {
+function getRootPaths(V: Map<string, GraphVertex>): string[] {
   return [...V.values()]
     .filter((vertex) => !cleanWikiRef(vertex.parentRef))
     .map((vertex) => vertex.path);
 }
 
-function defaultGetId(note, index) {
+function defaultGetId(note: GraphNote, index: number): string {
   return getPath(note) || `__note_${index}`;
 }
 
-function getPath(value) {
+function getPath(value: unknown): string | null {
   if (!value) return null;
   if (typeof value === "string") return value;
-  return value.path || value.id || null;
+  if (!isRecord(value)) return null;
+  const path = value.path || value.id || null;
+  return path ? String(path) : null;
 }
 
-function getTitle(note, fallbackPath) {
+function getTitle(note: GraphNote | null | undefined, fallbackPath: string): string {
   return String(note && note.title ? note.title : fallbackPath.split("/").pop() || fallbackPath);
 }
 
-function getParentRef(note) {
+function getParentRef(note: GraphNote | null | undefined): unknown | null {
   if (!note) return null;
-  if (Object.prototype.hasOwnProperty.call(note, "parentRef")) return note.parentRef;
+  if (Object.prototype.hasOwnProperty.call(note, "parentRef")) return normalizeParentRef(note.parentRef);
   if (note.frontmatterValues && Object.prototype.hasOwnProperty.call(note.frontmatterValues, "parent")) {
-    return note.frontmatterValues.parent;
+    return normalizeParentRef(note.frontmatterValues.parent);
   }
-  if (Object.prototype.hasOwnProperty.call(note, "parent")) return note.parent;
-  if (Object.prototype.hasOwnProperty.call(note, "parentPath")) return note.parentPath;
+  if (Object.prototype.hasOwnProperty.call(note, "parent")) return normalizeParentRef(note.parent);
+  if (Object.prototype.hasOwnProperty.call(note, "parentPath")) return normalizeParentRef(note.parentPath);
   return null;
 }
 
-function getReferenceRefs(note) {
+function normalizeParentRef(value: unknown): unknown | null {
+  const ref = String(value ?? "").trim();
+  return NULLISH_PARENT_REFS.has(ref.toLowerCase()) ? null : value;
+}
+
+function getReferenceRefs(note: GraphNote | null | undefined): GraphReference[] {
   if (!note) return [];
   if (typeof note.body === "string") {
     return parseWikiRefsWithMultiplicity(note.body);
@@ -296,40 +428,48 @@ function getReferenceRefs(note) {
   return [];
 }
 
-function parseWikiRefsWithMultiplicity(text) {
-  const refs = [];
+function parseWikiRefsWithMultiplicity(text: unknown): GraphReference[] {
+  const refs: GraphReference[] = [];
   const regex = /\[\[([^\]]+)\]\]/g;
   let match;
 
   while ((match = regex.exec(String(text || ""))) !== null) {
     const parsed = parseWikiTarget(match[1]);
-    if (parsed && parsed.ref) refs.push(parsed);
+    if (parsed && parsed.ref) refs.push(parsed as GraphReference);
   }
 
   return refs;
 }
 
-function normalizeRef(ref) {
+function normalizeRef(ref: unknown): GraphReference | null {
   if (!ref) return null;
   if (typeof ref === "string") {
     const parsed = parseWikiTarget(ref);
     return parsed.ref ? parsed : { ref, label: ref };
   }
-  if (ref.ref) return { ...ref, ref: cleanWikiRef(ref.ref) || ref.ref };
+  if (!isRecord(ref)) return null;
+  if (ref.ref) return { ...ref, ref: String(cleanWikiRef(ref.ref) || ref.ref) };
   if (ref.path || ref.id) {
-    const value = ref.path || ref.id;
-    return { ...ref, ref: value, label: ref.label || value };
+    const value = String(ref.path || ref.id);
+    return { ...ref, ref: value, label: ref.label ? String(ref.label) : value };
   }
   return null;
 }
 
-function getAliases(vertex) {
-  const aliases = getNoteAliasKeys(vertex.path, vertex.title);
+function getAliases(vertex: GraphVertex): string[] {
+  const aliases = getNoteAliasKeys(vertex.path, vertex.title) as string[];
   vertex.aliases = aliases;
   return aliases;
 }
 
-function addWeightedReference(refWeights, refsOut, refsIn, from, to, ref) {
+function addWeightedReference(
+  refWeights: Map<string, WeightedReference>,
+  refsOut: Map<string, Map<string, number>>,
+  refsIn: Map<string, Map<string, number>>,
+  from: string,
+  to: string,
+  ref: GraphReference
+): void {
   const key = `${from}->${to}`;
   if (!refWeights.has(key)) {
     refWeights.set(key, {
@@ -341,13 +481,15 @@ function addWeightedReference(refWeights, refsOut, refsIn, from, to, ref) {
   }
 
   const weighted = refWeights.get(key);
+  if (!weighted) return;
   weighted.weight += 1;
   weighted.refs.push(ref);
   incrementMap(refsOut.get(from), to);
   incrementMap(refsIn.get(to), from);
 }
 
-function incrementMap(map, key) {
+function incrementMap(map: Map<string, number> | undefined, key: string): void {
+  if (!map) return;
   map.set(key, (map.get(key) || 0) + 1);
 }
 
@@ -397,7 +539,11 @@ function pairKey(a, b) {
   return a < b ? `${a}<->${b}` : `${b}<->${a}`;
 }
 
-function unique(values) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object");
+}
+
+function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
 }
 

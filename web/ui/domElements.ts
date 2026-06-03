@@ -1,4 +1,76 @@
-export function getDomElements() {
+export interface DomElements {
+  layout: Element | null;
+  launchScreen: Element | null;
+  launchOpenProjectButton: Element | null;
+  launchCreateProjectButton: Element | null;
+  launchRecentList: Element | null;
+  launchRecentEmpty: Element | null;
+  launchStatus: Element | null;
+  graphProjectLauncher: Element | null;
+  graphOpenProjectButton: Element | null;
+  graphCreateProjectButton: Element | null;
+  graphRecentList: Element | null;
+  graphRecentEmpty: Element | null;
+  graphLaunchStatus: Element | null;
+  closeGraphProjectLauncherButton: Element | null;
+  workspaceTabs: Element | null;
+  graph: Element | null;
+  graphPane: Element | null;
+  graphScroller: Element | null;
+  graphCanvas: SVGSVGElement | null;
+  editorResizeHandle: Element | null;
+  graphHelpButton: Element | null;
+  graphHelpDialog: Element | null;
+  closeGraphHelpButton: Element | null;
+  searchField: Element | null;
+  searchFieldIcon: Element | null;
+  searchInput: Element | null;
+  searchResults: Element | null;
+  newNoteButton: Element | null;
+  editorPane: Element | null;
+  editor: Element | null;
+  noteTitle: Element | null;
+  notePath: Element | null;
+  noteInfo: Element | null;
+  infoParent: Element | null;
+  fullscreenEditorButton: Element | null;
+  deleteNoteButton: Element | null;
+  editorStatus: Element | null;
+  sourceStatus: Element | null;
+  validationStatus: Element | null;
+  updateButton: Element | null;
+  updateRestartOverlay: Element | null;
+  zoomInButton: Element | null;
+  zoomOutButton: Element | null;
+  resetViewButton: Element | null;
+  fullscreenGraphButton: Element | null;
+  newNoteDialog: Element | null;
+  newNoteForm: Element | null;
+  newNoteTitle: Element | null;
+  newNoteParent: Element | null;
+  newNoteHint: Element | null;
+  cancelNewNoteButton: Element | null;
+  createFolderDialog: Element | null;
+  createFolderForm: Element | null;
+  createFolderName: Element | null;
+  createFolderLocationSelect: Element | null;
+  createFolderLocationPath: Element | null;
+  cancelCreateFolderButton: Element | null;
+  hierarchyPromptDialog: Element | null;
+  copyHierarchyPromptButton: Element | null;
+  closeHierarchyPromptButton: Element | null;
+  deleteConfirmDialog: Element | null;
+  deleteConfirmTitle: Element | null;
+  deleteConfirmMessage: Element | null;
+  deleteConfirmDetail: Element | null;
+  cancelDeleteButton: Element | null;
+  confirmDeleteButton: Element | null;
+  graphCreatePopover: Element | null;
+  graphNewTitle: Element | null;
+  cancelGraphCreateButton: Element | null;
+}
+
+export function getDomElements(): DomElements {
   return {
     layout: document.querySelector(".layout"),
     launchScreen: document.querySelector("#launchScreen"),

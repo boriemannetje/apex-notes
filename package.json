@@ -12,7 +12,7 @@
     "build": "npm run build:web:prod && tauri build",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && node --experimental-strip-types --test web/*.test.js web/**/*.test.ts",
-    "test:coverage": "node --experimental-strip-types --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-functions=70 --test-coverage-branches=70 --test-coverage-include=web/notes/*.ts --test-coverage-include=web/persistence/*.ts --test-coverage-include=web/state/*.ts --test-coverage-include=web/ui/*.ts web/*.test.js web/**/*.test.ts",
+    "test:coverage": "node --experimental-strip-types --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-functions=70 --test-coverage-branches=70 --test-coverage-include=web/notes/*.ts --test-coverage-include=web/persistence/*.ts --test-coverage-include=web/state/*.ts --test-coverage-include=web/ui/*.ts --test-coverage-include=web/search*.ts web/*.test.js web/**/*.test.ts",
     "test:e2e": "APEX_NOTES_BUILD_CHANNEL=main-production npm run build:web:prod && node --test tests/e2e/*.test.js",
     "test:pr": "npm test && npm run test:coverage && npm run test:e2e && cargo test --manifest-path src-tauri/Cargo.toml && npm run build",
     "tauri": "tauri"

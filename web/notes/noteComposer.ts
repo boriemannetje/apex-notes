@@ -28,7 +28,7 @@ export function createNoteRaw({
   body
 }: {
   title: string;
-  parent: NoteParent | null;
+  parent?: NoteParent | null;
   body?: string;
 }): string {
   return [

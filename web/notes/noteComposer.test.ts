@@ -45,6 +45,13 @@ test("createNoteRaw starts blank notes without duplicating the title heading", (
   );
 });
 
+test("createNoteRaw treats an omitted parent as a loose/root note", () => {
+  assert.equal(
+    createNoteRaw({ title: "Loose" }),
+    "---\ntitle: \"Loose\"\nparent: null\n---\n\n"
+  );
+});
+
 test("createNoteRaw creates immediate child frontmatter from parent basename", () => {
   assert.match(
     createNoteRaw({ title: "Child", parent: { basename: "parent-note" } }),

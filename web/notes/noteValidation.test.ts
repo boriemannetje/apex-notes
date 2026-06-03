@@ -15,3 +15,16 @@ test("validateNotes requires the parent frontmatter key", () => {
     ["Missing Parent Key is missing a parent"]
   );
 });
+
+test("validateNotes accepts nullish parent values as loose/root notes", () => {
+  for (const parentLine of ["parent: null", "parent:", "parent: undefined", "parent: ~"]) {
+    const note = parseNote("root.md", `---\ntitle: "Root"\n${parentLine}\n---\n\n# Root\n`);
+    const byPath = new Map([[note.path, note]]);
+    const graphIndex = createGraphIndex([note]);
+
+    assert.deepEqual(
+      validateNotes([note], graphIndex, byPath).map((issue) => issue.message),
+      []
+    );
+  }
+});

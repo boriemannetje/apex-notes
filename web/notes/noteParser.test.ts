@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseFrontmatter, parseNote, splitMarkdown, stripQuotes } from "./noteParser.ts";
+import { normalizeParentRef, parseFrontmatter, parseNote, splitMarkdown, stripQuotes } from "./noteParser.ts";
 
 test("splitMarkdown separates YAML frontmatter from the Markdown body", () => {
   assert.deepEqual(splitMarkdown("---\ntitle: \"Apex\"\nlevel: 0\n---\n\n# Body\n"), {
@@ -59,6 +59,19 @@ test("parseNote falls back to heading/path for loose malformed notes", () => {
   assert.equal(note.hasFrontmatter, false);
   assert.equal(note.hasTitle, false);
   assert.equal(note.hasParent, false);
+});
+
+test("parseNote treats nullish parent frontmatter as parentless", () => {
+  for (const parentLine of ["parent: null", "parent:", "parent: undefined", "parent: ~"]) {
+    const note = parseNote("root.md", `---\ntitle: "Root"\n${parentLine}\n---\n\n# Root\n`);
+
+    assert.equal(note.hasParent, true);
+    assert.equal(note.parentRef, null);
+  }
+});
+
+test("normalizeParentRef preserves concrete parent refs", () => {
+  assert.equal(normalizeParentRef(" [[root-note]] "), "[[root-note]]");
 });
 
 test("stripQuotes only removes matching outer quote pairs", () => {

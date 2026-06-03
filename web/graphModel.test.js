@@ -74,6 +74,18 @@ test("supports multiple parentless roots and loose notes as valid forest entries
   assert(!index.validation.some((issue) => issue.type === ISSUE_TYPES.DISCONNECTED));
 });
 
+test("treats generic nullish parent values as parentless roots", () => {
+  const index = createGraphIndex([
+    { path: "null.md", title: "Null Parent", parentRef: "null", body: "" },
+    { path: "empty.md", title: "Empty Parent", frontmatterValues: { parent: "" }, body: "" },
+    { path: "undefined.md", title: "Undefined Parent", parent: "undefined", body: "" },
+    { path: "tilde.md", title: "Tilde Parent", parentPath: "~", body: "" }
+  ]);
+
+  assert.deepEqual(index.roots, ["null.md", "empty.md", "undefined.md", "tilde.md"]);
+  assert.equal(index.validation.length, 0);
+});
+
 test("reports duplicate aliases and cycles without throwing away vertices", () => {
   const index = createGraphIndex([
     note("a.md", "Same", 0, "[[b]]", ""),

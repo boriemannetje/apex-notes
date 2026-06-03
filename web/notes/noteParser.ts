@@ -40,6 +40,8 @@ export interface ParsedNote {
   children: ParsedNote[];
 }
 
+const NULLISH_PARENT_VALUES = new Set(["", "null", "undefined", "~"]);
+
 export function parseNote(path: string, raw: string): ParsedNote {
   const parsed = splitMarkdown(raw);
   const frontmatter = parseFrontmatter(parsed.frontmatterRaw);
@@ -62,7 +64,7 @@ export function parseNote(path: string, raw: string): ParsedNote {
     hasFrontmatter: parsed.hasFrontmatter,
     hasTitle: Object.prototype.hasOwnProperty.call(frontmatter.values, "title"),
     hasParent: Object.prototype.hasOwnProperty.call(frontmatter.values, "parent"),
-    parentRef: frontmatter.values.parent || null,
+    parentRef: normalizeParentRef(frontmatter.values.parent),
     raw,
     frontmatterRaw: parsed.frontmatterRaw,
     frontmatterEntries: frontmatter.entries,
@@ -75,6 +77,11 @@ export function parseNote(path: string, raw: string): ParsedNote {
     parentNote: null,
     children: []
   };
+}
+
+export function normalizeParentRef(value: string | null | undefined): string | null {
+  const parentRef = String(value ?? "").trim();
+  return NULLISH_PARENT_VALUES.has(parentRef.toLowerCase()) ? null : parentRef;
 }
 
 export function splitMarkdown(raw: string): SplitMarkdown {
