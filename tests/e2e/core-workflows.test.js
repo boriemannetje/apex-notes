@@ -90,6 +90,74 @@ test("core Tauri workspace flows keep working", async () => {
   await page.close();
 });
 
+test("canvas annotations draw, name, write, undo, reload, and remain behind nodes", async () => {
+  const page = await newMockedTauriPage();
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+
+  const graph = await page.locator("#graph").boundingBox();
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 260, graph.y + 240);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 430, graph.y + 310, { steps: 4 });
+  await page.mouse.up();
+  await page.locator("#annotationEditor").fill("Milestone");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations?.items?.[0]?.name === "Milestone");
+
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='line']").count(), 1);
+  assert.equal(await textContent(page, ".annotationLabel"), "Milestone");
+  assert.equal(await page.evaluate(() => {
+    const canvas = document.querySelector(".graphCanvas");
+    return canvas?.firstElementChild?.classList.contains("annotationLayer") &&
+      Boolean(canvas.querySelector(".annotationLayer ~ .node"));
+  }), true);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 360, graph.y + 430);
+  await page.locator("#annotationEditor").fill("First line\nSecond line");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations?.items?.some((item) => item.type === "text" && item.text.includes("Second line")));
+
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 1);
+  await pressShortcut(page, "Y");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 2);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "write_annotations")), true);
+
+  await page.locator(".workspaceTabClose").click();
+  await page.getByRole("button", { name: "Open project" }).waitFor();
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".annotationItem[data-annotation-type='line']").waitFor();
+  assert.equal(await page.locator(".annotationText").count(), 1);
+  await page.close();
+});
+
+test("annotation-only workspaces fit and corrupt sidecars disable drawing", async () => {
+  const annotationOnly = sampleWorkspace();
+  annotationOnly.notes = [];
+  annotationOnly.annotations = { version: 1, items: [{ id: "box", type: "square", x: 100, y: 120, size: 240, name: "Area" }] };
+  const page = await newMockedTauriPage(annotationOnly);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  assert.equal(await page.locator("#resetViewButton").isEnabled(), true);
+  await page.locator("#resetViewButton").click();
+  await page.waitForTimeout(550);
+  assert.equal(await page.locator(".annotationItem[data-annotation-id='box']").count(), 1);
+  await page.close();
+
+  const corrupt = sampleWorkspace();
+  corrupt.annotationsError = "Unsupported annotations document version";
+  const blocked = await newMockedTauriPage(corrupt);
+  await blocked.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await blocked.getByRole("button", { name: "Open project" }).click();
+  assert.equal(await blocked.locator("[data-annotation-tool='line']").isDisabled(), true);
+  assert.equal(await blocked.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "write_annotations")), false);
+  await blocked.close();
+});
+
 test("workspace chrome supports rename and fullscreen without losing the graph", async () => {
   const page = await newMockedTauriPage();
 
@@ -621,6 +689,11 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             state.workspace.positions = next;
             return null;
           }
+          if (command === "write_annotations") {
+            state.workspace.annotations = clone(args.annotations);
+            state.workspace.annotationsError = "";
+            return null;
+          }
           if (command === "rename_workspace") {
             state.workspace.workspaceName = args.folderName;
             state.workspace.rootPath = `/tmp/${args.folderName}`;
@@ -670,6 +743,8 @@ function sampleWorkspace() {
     workspaceName: "Smoke Notes",
     source: "folder",
     positions: {},
+    annotations: { version: 1, items: [] },
+    annotationsError: "",
     notes: [
       {
         path: "root.md",

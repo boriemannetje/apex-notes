@@ -18,6 +18,8 @@ export interface DomElements {
   graphPane: Element | null;
   graphScroller: Element | null;
   graphCanvas: SVGSVGElement | null;
+  annotationToolbar: Element | null;
+  annotationEditor: HTMLTextAreaElement | null;
   editorResizeHandle: Element | null;
   graphHelpButton: Element | null;
   graphHelpDialog: Element | null;
@@ -91,6 +93,8 @@ export function getDomElements(): DomElements {
     graphPane: document.querySelector(".graphPane"),
     graphScroller: document.querySelector("#graphScroller"),
     graphCanvas: null,
+    annotationToolbar: document.querySelector("#annotationToolbar"),
+    annotationEditor: document.querySelector("#annotationEditor"),
     editorResizeHandle: document.querySelector("#editorResizeHandle"),
     graphHelpButton: document.querySelector("#graphHelpButton"),
     graphHelpDialog: document.querySelector("#graphHelpDialog"),

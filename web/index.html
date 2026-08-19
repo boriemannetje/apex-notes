@@ -85,6 +85,15 @@
           </div>
         </header>
         <div id="graphScroller" class="graphScroller">
+          <div id="annotationToolbar" class="annotationToolbar" role="toolbar" aria-label="Canvas drawing tools">
+            <button type="button" data-annotation-tool="select" aria-label="Select annotations" title="Select annotations (V)" aria-pressed="true">Select</button>
+            <button type="button" data-annotation-tool="pen" aria-label="Draw freehand" title="Pen (P)" aria-pressed="false">Pen</button>
+            <button type="button" data-annotation-tool="line" aria-label="Draw line" title="Line (L)" aria-pressed="false">Line</button>
+            <button type="button" data-annotation-tool="square" aria-label="Draw square" title="Square (R)" aria-pressed="false">Square</button>
+            <button type="button" data-annotation-tool="circle" aria-label="Draw circle" title="Circle (C)" aria-pressed="false">Circle</button>
+            <button type="button" data-annotation-tool="text" aria-label="Write text" title="Text (T)" aria-pressed="false">Text</button>
+          </div>
+          <textarea id="annotationEditor" class="annotationEditor" aria-label="Edit canvas annotation" maxlength="20000" hidden></textarea>
           <section id="graphProjectLauncher" class="graphProjectLauncher" aria-labelledby="graphProjectTitle" hidden>
             <div class="graphProjectInner">
               <div class="graphProjectHeader">
@@ -220,6 +229,15 @@
               <li>Click empty graph space in an empty folder to create the first note.</li>
               <li>Double-click empty graph space to create a loose note.</li>
               <li>Paste text into the graph to create a note, or drop Markdown files to import them.</li>
+            </ul>
+          </section>
+          <section class="interactionGroup" aria-labelledby="interactionDrawTitle">
+            <h3 id="interactionDrawTitle">Draw and write</h3>
+            <ul>
+              <li>Choose Pen, Line, Square, Circle, or Text from the canvas toolbar.</li>
+              <li>Drag to draw. Lines, squares, and circles can be named immediately.</li>
+              <li>Use Select to move or resize annotations; double-click a label to rename it.</li>
+              <li>Press <kbd>Escape</kbd> to cancel drawing or return to Select.</li>
             </ul>
           </section>
           <section class="interactionGroup" aria-labelledby="interactionSelectTitle">
