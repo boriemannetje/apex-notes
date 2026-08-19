@@ -298,6 +298,7 @@ test("annotation labels, keyboard access, viewport clamping, wheel routing, and 
     await page.locator("#cancelDeleteButton").click();
   }
   await page.locator(".annotationLabelHit").click();
+  assert.equal(await page.locator(".annotationItem[data-annotation-id='named-line'] .annotationHandle").count(), 2);
   await page.mouse.click(graphBox.x + graphBox.width - 30, graphBox.y + graphBox.height - 30);
   await page.keyboard.press("Delete");
   assert.equal(await page.locator(".annotationItem[data-annotation-id='named-line']").count(), 1);
@@ -320,9 +321,8 @@ test("annotation labels, keyboard access, viewport clamping, wheel routing, and 
   await page.locator("#fullscreenGraphButton").click();
   await page.waitForFunction(() => !document.body.classList.contains("graphFullscreen"));
 
-  await page.locator(".annotationItem[data-annotation-id='edge-text']").focus();
-  await page.keyboard.press("Space");
-  await page.keyboard.press("Delete");
+  await page.locator(".annotationItem[data-annotation-id='edge-text']").press("Space");
+  await page.locator(".annotationItem[data-annotation-id='edge-text']").press("Delete");
   await page.waitForFunction(() => !document.querySelector(".annotationItem[data-annotation-id='edge-text']"));
   await page.close();
 });
@@ -381,6 +381,149 @@ test("reopening an externally changed workspace clears stale annotation undo his
   await page.locator("#graph").focus();
   await pressShortcut(page, "Z");
   assert.equal(await page.locator(".annotationItem").count(), 0);
+  await page.close();
+});
+
+test("pending annotation writes finish before rename and renamed workspaces preserve undo history", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 280, graph.y + 260);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 410, graph.y + 310);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+
+  await page.locator(".workspaceTab.active").dblclick();
+  await page.locator("[data-rename-workspace]").fill("Renamed During Save");
+  await page.locator("[data-rename-workspace]").press("Enter");
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "rename_workspace")), false);
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => document.querySelector(".workspaceTab.active")?.textContent?.includes("Renamed During Save"));
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='line']").count(), 1);
+
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => document.querySelectorAll(".annotationItem").length === 0);
+  await page.close();
+});
+
+test("closing and reopening a workspace waits for its delayed annotation write", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 320, graph.y + 300);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 450, graph.y + 350);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+  await page.locator(".workspaceTabClose").click();
+  assert.equal(await page.locator(".workspaceTab").count(), 1);
+
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.getByRole("button", { name: "Open project" }).waitFor();
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".annotationItem[data-annotation-type='line']").waitFor();
+  assert.equal(await page.locator(".annotationItem").count(), 1);
+  await page.close();
+});
+
+test("same-folder rehydrate waits for a delayed annotation write before reading", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 330, graph.y + 280);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 460, graph.y + 340);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.filter((call) => call.command === "read_workspace").length), 1);
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => window.__apexTestState.calls.filter((call) => call.command === "read_workspace").length === 2);
+  await page.locator(".annotationItem[data-annotation-type='line']").waitFor();
+  await page.close();
+});
+
+test("rapid queued annotation writes retain one undo entry per successful gesture", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 300, graph.y + 320);
+  await page.locator("#annotationEditor").fill("First queued text");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 500, graph.y + 420);
+  await page.locator("#annotationEditor").fill("Second queued text");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='text']").count(), 2);
+
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => window.__apexTestState.calls.filter((call) => call.command === "write_annotations").length >= 2 && window.__apexTestState.workspace.annotations.items.length === 2);
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 1);
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 0);
+  await page.close();
+});
+
+test("annotation selection and drawing preserve an immediately edited open note", async () => {
+  const workspace = sampleWorkspace();
+  workspace.annotations.items = [{ id: "select-me", type: "line", x1: 700, y1: 300, x2: 850, y2: 330, name: "Select me" }];
+  const page = await newMockedTauriPage(workspace);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("\nRetained after annotation select");
+  await page.locator(".annotationLabelHit").click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.find((note) => note.path === "root.md")?.raw.includes("Retained after annotation select"));
+  assert.equal(await textContent(page, "#notePath"), "root.md");
+
+  await page.locator(".cm-content").click();
+  await page.keyboard.type("\nRetained after annotation draw");
+  const graph = await page.locator("#graph").boundingBox();
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 350, graph.y + 500);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 470, graph.y + 540);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes.find((note) => note.path === "root.md")?.raw.includes("Retained after annotation draw"));
+  assert.equal(await textContent(page, "#notePath"), "root.md");
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "write_note" && call.args.path === "root.md")), true);
   await page.close();
 });
 

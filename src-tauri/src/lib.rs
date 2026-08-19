@@ -436,11 +436,14 @@ fn write_annotations_blocking(
         read_annotations_file(&notes_root)?;
     }
 
+    let raw = serde_json::to_string(&annotations).map_err(to_error)?;
+    if raw.len() as u64 > MAX_ANNOTATION_DOCUMENT_BYTES {
+        return Err(format!(
+            "annotations.json exceeds the {} byte limit",
+            MAX_ANNOTATION_DOCUMENT_BYTES
+        ));
+    }
     validate_annotations(&annotations)?;
-    let raw = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&annotations).map_err(to_error)?
-    );
     write_if_changed(&path, &raw).map_err(to_error)
 }
 
@@ -1323,8 +1326,45 @@ mod tests {
             annotations
         );
         let raw = fs::read_to_string(notes.join("annotations.json")).expect("read sidecar");
-        assert!(raw.contains("\"type\": \"line\""));
-        assert!(raw.ends_with('\n'));
+        assert!(raw.contains("\"type\":\"line\""));
+        assert!(!raw.ends_with('\n'));
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn near_limit_annotations_round_trip_in_the_exact_persisted_form() {
+        let notes = temp_notes_dir("annotations-near-limit");
+        let mut annotations = AnnotationDocument {
+            version: 1,
+            items: vec![AnnotationItem::Text(AnnotationText {
+                id: "x".into(),
+                x: 0.0,
+                y: 0.0,
+                text: String::new(),
+            })],
+        };
+        let base_len = serde_json::to_string(&annotations)
+            .expect("serialize base annotations")
+            .len();
+        let id_len = 1 + MAX_ANNOTATION_DOCUMENT_BYTES as usize - base_len;
+        if let AnnotationItem::Text(text) = &mut annotations.items[0] {
+            text.id = "x".repeat(id_len);
+        }
+        let expected = serde_json::to_string(&annotations).expect("serialize near-limit annotations");
+        assert_eq!(expected.len(), MAX_ANNOTATION_DOCUMENT_BYTES as usize);
+
+        write_annotations_blocking(notes.to_string_lossy().into_owned(), annotations.clone())
+            .expect("write near-limit annotations");
+        assert_eq!(
+            fs::metadata(notes.join("annotations.json"))
+                .expect("inspect sidecar")
+                .len(),
+            MAX_ANNOTATION_DOCUMENT_BYTES
+        );
+        assert_eq!(
+            read_annotations_file(&notes).expect("read near-limit annotations"),
+            annotations
+        );
         fs::remove_dir_all(notes).ok();
     }
 
