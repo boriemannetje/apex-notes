@@ -200,6 +200,86 @@ test("workspace chrome supports rename and fullscreen without losing the graph",
   await page.close();
 });
 
+test("mouse wheel zoom is continuous, cursor anchored, bounded, and canvas scoped", async () => {
+  const page = await newMockedTauriPage();
+
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTab.active").waitFor();
+  await page.locator(".graphCanvas").waitFor();
+
+  const graphBox = await page.locator("#graph").boundingBox();
+  assert(graphBox);
+  const clientX = graphBox.x + graphBox.width * 0.37;
+  const clientY = graphBox.y + graphBox.height * 0.41;
+  const before = await graphWheelSnapshot(page, clientX, clientY);
+
+  const zoomInDispatch = await dispatchGraphWheel(page, {
+    clientX,
+    clientY,
+    deltaY: -100
+  });
+  const zoomedIn = await graphWheelSnapshot(page, clientX, clientY, before.graphPoint);
+  assert.equal(zoomInDispatch.defaultPrevented, true);
+  assert(zoomedIn.scale > before.scale);
+  assert(Math.abs(zoomedIn.scale / before.scale - 1.08) < 0.005);
+  assert(Math.hypot(zoomedIn.anchorError.x, zoomedIn.anchorError.y) <= 1);
+
+  await dispatchGraphWheel(page, { clientX, clientY, deltaY: 100 });
+  const zoomedOut = await graphWheelSnapshot(page, clientX, clientY);
+  assert(zoomedOut.scale < zoomedIn.scale);
+  assert(Math.abs(zoomedOut.scale - before.scale) < 0.001);
+
+  const beforeOutsideWheel = zoomedOut.scale;
+  await page.locator(".cm-content").dispatchEvent("wheel", {
+    deltaX: 0,
+    deltaY: -100,
+    deltaMode: 0,
+    bubbles: true,
+    cancelable: true
+  });
+  assert.equal((await graphWheelSnapshot(page, clientX, clientY)).scale, beforeOutsideWheel);
+
+  const graph = page.locator("#graph");
+  await graph.dispatchEvent("pointerdown", {
+    button: 0,
+    buttons: 1,
+    pointerId: 41,
+    clientX,
+    clientY,
+    bubbles: true,
+    cancelable: true
+  });
+  const activeGestureDispatch = await dispatchGraphWheel(page, {
+    clientX,
+    clientY,
+    deltaY: -100
+  });
+  assert.equal(activeGestureDispatch.defaultPrevented, false);
+  assert.equal((await graphWheelSnapshot(page, clientX, clientY)).scale, beforeOutsideWheel);
+  await graph.dispatchEvent("pointerup", {
+    button: 0,
+    buttons: 0,
+    pointerId: 41,
+    clientX,
+    clientY,
+    bubbles: true,
+    cancelable: true
+  });
+
+  for (let index = 0; index < 20; index += 1) {
+    await dispatchGraphWheel(page, { clientX, clientY, deltaY: -10_000 });
+  }
+  assert(Math.abs((await graphWheelSnapshot(page, clientX, clientY)).scale - 2.2) < 1e-6);
+
+  for (let index = 0; index < 30; index += 1) {
+    await dispatchGraphWheel(page, { clientX, clientY, deltaY: 10_000 });
+  }
+  assert(Math.abs((await graphWheelSnapshot(page, clientX, clientY)).scale - 0.02) < 1e-6);
+
+  await page.close();
+});
+
 test("pasting plain text into the graph creates a loose note", async () => {
   const page = await newMockedTauriPage();
 
@@ -881,6 +961,37 @@ async function assertGraphNode(page, path) {
   const node = page.locator(`.node[data-path='${path}']`);
   await node.waitFor();
   assert.equal(await node.count(), 1);
+}
+
+async function dispatchGraphWheel(page, { clientX, clientY, deltaX = 0, deltaY, deltaMode = 0 }) {
+  return page.locator("#graph").evaluate((element, init) => {
+    const event = new WheelEvent("wheel", {
+      ...init,
+      bubbles: true,
+      cancelable: true
+    });
+    element.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented };
+  }, { clientX, clientY, deltaX, deltaY, deltaMode });
+}
+
+async function graphWheelSnapshot(page, clientX, clientY, graphPoint = null) {
+  return page.locator(".graphCanvas").evaluate((canvas, input) => {
+    const screenMatrix = canvas.getScreenCTM();
+    const localMatrix = canvas.transform.baseVal.consolidate()?.matrix;
+    if (!screenMatrix || !localMatrix) throw new Error("Graph transform is unavailable");
+    const point = input.graphPoint || new DOMPoint(input.clientX, input.clientY)
+      .matrixTransform(screenMatrix.inverse());
+    const anchoredScreenPoint = new DOMPoint(point.x, point.y).matrixTransform(screenMatrix);
+    return {
+      scale: localMatrix.a,
+      graphPoint: { x: point.x, y: point.y },
+      anchorError: {
+        x: anchoredScreenPoint.x - input.clientX,
+        y: anchoredScreenPoint.y - input.clientY
+      }
+    };
+  }, { clientX, clientY, graphPoint });
 }
 
 async function noteRaw(page, path) {

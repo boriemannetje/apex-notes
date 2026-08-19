@@ -11,6 +11,7 @@ import {
 import { LARGE_GRAPH_CONFIG } from "./graphConfig.ts";
 import { createGraphIndex } from "./graphModel.ts";
 import { buildGraphLayout } from "./graphLayout.ts";
+import { getGraphWheelZoomFactor } from "./graphWheelZoom.ts";
 import {
   computeNoteLinkStats,
   decideVisibleLabels,
@@ -5082,10 +5083,26 @@ function wrapTitle(title) {
 }
 
 function onGraphWheel(event) {
+  if (state.activeInteraction || shouldIgnoreGraphWheelTarget(event.target)) return;
+  const factor = getGraphWheelZoomFactor({
+    deltaX: event.deltaX,
+    deltaY: event.deltaY,
+    deltaMode: event.deltaMode,
+    pageHeight: els.graph.getBoundingClientRect().height
+  });
+  if (factor === null) return;
+
   event.preventDefault();
   closeGraphCreatePopover();
-  const factor = event.deltaY < 0 ? 1.08 : 1 / 1.08;
   zoomAtPoint(event.clientX, event.clientY, factor);
+}
+
+function shouldIgnoreGraphWheelTarget(target) {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest(
+    "input, textarea, select, [contenteditable], .cm-editor, .graphCreatePopover, " +
+    ".annotationToolbar, .annotationEditor, [data-graph-wheel-ignore]"
+  ));
 }
 
 function zoomAtCenter(factor) {
