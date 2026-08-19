@@ -4,6 +4,8 @@ export const MAX_STROKE_POINTS = 4_096;
 export const MAX_TOTAL_STROKE_POINTS = 100_000;
 export const MAX_ANNOTATION_NAME_LENGTH = 120;
 export const MAX_ANNOTATION_TEXT_LENGTH = 20_000;
+export const MAX_TOTAL_ANNOTATION_TEXT_LENGTH = 200_000;
+export const MAX_ANNOTATION_DOCUMENT_BYTES = 4 * 1024 * 1024;
 
 export type Point = { x: number; y: number };
 export type LineAnnotation = { id: string; type: "line"; x1: number; y1: number; x2: number; y2: number; name?: string };
@@ -18,17 +20,31 @@ export type AnnotationTool = "select" | "pen" | "line" | "square" | "circle" | "
 export const emptyAnnotationDocument = (): AnnotationDocument => ({ version: ANNOTATION_VERSION, items: [] });
 
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
-const nonEmptyId = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 200;
+const nonEmptyId = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+const codePointLength = (value: string) => [...value].length;
+const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
+
+const allowedKeysByType = {
+  line: new Set(["id", "type", "x1", "y1", "x2", "y2", "name"]),
+  square: new Set(["id", "type", "x", "y", "size", "name"]),
+  circle: new Set(["id", "type", "cx", "cy", "radius", "name"]),
+  stroke: new Set(["id", "type", "points"]),
+  text: new Set(["id", "type", "x", "y", "text"])
+} as const;
 
 export function normalizeAnnotationDocument(value: unknown): AnnotationDocument {
   if (!value || typeof value !== "object" || (value as { version?: unknown }).version !== ANNOTATION_VERSION) {
     throw new Error("Unsupported annotations document version");
   }
+  if (Object.keys(value).some((key) => key !== "version" && key !== "items")) throw new Error("Unknown annotations document field");
   const rawItems = (value as { items?: unknown }).items;
   if (!Array.isArray(rawItems)) throw new Error("Annotations items must be an array");
   if (rawItems.length > MAX_ANNOTATION_ITEMS) throw new Error("Too many annotations");
+  const serialized = JSON.stringify(value) || "";
+  if (utf8Bytes(serialized) > MAX_ANNOTATION_DOCUMENT_BYTES) throw new Error("Annotations document is too large");
   const ids = new Set<string>();
   let totalPoints = 0;
+  let totalText = 0;
   const items = rawItems.map((raw, index) => {
     const item = normalizeAnnotation(raw, index);
     if (ids.has(item.id)) throw new Error(`Duplicate annotation id: ${item.id}`);
@@ -37,6 +53,9 @@ export function normalizeAnnotationDocument(value: unknown): AnnotationDocument 
       totalPoints += item.points.length;
       if (totalPoints > MAX_TOTAL_STROKE_POINTS) throw new Error("Too many annotation points");
     }
+    if ("name" in item && typeof item.name === "string") totalText += codePointLength(item.name);
+    if (item.type === "text") totalText += codePointLength(item.text);
+    if (totalText > MAX_TOTAL_ANNOTATION_TEXT_LENGTH) throw new Error("Too much annotation text");
     return item;
   });
   return { version: ANNOTATION_VERSION, items };
@@ -46,11 +65,14 @@ function normalizeAnnotation(raw: unknown, index: number): Annotation {
   if (!raw || typeof raw !== "object") throw new Error(`Invalid annotation at index ${index}`);
   const item = raw as Record<string, unknown>;
   if (!nonEmptyId(item.id)) throw new Error(`Invalid annotation id at index ${index}`);
-  const id = item.id.trim();
+  const id = item.id;
+  if (typeof item.type !== "string" || !(item.type in allowedKeysByType)) throw new Error(`Unknown annotation type at index ${index}`);
+  const allowedKeys = allowedKeysByType[item.type as keyof typeof allowedKeysByType];
+  if (Object.keys(item).some((key) => !allowedKeys.has(key))) throw new Error(`Unknown annotation field at index ${index}`);
   const name = normalizeName(item.name);
   if (item.type === "line") {
     requireFinite(item, ["x1", "y1", "x2", "y2"], index);
-    if (Math.hypot(item.x2 as number - (item.x1 as number), item.y2 as number - (item.y1 as number)) < 1) {
+    if (item.x1 === item.x2 && item.y1 === item.y2) {
       throw new Error(`Degenerate line at index ${index}`);
     }
     return withName({ id, type: "line", x1: item.x1 as number, y1: item.y1 as number, x2: item.x2 as number, y2: item.y2 as number }, name);
@@ -73,13 +95,15 @@ function normalizeAnnotation(raw: unknown, index: number): Annotation {
       if (!point || typeof point !== "object" || !finite((point as Point).x) || !finite((point as Point).y)) {
         throw new Error(`Invalid stroke point ${pointIndex} at index ${index}`);
       }
+      if (Object.keys(point as object).some((key) => key !== "x" && key !== "y")) throw new Error(`Unknown stroke point field at index ${index}`);
       return { x: (point as Point).x, y: (point as Point).y };
     });
+    if (points.slice(1).every((point) => point.x === points[0].x && point.y === points[0].y)) throw new Error(`Degenerate stroke at index ${index}`);
     return { id, type: "stroke", points };
   }
   if (item.type === "text") {
     requireFinite(item, ["x", "y"], index);
-    if (typeof item.text !== "string" || item.text.length > MAX_ANNOTATION_TEXT_LENGTH) throw new Error(`Invalid annotation text at index ${index}`);
+    if (typeof item.text !== "string" || codePointLength(item.text) > MAX_ANNOTATION_TEXT_LENGTH) throw new Error(`Invalid annotation text at index ${index}`);
     return { id, type: "text", x: item.x as number, y: item.y as number, text: item.text };
   }
   throw new Error(`Unknown annotation type at index ${index}`);
@@ -91,13 +115,12 @@ function requireFinite(item: Record<string, unknown>, keys: string[], index: num
 
 function normalizeName(value: unknown): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string" || value.length > MAX_ANNOTATION_NAME_LENGTH) throw new Error("Invalid annotation name");
-  const name = value.trim();
-  return name || undefined;
+  if (typeof value !== "string" || codePointLength(value) > MAX_ANNOTATION_NAME_LENGTH) throw new Error("Invalid annotation name");
+  return value;
 }
 
 function withName<T extends Annotation>(item: T, name?: string): T {
-  return (name ? { ...item, name } : item) as T;
+  return (name === undefined ? item : { ...item, name }) as T;
 }
 
 export function cloneAnnotationDocument(document: AnnotationDocument): AnnotationDocument {

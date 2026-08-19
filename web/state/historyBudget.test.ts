@@ -55,7 +55,7 @@ test("trimWorkspaceHistoryStack keeps the newest contiguous entries within the b
   );
 });
 
-test("trimWorkspaceHistoryStack keeps the newest entry when it is oversized", () => {
+test("trimWorkspaceHistoryStack skips entries that exceed the entire byte budget", () => {
   const entries = [entry("old", 1), entry("oversized", 12)];
 
   const trimmed = trimWorkspaceHistoryStack(entries, {
@@ -63,7 +63,7 @@ test("trimWorkspaceHistoryStack keeps the newest entry when it is oversized", ()
     measureEntryBytes
   });
 
-  assert.deepEqual(trimmed.map((item) => item.id), ["oversized"]);
+  assert.deepEqual(trimmed.map((item) => item.id), ["old"]);
 });
 
 test("trimWorkspaceHistoryStacks trims redo history with the same stack rules", () => {

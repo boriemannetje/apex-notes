@@ -158,6 +158,232 @@ test("annotation-only workspaces fit and corrupt sidecars disable drawing", asyn
   await blocked.close();
 });
 
+test("annotation tools support pen and constrained shapes without rebuilding the graph per frame", async () => {
+  const page = await newMockedTauriPage();
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  for (const [tool, start, end] of [
+    ["pen", [240, 380], [330, 420]],
+    ["square", [520, 220], [610, 300]],
+    ["circle", [540, 430], [620, 480]]
+  ]) {
+    await page.locator(`[data-annotation-tool='${tool}']`).click();
+    await page.mouse.move(graph.x + start[0], graph.y + start[1]);
+    await page.mouse.down();
+    await page.mouse.move(graph.x + end[0], graph.y + end[1], { steps: 5 });
+    await page.mouse.up();
+    if (tool !== "pen") {
+      await page.locator("#annotationEditor").fill(`${tool} name`);
+      await page.locator("#annotationEditor").press("Enter");
+    }
+  }
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='stroke']").count(), 1);
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='square']").count(), 1);
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='circle']").count(), 1);
+  assert.deepEqual(await page.locator(".annotationLabel").allTextContents(), ["square name", "circle name"]);
+
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 700, graph.y + 240);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 760, graph.y + 280);
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='line']").count(), 0);
+
+  const node = await page.locator(".node[data-path='root.md']").boundingBox();
+  assert(node);
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(node.x + node.width / 2, node.y + node.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(node.x + node.width / 2 + 90, node.y + node.height / 2 + 30, { steps: 3 });
+  await page.mouse.up();
+  await page.locator("#annotationEditor").press("Escape");
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='line']").count(), 1);
+  assert.equal(await page.locator(".node[data-path='root.md']").count(), 1);
+
+  const beforePanCount = await page.locator(".annotationItem").count();
+  await page.locator("[data-annotation-tool='circle']").click();
+  await page.keyboard.down("Alt");
+  await page.mouse.move(graph.x + 850, graph.y + 500);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 900, graph.y + 540);
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(graph.x + 920, graph.y + 560);
+  await page.mouse.up({ button: "middle" });
+  assert.equal(await page.locator(".annotationItem").count(), beforePanCount);
+
+  await page.locator("[data-annotation-tool='select']").click();
+  const squareHit = page.locator(".annotationItem[data-annotation-type='square'] .annotationHit");
+  const squareBox = await squareHit.boundingBox();
+  assert(squareBox);
+  await page.mouse.move(squareBox.x + 2, squareBox.y + squareBox.height / 2);
+  await page.mouse.down();
+  await page.evaluate(() => { window.__annotationCanvasBeforeMove = document.querySelector(".graphCanvas"); });
+  await page.mouse.move(squareBox.x + 42, squareBox.y + squareBox.height / 2 + 25, { steps: 5 });
+  await page.waitForTimeout(40);
+  assert.equal(await page.evaluate(() => window.__annotationCanvasBeforeMove === document.querySelector(".graphCanvas")), true);
+  await page.mouse.up();
+
+  const handle = page.locator(".annotationItem[data-annotation-type='square'] .annotationHandleHit");
+  await handle.dragTo(page.locator("#graph"), { targetPosition: { x: 800, y: 600 } });
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='square']").count(), 1);
+
+  await page.close();
+});
+
+test("annotation labels, keyboard access, viewport clamping, wheel routing, and selection are reliable", async () => {
+  const workspace = sampleWorkspace();
+  workspace.annotations.items = [
+    { id: "named-line", type: "line", x1: 80, y1: 100, x2: 280, y2: 100, name: "Old label" },
+    { id: "edge-text", type: "text", x: 1_200, y: 800, text: "Edge text" }
+  ];
+  const page = await newMockedTauriPage(workspace);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+
+  await page.locator(".annotationLabelHit").dblclick();
+  await page.locator("#annotationEditor").fill("Renamed label");
+  await page.locator("#annotationEditor").press("Enter");
+  await page.waitForFunction(() => document.querySelector(".annotationLabel")?.textContent === "Renamed label");
+
+  const lineItem = page.locator(".annotationItem[data-annotation-id='named-line']");
+  assert.equal(await lineItem.getAttribute("role"), "graphics-symbol");
+  assert.equal(await lineItem.getAttribute("tabindex"), "0");
+  await lineItem.focus();
+  await page.keyboard.press("Space");
+  assert.equal(await lineItem.getAttribute("class"), "annotationItem selected");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator("#annotationEditor").isVisible(), true);
+
+  const graphBox = await page.locator("#graph").boundingBox();
+  const editorBox = await page.locator("#annotationEditor").boundingBox();
+  assert(graphBox && editorBox);
+  assert(editorBox.x >= graphBox.x - 1 && editorBox.y >= graphBox.y - 1);
+  assert(editorBox.x + editorBox.width <= graphBox.x + graphBox.width + 1);
+  assert(editorBox.y + editorBox.height <= graphBox.y + graphBox.height + 1);
+
+  const scaleBeforeEditorWheel = (await graphWheelSnapshot(page, graphBox.x + 400, graphBox.y + 300)).scale;
+  await page.locator("#annotationEditor").dispatchEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true });
+  assert.equal((await graphWheelSnapshot(page, graphBox.x + 400, graphBox.y + 300)).scale, scaleBeforeEditorWheel);
+  await page.locator("#annotationEditor").press("Escape");
+
+  await page.locator(".annotationItem[data-annotation-id='edge-text']").focus();
+  await page.keyboard.press("Enter");
+  const edgeEditorBox = await page.locator("#annotationEditor").boundingBox();
+  assert(edgeEditorBox);
+  assert(edgeEditorBox.x >= graphBox.x - 1 && edgeEditorBox.y >= graphBox.y - 1);
+  assert(edgeEditorBox.x + edgeEditorBox.width <= graphBox.x + graphBox.width + 1);
+  assert(edgeEditorBox.y + edgeEditorBox.height <= graphBox.y + graphBox.height + 1);
+  await page.locator("#annotationEditor").press("Escape");
+
+  const labelBox = await page.locator(".annotationLabelHit").boundingBox();
+  assert(labelBox);
+  const annotationWheel = await page.locator(".annotationLabelHit").evaluate((element, init) => {
+    const event = new WheelEvent("wheel", { ...init, bubbles: true, cancelable: true });
+    element.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented };
+  }, { clientX: labelBox.x + labelBox.width / 2, clientY: labelBox.y + labelBox.height / 2, deltaY: -100 });
+  assert.equal(annotationWheel.defaultPrevented, true);
+
+  await lineItem.click();
+  await page.locator(".node[data-path='root.md']").click();
+  await page.keyboard.press("Delete");
+  assert.equal(await page.locator(".annotationItem[data-annotation-id='named-line']").count(), 1);
+  if (await page.locator("#deleteConfirmDialog").evaluate((element) => element.open)) {
+    await page.locator("#cancelDeleteButton").click();
+  }
+  await page.locator(".annotationLabelHit").click();
+  await page.mouse.click(graphBox.x + graphBox.width - 30, graphBox.y + graphBox.height - 30);
+  await page.keyboard.press("Delete");
+  assert.equal(await page.locator(".annotationItem[data-annotation-id='named-line']").count(), 1);
+
+  await lineItem.focus();
+  await page.keyboard.press("Space");
+  const handle = page.locator(".annotationHandle").first();
+  const handleBefore = await handle.boundingBox();
+  const handleHitBefore = await page.locator(".annotationHandleHit").first().boundingBox();
+  await dispatchGraphWheel(page, { clientX: graphBox.x + 400, clientY: graphBox.y + 300, deltaY: -10_000 });
+  const handleAfter = await page.locator(".annotationHandle").first().boundingBox();
+  const handleHitAfter = await page.locator(".annotationHandleHit").first().boundingBox();
+  assert(handleBefore && handleAfter && handleHitBefore && handleHitAfter);
+  assert(Math.abs(handleBefore.width - handleAfter.width) < 1.5);
+  assert(Math.abs(handleHitBefore.width - handleHitAfter.width) < 1.5);
+
+  await page.locator("#fullscreenGraphButton").click();
+  await page.waitForFunction(() => document.body.classList.contains("graphFullscreen"));
+  assert.equal(await page.locator(".annotationItem").count(), 2);
+  await page.locator("#fullscreenGraphButton").click();
+  await page.waitForFunction(() => !document.body.classList.contains("graphFullscreen"));
+
+  await page.locator(".annotationItem[data-annotation-id='edge-text']").focus();
+  await page.keyboard.press("Space");
+  await page.keyboard.press("Delete");
+  await page.waitForFunction(() => !document.querySelector(".annotationItem[data-annotation-id='edge-text']"));
+  await page.close();
+});
+
+test("delayed annotation saves stay with their originating workspace", async () => {
+  const first = sampleWorkspace();
+  const second = sampleWorkspace();
+  second.rootPath = "/tmp/second-notes";
+  second.notesPath = "/tmp/second-notes/notes";
+  second.workspaceName = "Second Notes";
+  second.annotations = { version: 1, items: [] };
+  const page = await newMockedTauriPage(first, { additionalWorkspaces: [second], holdAnnotationWrites: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 300, graph.y + 260);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 430, graph.y + 320);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+
+  await page.locator(".workspaceTabAdd").click();
+  assert.equal(await page.locator("#annotationToolbar").isVisible(), false);
+  assert.equal(await page.locator("#annotationEditor").isVisible(), false);
+  await page.locator("#graphOpenProjectButton").click();
+  await page.waitForFunction(() => document.querySelector(".workspaceTab.active")?.textContent?.includes("Second Notes"));
+  await page.evaluate(() => window.__apexTestState.releaseAnnotationWrite());
+  await page.waitForFunction(() => window.__apexTestState.workspaces[0].annotations.items.length === 1);
+  assert.equal(await page.locator(".annotationItem").count(), 0);
+
+  await page.getByRole("button", { name: /Switch to folder: Smoke Notes/ }).click();
+  await page.locator(".annotationItem[data-annotation-type='line']").waitFor();
+  assert.equal(await page.locator(".annotationItem").count(), 1);
+  await page.close();
+});
+
+test("reopening an externally changed workspace clears stale annotation undo history", async () => {
+  const page = await newMockedTauriPage();
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 300, graph.y + 250);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 420, graph.y + 290);
+  await page.mouse.up();
+  await page.locator("#annotationEditor").press("Escape");
+  await page.evaluate(() => { window.__apexTestState.workspaces[0].annotations = { version: 1, items: [] }; });
+
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  await page.waitForFunction(() => document.querySelectorAll(".annotationItem").length === 0);
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  assert.equal(await page.locator(".annotationItem").count(), 0);
+  await page.close();
+});
+
 test("workspace chrome supports rename and fullscreen without losing the graph", async () => {
   const page = await newMockedTauriPage();
 
@@ -665,21 +891,28 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.addInitScript(({
     seedWorkspace,
+    seedWorkspaces,
     seedUpdateRelease,
     seedHoldInstallUpdate,
-    seedInstallUpdateError
+    seedInstallUpdateError,
+    seedHoldAnnotationWrites
   }) => {
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const state = {
       workspace: clone(seedWorkspace),
+      workspaces: clone(seedWorkspaces),
+      dialogIndex: 0,
       calls: [],
       clipboardText: "",
       fetchCalls: 0,
       holdInstallUpdate: seedHoldInstallUpdate,
       installUpdateError: seedInstallUpdateError,
       resolveInstallUpdate: null,
+      holdAnnotationWrites: seedHoldAnnotationWrites,
+      annotationWriteResolvers: [],
       updateRelease: seedUpdateRelease
     };
+    state.releaseAnnotationWrite = () => state.annotationWriteResolvers.shift()?.();
 
     const signatureFor = (note) => `${note.path}:${note.raw.length}`;
     const noteFiles = () => state.workspace.notes.map((note) => ({
@@ -710,7 +943,11 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     });
     window.__TAURI__ = {
       dialog: {
-        open: async () => state.workspace.rootPath
+        open: async () => {
+          const selected = state.workspaces[Math.min(state.dialogIndex, state.workspaces.length - 1)];
+          state.dialogIndex += 1;
+          return selected.rootPath;
+        }
       },
       core: {
         invoke: async (command, args = {}) => {
@@ -718,7 +955,11 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
 
           if (command === "read_recent_projects") return [];
           if (command === "default_project_location") return "/tmp";
-          if (command === "read_workspace") return clone(state.workspace);
+          if (command === "read_workspace") {
+            const selected = state.workspaces.find((item) => item.rootPath === args.rootPath) || state.workspace;
+            state.workspace = selected;
+            return clone(selected);
+          }
           if (command === "list_note_files") return noteFiles();
           if (command === "read_notes") {
             return noteFiles().filter((note) => args.paths?.includes(note.path));
@@ -770,8 +1011,12 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             return null;
           }
           if (command === "write_annotations") {
-            state.workspace.annotations = clone(args.annotations);
-            state.workspace.annotationsError = "";
+            const target = state.workspaces.find((item) => item.notesPath === args.notesPath) || state.workspace;
+            if (state.holdAnnotationWrites) {
+              await new Promise((resolve) => state.annotationWriteResolvers.push(resolve));
+            }
+            target.annotations = clone(args.annotations);
+            target.annotationsError = "";
             return null;
           }
           if (command === "rename_workspace") {
@@ -797,8 +1042,10 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     };
   }, {
     seedHoldInstallUpdate: options.holdInstallUpdate || false,
+    seedHoldAnnotationWrites: options.holdAnnotationWrites || false,
     seedInstallUpdateError: options.installUpdateError || "",
     seedWorkspace: workspace,
+    seedWorkspaces: [workspace, ...(options.additionalWorkspaces || [])],
     seedUpdateRelease: options.updateRelease || { target_commitish: "", assets: [] }
   });
   return page;

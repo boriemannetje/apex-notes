@@ -1,0 +1,27 @@
+{
+  "valid": {
+    "version": 1,
+    "items": [
+      {
+        "id": "  line-😀  ",
+        "type": "line",
+        "x1": 0,
+        "y1": 0,
+        "x2": 0.25,
+        "y2": 0,
+        "name": "  external 😀 name  "
+      },
+      {
+        "id": "stroke",
+        "type": "stroke",
+        "points": [{ "x": 0, "y": 0 }, { "x": 0.1, "y": 0 }]
+      }
+    ]
+  },
+  "invalid": [
+    { "version": 1, "items": [{ "id": "   ", "type": "text", "x": 0, "y": 0, "text": "blank id" }] },
+    { "version": 1, "items": [{ "id": "line", "type": "line", "x1": 1, "y1": 1, "x2": 1, "y2": 1 }] },
+    { "version": 1, "items": [{ "id": "stroke", "type": "stroke", "points": [{ "x": 1, "y": 1 }, { "x": 1, "y": 1 }] }] },
+    { "version": 1, "items": [{ "id": "text", "type": "text", "x": 0, "y": 0, "text": "unknown", "extra": true }] }
+  ]
+}

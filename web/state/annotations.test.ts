@@ -1,14 +1,34 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { annotationBounds, annotationLabelPoint, documentBounds, hitTestAnnotation, normalizeAnnotationDocument, resizeAnnotation, simplifyStroke, translateAnnotation } from "../annotations.ts";
+import { MAX_ANNOTATION_DOCUMENT_BYTES, MAX_ANNOTATION_NAME_LENGTH, MAX_ANNOTATION_TEXT_LENGTH, annotationBounds, annotationLabelPoint, documentBounds, hitTestAnnotation, normalizeAnnotationDocument, resizeAnnotation, simplifyStroke, translateAnnotation } from "../annotations.ts";
+
+const parityFixtures = JSON.parse(readFileSync(new URL("../../tests/fixtures/annotations-parity.json", import.meta.url), "utf8"));
 
 test("normalizes a valid document and rejects unsafe data", () => {
   const document = normalizeAnnotationDocument({ version: 1, items: [{ id: "a", type: "square", x: 1, y: 2, size: 10, name: " Box " }] });
   assert.equal(document.items[0].type, "square");
-  assert.equal(document.items[0].type === "square" ? document.items[0].name : undefined, "Box");
+  assert.equal(document.items[0].type === "square" ? document.items[0].name : undefined, " Box ");
   assert.throws(() => normalizeAnnotationDocument({ version: 2, items: [] }), /version/);
   assert.throws(() => normalizeAnnotationDocument({ version: 1, items: [{ id: "a", type: "circle", cx: 0, cy: 0, radius: 0 }] }), /Degenerate/);
   assert.throws(() => normalizeAnnotationDocument({ version: 1, items: [{ id: "a", type: "line", x1: 0, y1: 0, x2: 2, y2: 2 }, { id: "a", type: "text", x: 0, y: 0, text: "x" }] }), /Duplicate/);
+});
+
+test("matches native parity fixtures and preserves external strings byte-for-byte", () => {
+  const normalized = normalizeAnnotationDocument(parityFixtures.valid);
+  assert.equal(normalized.items[0].id, "  line-😀  ");
+  assert.equal(normalized.items[0].type === "line" ? normalized.items[0].name : "", "  external 😀 name  ");
+  for (const invalid of parityFixtures.invalid) assert.throws(() => normalizeAnnotationDocument(invalid));
+});
+
+test("counts Unicode code points and enforces a total serialized document budget", () => {
+  const exactUnicodeName = "😀".repeat(MAX_ANNOTATION_NAME_LENGTH);
+  assert.doesNotThrow(() => normalizeAnnotationDocument({ version: 1, items: [{ id: "emoji", type: "circle", cx: 0, cy: 0, radius: 1, name: exactUnicodeName }] }));
+  assert.throws(() => normalizeAnnotationDocument({ version: 1, items: [{ id: "emoji", type: "circle", cx: 0, cy: 0, radius: 1, name: `${exactUnicodeName}😀` }] }), /name/);
+  const hugeId = "i".repeat(MAX_ANNOTATION_DOCUMENT_BYTES);
+  assert.throws(() => normalizeAnnotationDocument({ version: 1, items: [{ id: hugeId, type: "text", x: 0, y: 0, text: "" }] }), /too large/);
+  const tooMuchText = Array.from({ length: 11 }, (_, index) => ({ id: `text-${index}`, type: "text", x: index, y: 0, text: "t".repeat(MAX_ANNOTATION_TEXT_LENGTH) }));
+  assert.throws(() => normalizeAnnotationDocument({ version: 1, items: tooMuchText }), /Too much/);
 });
 
 test("computes geometry, labels and hit targets", () => {

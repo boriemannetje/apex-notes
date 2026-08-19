@@ -46,6 +46,8 @@ const MAX_STROKE_POINTS: usize = 4_096;
 const MAX_TOTAL_ANNOTATION_POINTS: usize = 100_000;
 const MAX_ANNOTATION_NAME_CHARS: usize = 120;
 const MAX_ANNOTATION_TEXT_CHARS: usize = 20_000;
+const MAX_TOTAL_ANNOTATION_TEXT_CHARS: usize = 200_000;
+const MAX_ANNOTATION_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -734,11 +736,21 @@ fn annotations_path(notes_root: &Path) -> PathBuf {
 fn read_annotations_file(notes_root: &Path) -> Result<AnnotationDocument, String> {
     let path = annotations_path(notes_root);
     reject_symlink(&path, "Annotations file cannot be a symlink").map_err(to_error)?;
-    let raw = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.len() > MAX_ANNOTATION_DOCUMENT_BYTES => {
+            return Err(format!(
+                "annotations.json exceeds the {} byte limit",
+                MAX_ANNOTATION_DOCUMENT_BYTES
+            ))
+        }
+        Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(AnnotationDocument::default())
         }
+        Err(error) => return Err(format!("Could not inspect annotations.json: {}", error)),
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
         Err(error) => return Err(format!("Could not read annotations.json: {}", error)),
     };
     let annotations: AnnotationDocument = serde_json::from_str(&raw)
@@ -760,9 +772,17 @@ fn validate_annotations(annotations: &AnnotationDocument) -> Result<(), String> 
             MAX_ANNOTATION_ITEMS
         ));
     }
+    let serialized_size = serde_json::to_vec(annotations).map_err(to_error)?.len() as u64;
+    if serialized_size > MAX_ANNOTATION_DOCUMENT_BYTES {
+        return Err(format!(
+            "annotations.json exceeds the {} byte limit",
+            MAX_ANNOTATION_DOCUMENT_BYTES
+        ));
+    }
 
     let mut ids = HashSet::with_capacity(annotations.items.len());
     let mut total_points = 0usize;
+    let mut total_text_chars = 0usize;
     for item in &annotations.items {
         let id = annotation_id(item);
         if id.trim().is_empty() {
@@ -779,6 +799,10 @@ fn validate_annotations(annotations: &AnnotationDocument) -> Result<(), String> 
                     return Err(format!("Line annotation {} has no length", line.id));
                 }
                 validate_name(line.name.as_deref())?;
+                total_text_chars = add_annotation_text_chars(
+                    total_text_chars,
+                    line.name.as_deref().unwrap_or(""),
+                )?;
             }
             AnnotationItem::Square(square) => {
                 validate_finite(&[square.x, square.y, square.size])?;
@@ -789,6 +813,10 @@ fn validate_annotations(annotations: &AnnotationDocument) -> Result<(), String> 
                     ));
                 }
                 validate_name(square.name.as_deref())?;
+                total_text_chars = add_annotation_text_chars(
+                    total_text_chars,
+                    square.name.as_deref().unwrap_or(""),
+                )?;
             }
             AnnotationItem::Circle(circle) => {
                 validate_finite(&[circle.cx, circle.cy, circle.radius])?;
@@ -799,6 +827,10 @@ fn validate_annotations(annotations: &AnnotationDocument) -> Result<(), String> 
                     ));
                 }
                 validate_name(circle.name.as_deref())?;
+                total_text_chars = add_annotation_text_chars(
+                    total_text_chars,
+                    circle.name.as_deref().unwrap_or(""),
+                )?;
             }
             AnnotationItem::Stroke(stroke) => {
                 if stroke.points.len() < 2 {
@@ -842,10 +874,24 @@ fn validate_annotations(annotations: &AnnotationDocument) -> Result<(), String> 
                         text.id, MAX_ANNOTATION_TEXT_CHARS
                     ));
                 }
+                total_text_chars = add_annotation_text_chars(total_text_chars, &text.text)?;
             }
         }
     }
     Ok(())
+}
+
+fn add_annotation_text_chars(current: usize, value: &str) -> Result<usize, String> {
+    let total = current
+        .checked_add(value.chars().count())
+        .ok_or("Annotation text count overflow")?;
+    if total > MAX_TOTAL_ANNOTATION_TEXT_CHARS {
+        return Err(format!(
+            "annotations.json contains more than {} text characters",
+            MAX_TOTAL_ANNOTATION_TEXT_CHARS
+        ));
+    }
+    Ok(total)
 }
 
 fn annotation_id(item: &AnnotationItem) -> &str {
@@ -1432,6 +1478,71 @@ mod tests {
             items: vec![item; MAX_ANNOTATION_ITEMS + 1],
         };
         assert!(validate_annotations(&too_many_items).is_err());
+
+        let exact_unicode_name = "😀".repeat(MAX_ANNOTATION_NAME_CHARS);
+        let unicode_name = AnnotationDocument {
+            version: 1,
+            items: vec![AnnotationItem::Circle(AnnotationCircle {
+                id: "unicode".into(),
+                cx: 0.0,
+                cy: 0.0,
+                radius: 1.0,
+                name: Some(exact_unicode_name),
+            })],
+        };
+        assert!(validate_annotations(&unicode_name).is_ok());
+
+        let too_much_text = AnnotationDocument {
+            version: 1,
+            items: (0..11)
+                .map(|index| {
+                    AnnotationItem::Text(AnnotationText {
+                        id: format!("text-{}", index),
+                        x: index as f64,
+                        y: 0.0,
+                        text: "t".repeat(MAX_ANNOTATION_TEXT_CHARS),
+                    })
+                })
+                .collect(),
+        };
+        assert!(validate_annotations(&too_much_text).is_err());
+    }
+
+    #[test]
+    fn annotation_validation_matches_shared_frontend_fixtures() {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/annotations-parity.json"))
+                .expect("parse parity fixtures");
+        let valid: AnnotationDocument =
+            serde_json::from_value(fixtures["valid"].clone()).expect("parse valid fixture");
+        validate_annotations(&valid).expect("validate shared valid fixture");
+        assert_eq!(annotation_id(&valid.items[0]), "  line-😀  ");
+        if let AnnotationItem::Line(line) = &valid.items[0] {
+            assert_eq!(line.name.as_deref(), Some("  external 😀 name  "));
+        } else {
+            panic!("expected line fixture");
+        }
+        for invalid in fixtures["invalid"].as_array().expect("invalid fixtures") {
+            match serde_json::from_value::<AnnotationDocument>(invalid.clone()) {
+                Ok(document) => assert!(validate_annotations(&document).is_err()),
+                Err(_) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_annotation_files_are_rejected_before_reading() {
+        let notes = temp_notes_dir("annotations-oversized");
+        let path = notes.join("annotations.json");
+        fs::write(
+            &path,
+            vec![b' '; MAX_ANNOTATION_DOCUMENT_BYTES as usize + 1],
+        )
+        .expect("write oversized sidecar");
+
+        let error = read_annotations_file(&notes).expect_err("reject oversized sidecar");
+        assert!(error.contains("byte limit"));
+        fs::remove_dir_all(notes).ok();
     }
 
     #[test]

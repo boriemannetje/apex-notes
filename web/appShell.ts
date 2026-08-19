@@ -69,6 +69,8 @@ import { createWorkspaceStore } from "./state/workspaceStore.ts";
 import { getDomElements } from "./ui/domElements.ts";
 import {
   MAX_ANNOTATION_ITEMS,
+  MAX_ANNOTATION_NAME_LENGTH,
+  MAX_ANNOTATION_TEXT_LENGTH,
   annotationBounds,
   annotationLabelPoint,
   cloneAnnotationDocument,
@@ -128,6 +130,8 @@ const MAX_WORKSPACE_HISTORY_BYTES = 12 * 1024 * 1024;
 const LARGE_FOLDER_NOTE_WARNING_THRESHOLD = 1000;
 const LARGE_FOLDER_TOTAL_BYTES_WARNING_THRESHOLD = 50 * 1024 * 1024;
 const LARGE_NOTE_BYTE_WARNING_THRESHOLD = 2 * 1024 * 1024;
+let annotationWriteQueue = Promise.resolve();
+const annotationSaveTokensByWorkspace = new Map();
 const SEARCH_BODY_NOTE_THRESHOLD = 1000;
 const SEARCH_BODY_TOTAL_BYTES_THRESHOLD = 25 * 1024 * 1024;
 const SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD = 3_000_000;
@@ -717,11 +721,12 @@ function closeGraphHelpDialog() {
 }
 
 function openGraphProjectLauncher() {
-  if (!hasWritableWorkspace()) {
+  if (!hasWritableWorkspace() || state.historyApplying) {
     return;
   }
 
   closeGraphCreatePopover();
+  prepareAnnotationTransition();
   state.graphProjectLauncherOpen = true;
   renderGraphProjectLauncher();
   renderWorkspaceTabs();
@@ -1145,6 +1150,7 @@ function onLaunchRecentClick(event) {
 }
 
 function startEmpty() {
+  prepareAnnotationTransition();
   stopLiveSync();
   closeGraphProjectLauncher();
   state.activeWorkspaceId = null;
@@ -1764,6 +1770,7 @@ function normalizeSelectionAfterNotesChanged() {
 }
 
 function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {}) {
+  prepareAnnotationTransition();
   saveActiveWorkspaceState();
 
   const rootPath = workspace.rootPath || "";
@@ -1795,6 +1802,8 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath } = {})
   target.searchIndexMode = searchIndexModeForMetrics(target.workspaceMetrics);
   target.fileSignatures = buildFileSignatureMap(workspace.notes || []);
   target.dirty = false;
+  target.undoStack = [];
+  target.redoStack = [];
   target.annotationsError = workspace.annotationsError || "";
   try {
     target.annotations = normalizeAnnotationDocument(workspace.annotations || emptyAnnotationDocument());
@@ -2151,6 +2160,7 @@ async function stepWorkspaceHistory(direction) {
 }
 
 async function applyWorkspaceHistoryEntry(entry, side) {
+  const workspaceContext = captureWorkspaceContext();
   const selection = side === "before" ? entry.beforeSelection : entry.afterSelection;
   const noteChanges = entry.notes || [];
   const positionChanges = entry.positions || [];
@@ -2158,7 +2168,8 @@ async function applyWorkspaceHistoryEntry(entry, side) {
   const annotations = side === "before" ? entry.beforeAnnotations : entry.afterAnnotations;
 
   if (annotations) {
-    await invokeNative("write_annotations", { notesPath: state.notesPath, annotations });
+    await enqueueAnnotationWrite(workspaceContext.notesPath, annotations);
+    requireCurrentWorkspaceContext(workspaceContext);
     state.annotations = cloneAnnotationDocument(annotations);
     state.selectedAnnotationId = null;
   }
@@ -2170,17 +2181,19 @@ async function applyWorkspaceHistoryEntry(entry, side) {
       continue;
     }
     await invokeNative("write_note", {
-      notesPath: state.notesPath,
+      notesPath: workspaceContext.notesPath,
       path: change.path,
       raw
     });
+    requireCurrentWorkspaceContext(workspaceContext);
   }
 
   if (pathsToTrash.length) {
     await invokeNative("trash_notes", {
-      notesPath: state.notesPath,
+      notesPath: workspaceContext.notesPath,
       paths: pathsToTrash
     });
+    requireCurrentWorkspaceContext(workspaceContext);
   }
 
   const nextNotes = new Map(state.notes.map((note) => [note.path, note]));
@@ -2272,6 +2285,7 @@ function saveActiveWorkspaceState() {
 }
 
 function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { preserveView: true }) {
+  prepareAnnotationTransition();
   stopLiveSync();
   closeGraphProjectLauncher();
   closeGraphCreatePopover();
@@ -2373,6 +2387,9 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
 
 async function switchWorkspaceTab(workspaceId) {
   if (!workspaceId || workspaceId === state.activeWorkspaceId) return;
+  if (state.historyApplying) return;
+
+  prepareAnnotationTransition();
 
   if (state.dirty) {
     await flushAutosave();
@@ -2388,6 +2405,9 @@ async function switchWorkspaceTab(workspaceId) {
 async function closeWorkspaceTab(workspaceId) {
   const index = state.workspaces.findIndex((workspace) => workspace.id === workspaceId);
   if (index === -1) return;
+  if (workspaceId === state.activeWorkspaceId && state.historyApplying) return;
+
+  if (workspaceId === state.activeWorkspaceId) prepareAnnotationTransition();
 
   if (workspaceId === state.activeWorkspaceId && state.dirty) {
     await flushAutosave();
@@ -2921,6 +2941,7 @@ async function selectNote(path, force = false) {
   note = state.byPath.get(path);
   if (!note) return;
 
+  clearAnnotationSelection();
   const previousSelection = new Set(state.selectedPaths);
   state.selectedPath = path;
   state.selectedPaths = new Set([path]);
@@ -2939,6 +2960,7 @@ async function setGraphSelection(paths, { openSingle = false, statusMessage = ""
     [...paths]
       .filter((path) => state.byPath.has(path))
   );
+  clearAnnotationSelection();
 
   if (openSingle && nextSelection.size === 1) {
     await selectNote([...nextSelection][0]);
@@ -3772,12 +3794,18 @@ function combineGraphBounds(first, second) {
 
 function renderAnnotations(layer) {
   for (const item of state.annotations.items) {
+    layer.appendChild(createAnnotationGroup(item));
+  }
+  syncAnnotationControls();
+}
+
+function createAnnotationGroup(item) {
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     group.setAttribute("class", `annotationItem${state.selectedAnnotationId === item.id ? " selected" : ""}`);
     group.dataset.annotationId = item.id;
     group.dataset.annotationType = item.type;
-    group.setAttribute("role", "button");
-    group.setAttribute("tabindex", "-1");
+    group.setAttribute("role", "graphics-symbol");
+    group.setAttribute("tabindex", "0");
     group.setAttribute("aria-label", `${item.type} annotation${item.name ? `: ${item.name}` : ""}`);
 
     const shape = document.createElementNS("http://www.w3.org/2000/svg", item.type === "circle" ? "circle" : item.type === "square" ? "rect" : item.type === "text" ? "text" : "path");
@@ -3801,6 +3829,14 @@ function renderAnnotations(layer) {
 
     if (item.name && (item.type === "line" || item.type === "square" || item.type === "circle")) {
       const labelPoint = annotationLabelPoint(item);
+      const labelHit = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      const labelWidth = Math.max(24, [...item.name].length * 7.5 + 12);
+      labelHit.setAttribute("class", "annotationLabelHit");
+      labelHit.setAttribute("x", String(round(labelPoint.x - labelWidth / 2)));
+      labelHit.setAttribute("y", String(round(labelPoint.y - 17)));
+      labelHit.setAttribute("width", String(round(labelWidth)));
+      labelHit.setAttribute("height", "22");
+      group.appendChild(labelHit);
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
       label.setAttribute("class", "annotationLabel");
       label.setAttribute("text-anchor", "middle");
@@ -3810,9 +3846,14 @@ function renderAnnotations(layer) {
       group.appendChild(label);
     }
     if (state.selectedAnnotationId === item.id) appendAnnotationHandles(group, item);
-    layer.appendChild(group);
-  }
-  syncAnnotationControls();
+    return group;
+}
+
+function refreshAnnotationElement(item) {
+  const current = els.graphCanvas?.querySelector(`.annotationItem[data-annotation-id="${CSS.escape(item.id)}"]`);
+  if (!current) return;
+  const replacement = createAnnotationGroup(item);
+  current.replaceWith(replacement);
 }
 
 function setAnnotationShapeGeometry(element, item) {
@@ -3839,8 +3880,16 @@ function appendAnnotationHandles(group, item) {
       ? [{ key: "size", x: item.x + item.size, y: item.y + item.size }]
       : [{ key: "radius", x: item.cx + item.radius, y: item.cy }];
   for (const point of points) {
+    const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    hit.setAttribute("class", "annotationHandleHit");
+    hit.setAttribute("r", String(10 / Math.max(state.view.scale, MIN_ZOOM)));
+    hit.setAttribute("cx", String(point.x)); hit.setAttribute("cy", String(point.y));
+    hit.dataset.annotationHandle = point.key;
+    group.appendChild(hit);
     const handle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    handle.setAttribute("class", "annotationHandle"); handle.setAttribute("r", "5");
+    handle.setAttribute("class", "annotationHandle");
+    handle.setAttribute("r", String(5 / Math.max(state.view.scale, MIN_ZOOM)));
+    handle.style.strokeWidth = String(1.5 / Math.max(state.view.scale, MIN_ZOOM));
     handle.setAttribute("cx", String(point.x)); handle.setAttribute("cy", String(point.y));
     handle.dataset.annotationHandle = point.key;
     group.appendChild(handle);
@@ -5221,7 +5270,19 @@ function applyViewTransform(animate = false) {
     "transform",
     `translate(${round(state.view.x)} ${round(state.view.y)}) scale(${round(state.view.scale)})`
   );
+  updateAnnotationHandleScale();
   finishPerfMeasure(perf);
+}
+
+function updateAnnotationHandleScale() {
+  const scale = Math.max(state.view.scale, MIN_ZOOM);
+  for (const handle of els.graphCanvas?.querySelectorAll(".annotationHandle") || []) {
+    handle.setAttribute("r", String(5 / scale));
+    handle.style.strokeWidth = String(1.5 / scale);
+  }
+  for (const hit of els.graphCanvas?.querySelectorAll(".annotationHandleHit") || []) {
+    hit.setAttribute("r", String(10 / scale));
+  }
 }
 
 function animateGraphViewTo(targetView, { duration = 360 } = {}) {
@@ -5429,6 +5490,71 @@ function findAnnotation(id) {
   return state.annotations.items.find((item) => item.id === id) || null;
 }
 
+function captureWorkspaceContext() {
+  return {
+    workspaceId: state.activeWorkspaceId,
+    notesPath: state.notesPath
+  };
+}
+
+function isCurrentWorkspaceContext(context) {
+  return Boolean(
+    context?.workspaceId &&
+    context.workspaceId === state.activeWorkspaceId &&
+    context.notesPath === state.notesPath
+  );
+}
+
+function requireCurrentWorkspaceContext(context) {
+  if (!isCurrentWorkspaceContext(context)) throw new Error("Workspace changed while saving");
+}
+
+function enqueueAnnotationWrite(notesPath, annotations) {
+  const document = cloneAnnotationDocument(annotations);
+  const write = annotationWriteQueue.then(() => invokeNative("write_annotations", {
+    notesPath,
+    annotations: document
+  }));
+  annotationWriteQueue = write.catch(() => undefined);
+  return write;
+}
+
+function prepareAnnotationTransition() {
+  const editorState = state.annotationEditorState;
+  if (editorState?.isNew && editorState.workspaceId === state.activeWorkspaceId) {
+    state.annotations = cloneAnnotationDocument(editorState.historyBefore.annotations);
+  }
+  state.annotationEditorState = null;
+  if (els.annotationEditor) els.annotationEditor.hidden = true;
+
+  const interaction = state.activeInteraction;
+  if (interaction?.type?.startsWith?.("annotation-") && interaction.historyBefore?.workspaceId === state.activeWorkspaceId) {
+    state.annotations = cloneAnnotationDocument(interaction.historyBefore.annotations);
+    releaseGraphPointer(interaction.pointerId);
+    state.activeInteraction = null;
+    cancelQueuedInteraction();
+  }
+}
+
+function clearAnnotationSelection({ render = false } = {}) {
+  if (!state.selectedAnnotationId) return;
+  state.selectedAnnotationId = null;
+  for (const group of els.graphCanvas?.querySelectorAll(".annotationItem.selected") || []) {
+    group.classList.remove("selected");
+    group.querySelectorAll(".annotationHandle, .annotationHandleHit").forEach((handle) => handle.remove());
+  }
+  if (render) renderGraph({ preserveView: true });
+}
+
+function clearNodeSelectionForAnnotation() {
+  const previousSelection = new Set(state.selectedPaths);
+  state.selectedPath = null;
+  state.selectedPaths = new Set();
+  updateGraphSelection(previousSelection, state.selectedPaths);
+  renderCurrentSelection("Canvas annotation selected");
+  updateSourceStatus();
+}
+
 function startAnnotationDrawing(event) {
   if (!hasWritableWorkspace() || state.annotationsError || state.annotations.items.length >= MAX_ANNOTATION_ITEMS) {
     setStatus(state.annotationsError ? `Annotations unavailable: ${state.annotationsError}` : "Annotation limit reached");
@@ -5437,6 +5563,7 @@ function startAnnotationDrawing(event) {
   event.preventDefault();
   event.stopPropagation();
   closeGraphCreatePopover();
+  clearNodeSelectionForAnnotation();
   const point = eventToGraphPoint(event);
   const historyBefore = snapshotWorkspaceForHistory();
   const id = createAnnotationId();
@@ -5462,6 +5589,7 @@ function startAnnotationSelectionInteraction(event, group) {
   if (!item) return;
   event.preventDefault();
   event.stopPropagation();
+  clearNodeSelectionForAnnotation();
   state.selectedAnnotationId = item.id;
   const handle = event.target.closest?.("[data-annotation-handle]")?.dataset.annotationHandle || null;
   state.activeInteraction = {
@@ -5479,18 +5607,45 @@ function startAnnotationSelectionInteraction(event, group) {
 }
 
 async function finishAnnotationChange(label, historyBefore) {
+  const workspaceContext = captureWorkspaceContext();
+  const saveToken = (annotationSaveTokensByWorkspace.get(workspaceContext.workspaceId) || 0) + 1;
+  annotationSaveTokensByWorkspace.set(workspaceContext.workspaceId, saveToken);
   try {
     const normalized = normalizeAnnotationDocument(state.annotations);
-    await invokeNative("write_annotations", { notesPath: state.notesPath, annotations: normalized });
+    const savedDocument = cloneAnnotationDocument(normalized);
+    const historyAfter = snapshotWorkspaceForHistory();
+    if (historyAfter) historyAfter.annotations = savedDocument;
+    await enqueueAnnotationWrite(workspaceContext.notesPath, savedDocument);
+    if (saveToken !== annotationSaveTokensByWorkspace.get(workspaceContext.workspaceId)) return false;
+    if (!isCurrentWorkspaceContext(workspaceContext)) {
+      const workspace = state.workspaces.find((item) => item.id === workspaceContext.workspaceId && item.notesPath === workspaceContext.notesPath);
+      if (workspace) {
+        workspace.annotations = savedDocument;
+        const entry = buildWorkspaceHistoryEntry(label, historyBefore, historyAfter);
+        if (entry) {
+          workspace.undoStack = trimWorkspaceHistoryStack([...(workspace.undoStack || []), entry], workspaceHistoryBudgetOptions());
+          workspace.redoStack = [];
+        }
+      }
+      return false;
+    }
     state.annotations = normalized;
     recordWorkspaceHistory(label, historyBefore);
     saveActiveWorkspaceState();
     renderGraph({ preserveView: true });
     setStatus(`${label[0].toUpperCase()}${label.slice(1)}`);
+    return true;
   } catch (error) {
-    state.annotations = cloneAnnotationDocument(historyBefore.annotations);
-    renderGraph({ preserveView: true });
-    setStatus(`Could not save annotation: ${error?.message || error}`);
+    if (saveToken !== annotationSaveTokensByWorkspace.get(workspaceContext.workspaceId)) return false;
+    if (isCurrentWorkspaceContext(workspaceContext)) {
+      state.annotations = cloneAnnotationDocument(historyBefore.annotations);
+      renderGraph({ preserveView: true });
+      setStatus(`Could not save annotation: ${error?.message || error}`);
+    } else {
+      const workspace = state.workspaces.find((item) => item.id === workspaceContext.workspaceId && item.notesPath === workspaceContext.notesPath);
+      if (workspace) workspace.annotations = cloneAnnotationDocument(historyBefore.annotations);
+    }
+    return false;
   }
 }
 
@@ -5498,17 +5653,35 @@ function openAnnotationEditor(item, options = {}) {
   if (!item || item.type === "stroke" || state.annotationsError) return;
   const point = item.type === "text" ? { x: item.x, y: item.y } : annotationLabelPoint(item);
   const svgPoint = { x: point.x * state.view.scale + state.view.x, y: point.y * state.view.scale + state.view.y };
-  els.annotationEditor.style.left = `${Math.max(8, svgPoint.x)}px`;
-  els.annotationEditor.style.top = `${Math.max(48, svgPoint.y)}px`;
+  els.annotationEditor.style.left = "0px";
+  els.annotationEditor.style.top = "0px";
   els.annotationEditor.rows = item.type === "text" ? 4 : 1;
   els.annotationEditor.value = item.type === "text" ? item.text : (item.name || "");
   els.annotationEditor.hidden = false;
-  state.annotationEditorState = {
+  const editorRect = els.annotationEditor.getBoundingClientRect();
+  const viewport = {
+    left: 0,
+    top: 40,
+    right: els.graphScroller.clientWidth,
+    bottom: els.graphScroller.clientHeight
+  };
+  const editorPosition = getClampedPopoverPosition(svgPoint, editorRect, viewport, { margin: 8, gap: 0 });
+  els.annotationEditor.style.left = `${editorPosition.left}px`;
+  els.annotationEditor.style.top = `${editorPosition.top}px`;
+  els.annotationEditor.style.maxWidth = `${editorPosition.maxWidth}px`;
+  els.annotationEditor.style.maxHeight = `${editorPosition.maxHeight}px`;
+  const editorState = {
     annotationId: item.id,
     historyBefore: options.historyBefore || snapshotWorkspaceForHistory(),
-    isNew: Boolean(options.isNew)
+    isNew: Boolean(options.isNew),
+    ...captureWorkspaceContext()
   };
-  window.setTimeout(() => { els.annotationEditor.focus(); els.annotationEditor.select(); }, 0);
+  state.annotationEditorState = editorState;
+  window.setTimeout(() => {
+    if (state.annotationEditorState !== editorState || !isCurrentWorkspaceContext(editorState)) return;
+    els.annotationEditor.focus();
+    els.annotationEditor.select();
+  }, 0);
 }
 
 function onAnnotationEditorKeydown(event) {
@@ -5527,14 +5700,14 @@ function onAnnotationEditorKeydown(event) {
   }
 }
 
-function cancelAnnotationEditor() {
+function cancelAnnotationEditor({ render = true, focus = true } = {}) {
   const editorState = state.annotationEditorState;
   if (!editorState) return;
-  if (editorState.isNew) state.annotations = cloneAnnotationDocument(editorState.historyBefore.annotations);
+  if (editorState.isNew && isCurrentWorkspaceContext(editorState)) state.annotations = cloneAnnotationDocument(editorState.historyBefore.annotations);
   state.annotationEditorState = null;
   els.annotationEditor.hidden = true;
-  renderGraph({ preserveView: true });
-  focusGraph();
+  if (render) renderGraph({ preserveView: true });
+  if (focus) focusGraph();
 }
 
 async function commitAnnotationEditor() {
@@ -5542,6 +5715,7 @@ async function commitAnnotationEditor() {
   if (!editorState) return;
   state.annotationEditorState = null;
   els.annotationEditor.hidden = true;
+  if (!isCurrentWorkspaceContext(editorState)) return;
   const item = findAnnotation(editorState.annotationId);
   if (!item) return;
   const value = els.annotationEditor.value;
@@ -5551,12 +5725,16 @@ async function commitAnnotationEditor() {
       renderGraph({ preserveView: true });
       return;
     }
-    item.text = value.slice(0, 20_000);
+    item.text = truncateCodePoints(value, MAX_ANNOTATION_TEXT_LENGTH);
   } else {
-    item.name = value.trim().slice(0, 120) || undefined;
+    item.name = truncateCodePoints(value.trim(), MAX_ANNOTATION_NAME_LENGTH) || undefined;
   }
   await finishAnnotationChange(editorState.isNew ? "write annotation" : "rename annotation", editorState.historyBefore);
   focusGraph();
+}
+
+function truncateCodePoints(value, limit) {
+  return [...String(value)].slice(0, limit).join("");
 }
 
 function startGraphPointerDown(event) {
@@ -5565,18 +5743,19 @@ function startGraphPointerDown(event) {
   focusGraph();
   state.lastGraphPoint = eventToGraphPoint(event);
 
-  if (event.button === 0 && state.annotationTool !== "select") {
-    startAnnotationDrawing(event);
-    return;
-  }
-
   if (wantsGraphPan(event)) {
     startPan(event);
     return;
   }
 
+  if (event.button === 0 && state.annotationTool !== "select") {
+    startAnnotationDrawing(event);
+    return;
+  }
+
   const group = event.target.closest ? event.target.closest(".node") : null;
   if (group && els.graph.contains(group)) {
+    clearAnnotationSelection();
     const path = group.getAttribute("data-path");
     const note = state.byPath.get(path);
     if (note) {
@@ -5617,20 +5796,44 @@ function startGraphPointerDown(event) {
 
   const annotationGroup = event.target.closest?.(".annotationItem");
   if (event.button === 0 && annotationGroup && els.graph.contains(annotationGroup)) {
+    if (event.target.closest?.(".annotationLabelHit")) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearNodeSelectionForAnnotation();
+      clearAnnotationSelection();
+      state.selectedAnnotationId = annotationGroup.dataset.annotationId;
+      annotationGroup.classList.add("selected");
+      return;
+    }
     startAnnotationSelectionInteraction(event, annotationGroup);
     return;
   }
 
   if (shouldStartMarqueeSelection(event)) {
+    clearAnnotationSelection();
     startMarqueeSelection(event);
     return;
   }
 
+  clearAnnotationSelection({ render: true });
   startPan(event);
 }
 
 function onGraphKeydown(event) {
   if (event.key !== "Enter" && event.key !== " ") return;
+  const annotationGroup = event.target.closest?.(".annotationItem");
+  if (annotationGroup && els.graph.contains(annotationGroup)) {
+    const item = findAnnotation(annotationGroup.dataset.annotationId);
+    if (!item) return;
+    event.preventDefault();
+    clearNodeSelectionForAnnotation();
+    state.selectedAnnotationId = item.id;
+    renderGraph({ preserveView: true });
+    const selected = els.graphCanvas?.querySelector(`.annotationItem[data-annotation-id="${CSS.escape(item.id)}"]`);
+    selected?.focus({ preventScroll: true });
+    if (event.key === "Enter" && item.type !== "stroke") openAnnotationEditor(item);
+    return;
+  }
   const group = event.target.closest ? event.target.closest(".node") : null;
   if (!group || !els.graph.contains(group)) return;
   const path = group.getAttribute("data-path");
@@ -5847,7 +6050,7 @@ function continueInteraction(event) {
     else if (item.type === "square") { item.size = Math.max(1, Math.max(Math.abs(point.x - interaction.start.x), Math.abs(point.y - interaction.start.y))); item.x = point.x < interaction.start.x ? interaction.start.x - item.size : interaction.start.x; item.y = point.y < interaction.start.y ? interaction.start.y - item.size : interaction.start.y; }
     else if (item.type === "circle") item.radius = Math.max(1, Math.hypot(point.x - interaction.start.x, point.y - interaction.start.y));
     else if (item.type === "stroke" && item.points.length < 4096 && Math.hypot(point.x - item.points[item.points.length - 1].x, point.y - item.points[item.points.length - 1].y) > 0.75) item.points.push(point);
-    renderGraph({ preserveView: true });
+    refreshAnnotationElement(item);
     return;
   }
 
@@ -5861,7 +6064,7 @@ function continueInteraction(event) {
     state.annotations.items[index] = interaction.type === "annotation-move"
       ? translateAnnotation(interaction.initial, dx, dy)
       : resizeAnnotation(interaction.initial, interaction.handle, point);
-    renderGraph({ preserveView: true });
+    refreshAnnotationElement(state.annotations.items[index]);
     return;
   }
 
@@ -5947,8 +6150,9 @@ async function endInteraction(event) {
       return;
     }
     if (item.type === "stroke") item.points = simplifyStroke(item.points, 1.5 / Math.max(state.view.scale, 0.1));
-    await finishAnnotationChange("draw annotation", interaction.historyBefore);
-    if (item.type === "line" || item.type === "square" || item.type === "circle") openAnnotationEditor(item);
+    const saved = await finishAnnotationChange("draw annotation", interaction.historyBefore);
+    const currentItem = findAnnotation(interaction.annotationId);
+    if (saved && currentItem && (currentItem.type === "line" || currentItem.type === "square" || currentItem.type === "circle")) openAnnotationEditor(currentItem);
     return;
   }
 
@@ -6689,12 +6893,6 @@ async function onDocumentKeydown(event) {
   const hasGraphFocus = document.activeElement === els.graph || els.graph.contains(document.activeElement);
   const hasSelection = state.selectedPaths.size > 0;
   if (!hasGraphFocus) return;
-
-  if (!isShortcut && !event.altKey && ["v", "p", "l", "r", "c", "t"].includes(key)) {
-    event.preventDefault();
-    setAnnotationTool({ v: "select", p: "pen", l: "line", r: "square", c: "circle", t: "text" }[key]);
-    return;
-  }
 
   if ((event.key === "Backspace" || event.key === "Delete") && state.selectedAnnotationId) {
     event.preventDefault();

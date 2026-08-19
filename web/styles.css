@@ -1031,9 +1031,12 @@ body.isResizingEditor * {
 .annotationItem.selected { color: var(--accent); }
 .annotationItem.selected .annotationShape { stroke-width: 2.2; }
 .annotationLabel, .annotationText { fill: currentColor; font-size: 13px; font-weight: 580; user-select: none; pointer-events: none; }
+.annotationLabelHit { fill: transparent; stroke: none; pointer-events: all; }
 .annotationText { white-space: pre; }
-.annotationHandle { fill: var(--bg-raised); stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: nwse-resize; pointer-events: all; }
+.annotationHandleHit { fill: transparent; stroke: none; cursor: nwse-resize; pointer-events: all; }
+.annotationHandle { fill: var(--bg-raised); stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: nwse-resize; pointer-events: none; }
 .annotationItem[data-annotation-type="line"] .annotationHandle { cursor: crosshair; }
+.annotationItem[data-annotation-type="line"] .annotationHandleHit { cursor: crosshair; }
 .graph.annotationToolActive { cursor: crosshair; }
 .graph.annotationSelectActive .annotationItem { cursor: move; }
 
@@ -1046,7 +1049,9 @@ body.projectChooserOpen .topbar {
 }
 
 body.projectChooserOpen .editorResizeHandle,
-body.projectChooserOpen .editorPane {
+body.projectChooserOpen .editorPane,
+body.projectChooserOpen .annotationToolbar,
+body.projectChooserOpen .annotationEditor {
   display: none;
 }
 

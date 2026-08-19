@@ -31,7 +31,11 @@ export function trimWorkspaceHistoryStack<Entry>(
     const entry = stack[index];
     const entryBytes = normalizeMeasuredBytes(measureEntryBytes(entry));
 
-    if (maxBytes === Infinity || usedBytes + entryBytes <= maxBytes || kept.length === 0) {
+    if (entryBytes > maxBytes) {
+      continue;
+    }
+
+    if (maxBytes === Infinity || usedBytes + entryBytes <= maxBytes) {
       kept.push(entry);
       usedBytes += entryBytes;
       continue;
