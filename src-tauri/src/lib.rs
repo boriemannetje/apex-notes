@@ -35,6 +35,99 @@ struct Workspace {
     workspace_name: String,
     notes: Vec<NoteFile>,
     positions: HashMap<String, NotePosition>,
+    annotations: AnnotationDocument,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    annotations_error: Option<String>,
+}
+
+const ANNOTATIONS_VERSION: u32 = 1;
+const MAX_ANNOTATION_ITEMS: usize = 5_000;
+const MAX_STROKE_POINTS: usize = 4_096;
+const MAX_TOTAL_ANNOTATION_POINTS: usize = 100_000;
+const MAX_ANNOTATION_NAME_CHARS: usize = 120;
+const MAX_ANNOTATION_TEXT_CHARS: usize = 20_000;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationDocument {
+    version: u32,
+    items: Vec<AnnotationItem>,
+}
+
+impl Default for AnnotationDocument {
+    fn default() -> Self {
+        Self {
+            version: ANNOTATIONS_VERSION,
+            items: Vec::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum AnnotationItem {
+    Line(AnnotationLine),
+    Square(AnnotationSquare),
+    Circle(AnnotationCircle),
+    Stroke(AnnotationStroke),
+    Text(AnnotationText),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationLine {
+    id: String,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationSquare {
+    id: String,
+    x: f64,
+    y: f64,
+    size: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationCircle {
+    id: String,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationStroke {
+    id: String,
+    points: Vec<AnnotationPoint>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationPoint {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationText {
+    id: String,
+    x: f64,
+    y: f64,
+    text: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -317,6 +410,39 @@ fn write_layout_patch_blocking(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn write_annotations(
+    notes_path: String,
+    annotations: AnnotationDocument,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        write_annotations_blocking(notes_path, annotations)
+    })
+    .await
+    .map_err(to_error)?
+}
+
+fn write_annotations_blocking(
+    notes_path: String,
+    annotations: AnnotationDocument,
+) -> Result<(), String> {
+    let notes_root = require_existing_dir(notes_path, "Notes path is not a folder")?;
+    let path = annotations_path(&notes_root);
+    reject_symlink(&path, "Annotations file cannot be a symlink").map_err(to_error)?;
+
+    // Never replace a sidecar that the app could not safely understand.
+    if path.exists() {
+        read_annotations_file(&notes_root)?;
+    }
+
+    validate_annotations(&annotations)?;
+    let raw = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&annotations).map_err(to_error)?
+    );
+    write_if_changed(&path, &raw).map_err(to_error)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn trash_notes(notes_path: String, paths: Vec<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || trash_notes_blocking(notes_path, paths))
         .await
@@ -491,6 +617,7 @@ pub fn run() {
             create_notes,
             write_manifest,
             write_layout_patch,
+            write_annotations,
             trash_notes,
             read_recent_projects,
             remember_recent_project,
@@ -578,6 +705,10 @@ fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace,
     notes.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     ensure_workspace_metadata(&notes_root, &notes).map_err(to_error)?;
     let positions = read_layout_file(&notes_root).map_err(to_error)?;
+    let (annotations, annotations_error) = match read_annotations_file(&notes_root) {
+        Ok(annotations) => (annotations, None),
+        Err(error) => (AnnotationDocument::default(), Some(error)),
+    };
 
     let workspace_name = root
         .file_name()
@@ -590,8 +721,162 @@ fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace,
         notes_path: notes_root.to_string_lossy().into_owned(),
         workspace_name,
         positions,
+        annotations,
+        annotations_error,
         notes,
     })
+}
+
+fn annotations_path(notes_root: &Path) -> PathBuf {
+    notes_root.join("annotations.json")
+}
+
+fn read_annotations_file(notes_root: &Path) -> Result<AnnotationDocument, String> {
+    let path = annotations_path(notes_root);
+    reject_symlink(&path, "Annotations file cannot be a symlink").map_err(to_error)?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(AnnotationDocument::default())
+        }
+        Err(error) => return Err(format!("Could not read annotations.json: {}", error)),
+    };
+    let annotations: AnnotationDocument = serde_json::from_str(&raw)
+        .map_err(|error| format!("annotations.json is invalid: {}", error))?;
+    validate_annotations(&annotations)?;
+    Ok(annotations)
+}
+
+fn validate_annotations(annotations: &AnnotationDocument) -> Result<(), String> {
+    if annotations.version != ANNOTATIONS_VERSION {
+        return Err(format!(
+            "annotations.json version {} is not supported (expected version {})",
+            annotations.version, ANNOTATIONS_VERSION
+        ));
+    }
+    if annotations.items.len() > MAX_ANNOTATION_ITEMS {
+        return Err(format!(
+            "annotations.json contains more than {} items",
+            MAX_ANNOTATION_ITEMS
+        ));
+    }
+
+    let mut ids = HashSet::with_capacity(annotations.items.len());
+    let mut total_points = 0usize;
+    for item in &annotations.items {
+        let id = annotation_id(item);
+        if id.trim().is_empty() {
+            return Err("Annotation IDs cannot be empty".into());
+        }
+        if !ids.insert(id) {
+            return Err(format!("Duplicate annotation ID: {}", id));
+        }
+
+        match item {
+            AnnotationItem::Line(line) => {
+                validate_finite(&[line.x1, line.y1, line.x2, line.y2])?;
+                if line.x1 == line.x2 && line.y1 == line.y2 {
+                    return Err(format!("Line annotation {} has no length", line.id));
+                }
+                validate_name(line.name.as_deref())?;
+            }
+            AnnotationItem::Square(square) => {
+                validate_finite(&[square.x, square.y, square.size])?;
+                if square.size <= 0.0 {
+                    return Err(format!(
+                        "Square annotation {} has an invalid size",
+                        square.id
+                    ));
+                }
+                validate_name(square.name.as_deref())?;
+            }
+            AnnotationItem::Circle(circle) => {
+                validate_finite(&[circle.cx, circle.cy, circle.radius])?;
+                if circle.radius <= 0.0 {
+                    return Err(format!(
+                        "Circle annotation {} has an invalid radius",
+                        circle.id
+                    ));
+                }
+                validate_name(circle.name.as_deref())?;
+            }
+            AnnotationItem::Stroke(stroke) => {
+                if stroke.points.len() < 2 {
+                    return Err(format!(
+                        "Stroke annotation {} must contain at least two points",
+                        stroke.id
+                    ));
+                }
+                if stroke.points.len() > MAX_STROKE_POINTS {
+                    return Err(format!(
+                        "Stroke annotation {} contains more than {} points",
+                        stroke.id, MAX_STROKE_POINTS
+                    ));
+                }
+                total_points = total_points
+                    .checked_add(stroke.points.len())
+                    .ok_or("Annotation point count overflow")?;
+                if total_points > MAX_TOTAL_ANNOTATION_POINTS {
+                    return Err(format!(
+                        "annotations.json contains more than {} stroke points",
+                        MAX_TOTAL_ANNOTATION_POINTS
+                    ));
+                }
+                for point in &stroke.points {
+                    validate_finite(&[point.x, point.y])?;
+                }
+                if stroke
+                    .points
+                    .iter()
+                    .skip(1)
+                    .all(|point| point == &stroke.points[0])
+                {
+                    return Err(format!("Stroke annotation {} has no length", stroke.id));
+                }
+            }
+            AnnotationItem::Text(text) => {
+                validate_finite(&[text.x, text.y])?;
+                if text.text.chars().count() > MAX_ANNOTATION_TEXT_CHARS {
+                    return Err(format!(
+                        "Text annotation {} exceeds {} characters",
+                        text.id, MAX_ANNOTATION_TEXT_CHARS
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn annotation_id(item: &AnnotationItem) -> &str {
+    match item {
+        AnnotationItem::Line(item) => &item.id,
+        AnnotationItem::Square(item) => &item.id,
+        AnnotationItem::Circle(item) => &item.id,
+        AnnotationItem::Stroke(item) => &item.id,
+        AnnotationItem::Text(item) => &item.id,
+    }
+}
+
+fn validate_name(name: Option<&str>) -> Result<(), String> {
+    if name
+        .map(|name| name.chars().count() > MAX_ANNOTATION_NAME_CHARS)
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Annotation names cannot exceed {} characters",
+            MAX_ANNOTATION_NAME_CHARS
+        ));
+    }
+    Ok(())
+}
+
+fn validate_finite(values: &[f64]) -> Result<(), String> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err("Annotation geometry must contain only finite numbers".into())
+    }
 }
 
 fn collect_notes(base: &Path, current: &Path, notes: &mut Vec<NoteFile>) -> std::io::Result<()> {
@@ -936,8 +1221,246 @@ mod tests {
             "[]\n"
         );
         assert!(!Path::new(&workspace.notes_path).join("apex.md").exists());
+        assert_eq!(workspace.annotations, AnnotationDocument::default());
+        assert!(workspace.annotations_error.is_none());
+        assert!(!Path::new(&workspace.notes_path)
+            .join("annotations.json")
+            .exists());
 
         fs::remove_dir_all(parent).ok();
+    }
+
+    fn sample_annotations() -> AnnotationDocument {
+        AnnotationDocument {
+            version: ANNOTATIONS_VERSION,
+            items: vec![
+                AnnotationItem::Line(AnnotationLine {
+                    id: "line-1".into(),
+                    x1: 1.0,
+                    y1: 2.0,
+                    x2: 3.0,
+                    y2: 4.0,
+                    name: Some("Connector".into()),
+                }),
+                AnnotationItem::Stroke(AnnotationStroke {
+                    id: "stroke-1".into(),
+                    points: vec![
+                        AnnotationPoint { x: 0.0, y: 0.0 },
+                        AnnotationPoint { x: 1.0, y: 1.0 },
+                    ],
+                }),
+            ],
+        }
+    }
+
+    #[test]
+    fn missing_annotations_load_empty_without_creating_a_file() {
+        let notes = temp_notes_dir("annotations-missing");
+
+        let result = read_annotations_file(&notes).expect("load missing annotations");
+
+        assert_eq!(result, AnnotationDocument::default());
+        assert!(!notes.join("annotations.json").exists());
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn annotations_round_trip_through_the_native_writer() {
+        let notes = temp_notes_dir("annotations-round-trip");
+        let annotations = sample_annotations();
+
+        write_annotations_blocking(notes.to_string_lossy().into_owned(), annotations.clone())
+            .expect("write annotations");
+
+        assert_eq!(
+            read_annotations_file(&notes).expect("read annotations"),
+            annotations
+        );
+        let raw = fs::read_to_string(notes.join("annotations.json")).expect("read sidecar");
+        assert!(raw.contains("\"type\": \"line\""));
+        assert!(raw.ends_with('\n'));
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn malformed_annotations_are_reported_and_never_overwritten() {
+        let notes = temp_notes_dir("annotations-malformed");
+        let path = notes.join("annotations.json");
+        let malformed = b"{ definitely not json }";
+        fs::write(&path, malformed).expect("write malformed sidecar");
+
+        assert!(read_annotations_file(&notes).is_err());
+        assert!(write_annotations_blocking(
+            notes.to_string_lossy().into_owned(),
+            sample_annotations()
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).expect("reread sidecar"), malformed);
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn newer_annotations_are_reported_and_never_overwritten() {
+        let notes = temp_notes_dir("annotations-newer");
+        let path = notes.join("annotations.json");
+        let newer = br#"{"version":2,"items":[]}"#;
+        fs::write(&path, newer).expect("write newer sidecar");
+
+        let error = read_annotations_file(&notes).expect_err("reject newer version");
+        assert!(error.contains("not supported"));
+        assert!(write_annotations_blocking(
+            notes.to_string_lossy().into_owned(),
+            sample_annotations()
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).expect("reread sidecar"), newer);
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn invalid_annotations_do_not_prevent_the_workspace_from_opening() {
+        let root = temp_notes_dir("annotations-workspace-error");
+        let notes = root.join("notes");
+        fs::create_dir(&notes).expect("create notes folder");
+        fs::write(notes.join("annotations.json"), "not json").expect("write invalid sidecar");
+
+        let workspace = workspace_from_paths(root.clone(), notes).expect("open workspace");
+
+        assert_eq!(workspace.annotations, AnnotationDocument::default());
+        assert!(workspace
+            .annotations_error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid")));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn annotation_validation_enforces_ids_geometry_and_limits() {
+        let mut duplicate = sample_annotations();
+        if let AnnotationItem::Stroke(stroke) = &mut duplicate.items[1] {
+            stroke.id = "line-1".into();
+        }
+        assert!(validate_annotations(&duplicate).is_err());
+
+        let invalid_geometry = AnnotationDocument {
+            version: 1,
+            items: vec![AnnotationItem::Circle(AnnotationCircle {
+                id: "circle-1".into(),
+                cx: 0.0,
+                cy: 0.0,
+                radius: 0.0,
+                name: None,
+            })],
+        };
+        assert!(validate_annotations(&invalid_geometry).is_err());
+
+        let oversized_name = AnnotationDocument {
+            version: 1,
+            items: vec![AnnotationItem::Square(AnnotationSquare {
+                id: "square-1".into(),
+                x: 0.0,
+                y: 0.0,
+                size: 1.0,
+                name: Some("n".repeat(MAX_ANNOTATION_NAME_CHARS + 1)),
+            })],
+        };
+        assert!(validate_annotations(&oversized_name).is_err());
+
+        let oversized_text = AnnotationDocument {
+            version: 1,
+            items: vec![AnnotationItem::Text(AnnotationText {
+                id: "text-1".into(),
+                x: 0.0,
+                y: 0.0,
+                text: "t".repeat(MAX_ANNOTATION_TEXT_CHARS + 1),
+            })],
+        };
+        assert!(validate_annotations(&oversized_text).is_err());
+
+        let too_many_points = AnnotationDocument {
+            version: 1,
+            items: vec![AnnotationItem::Stroke(AnnotationStroke {
+                id: "stroke-1".into(),
+                points: (0..=MAX_STROKE_POINTS)
+                    .map(|index| AnnotationPoint {
+                        x: index as f64,
+                        y: 0.0,
+                    })
+                    .collect(),
+            })],
+        };
+        assert!(validate_annotations(&too_many_points).is_err());
+
+        let strokes = (0..25)
+            .map(|stroke_index| {
+                AnnotationItem::Stroke(AnnotationStroke {
+                    id: format!("stroke-{}", stroke_index),
+                    points: (0..MAX_STROKE_POINTS)
+                        .map(|point_index| AnnotationPoint {
+                            x: point_index as f64,
+                            y: stroke_index as f64,
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+        let too_many_total_points = AnnotationDocument {
+            version: 1,
+            items: strokes,
+        };
+        assert!(validate_annotations(&too_many_total_points).is_err());
+
+        let non_finite = AnnotationDocument {
+            version: 1,
+            items: vec![AnnotationItem::Text(AnnotationText {
+                id: "text-infinite".into(),
+                x: f64::INFINITY,
+                y: 0.0,
+                text: "invalid".into(),
+            })],
+        };
+        assert!(validate_annotations(&non_finite).is_err());
+
+        let item = AnnotationItem::Text(AnnotationText {
+            id: "text".into(),
+            x: 0.0,
+            y: 0.0,
+            text: String::new(),
+        });
+        let too_many_items = AnnotationDocument {
+            version: 1,
+            items: vec![item; MAX_ANNOTATION_ITEMS + 1],
+        };
+        assert!(validate_annotations(&too_many_items).is_err());
+    }
+
+    #[test]
+    fn annotation_schema_rejects_unknown_fields() {
+        let raw = r#"{"version":1,"items":[{"type":"text","id":"t","x":0,"y":0,"text":"ok","extra":true}]}"#;
+        assert!(serde_json::from_str::<AnnotationDocument>(raw).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn annotation_sidecar_symlinks_are_never_read_or_written() {
+        use std::os::unix::fs::symlink;
+
+        let notes = temp_notes_dir("annotations-symlink");
+        let outside = temp_notes_dir("annotations-symlink-outside");
+        let target = outside.join("annotations.json");
+        let original = b"outside file";
+        fs::write(&target, original).expect("write outside file");
+        symlink(&target, notes.join("annotations.json")).expect("create sidecar symlink");
+
+        assert!(read_annotations_file(&notes).is_err());
+        assert!(write_annotations_blocking(
+            notes.to_string_lossy().into_owned(),
+            sample_annotations()
+        )
+        .is_err());
+        assert_eq!(fs::read(target).expect("read outside file"), original);
+        fs::remove_dir_all(notes).ok();
+        fs::remove_dir_all(outside).ok();
     }
 
     #[cfg(unix)]
