@@ -1380,7 +1380,25 @@ body.graphFullscreen .topbarActions {
 }
 
 .noteMeta {
+  display: grid;
   min-width: 0;
+  gap: 4px;
+}
+
+.noteDates {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.noteDatesWarning {
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .editorControls {
@@ -1572,6 +1590,33 @@ h2 {
 
 .cm-wikiLink.is-missing {
   color: var(--tag-missing);
+}
+
+.cm-date-stamp {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-inline-start: 10px;
+  color: var(--muted);
+  font-size: 0.78em;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.015em;
+  opacity: 0.68;
+  pointer-events: auto;
+  user-select: none;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+.cm-date-stamp::before {
+  width: 12px;
+  border-top: 1px solid var(--line-2);
+  content: "";
+  transform: translateY(-0.16em);
+}
+
+.cm-date-stamp.is-estimated {
+  opacity: 0.56;
 }
 
 .emptyGraphText {
