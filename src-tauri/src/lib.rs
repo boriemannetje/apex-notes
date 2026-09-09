@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
-    fs, io,
+    collections::{BTreeMap, HashMap, HashSet},
+    fs,
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -15,6 +16,8 @@ struct NoteFile {
     raw: String,
     signature: String,
     modified_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_ms: Option<u64>,
     byte_len: u64,
 }
 
@@ -24,6 +27,8 @@ struct NoteFileStatus {
     path: String,
     signature: String,
     modified_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_ms: Option<u64>,
     byte_len: u64,
 }
 
@@ -38,6 +43,63 @@ struct Workspace {
     annotations: AnnotationDocument,
     #[serde(skip_serializing_if = "Option::is_none")]
     annotations_error: Option<String>,
+    dates: DateDocument,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dates_error: Option<String>,
+}
+
+const DATES_VERSION: u32 = 1;
+const MAX_DATE_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_DATE_NOTES: usize = 20_000;
+const MAX_DATE_LINES: usize = 200_000;
+const MAX_DATE_LINES_PER_NOTE: usize = 100_000;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct DateDocument {
+    version: u32,
+    notes: BTreeMap<String, NoteDates>,
+}
+
+impl Default for DateDocument {
+    fn default() -> Self {
+        Self {
+            version: DATES_VERSION,
+            notes: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct NoteDates {
+    created: DateStamp,
+    lines: Vec<DateLine>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct DateStamp {
+    #[serde(deserialize_with = "deserialize_required_option")]
+    day: Option<String>,
+    estimated: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct DateLine {
+    anchor: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    day: Option<String>,
+    estimated: bool,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 const ANNOTATIONS_VERSION: u32 = 1;
@@ -448,6 +510,45 @@ fn write_annotations_blocking(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn write_dates(notes_path: String, dates: DateDocument) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || write_dates_blocking(notes_path, dates))
+        .await
+        .map_err(to_error)?
+}
+
+fn write_dates_blocking(notes_path: String, dates: DateDocument) -> Result<(), String> {
+    let notes_root = require_existing_dir(notes_path, "Notes path is not a folder")?;
+    validate_dates(&dates)?;
+    let raw = serde_json::to_vec(&dates).map_err(to_error)?;
+    if raw.len() as u64 > MAX_DATE_DOCUMENT_BYTES {
+        return Err(format!(
+            "dates.json exceeds the {} byte limit",
+            MAX_DATE_DOCUMENT_BYTES
+        ));
+    }
+
+    let path = dates_path(&notes_root);
+    reject_symlink(&path, "Dates file cannot be a symlink").map_err(to_error)?;
+
+    // Never replace a sidecar that the app could not safely understand.
+    let expected_existing = match fs::metadata(&path) {
+        Ok(_) => {
+            read_dates_file(&notes_root)?;
+            let existing =
+                fs::read(&path).map_err(|error| format!("Could not read dates.json: {}", error))?;
+            if existing == raw {
+                return Ok(());
+            }
+            Some(existing)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Could not read dates.json: {}", error)),
+    };
+
+    atomic_write_file(&path, &raw, expected_existing.as_deref()).map_err(to_error)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn trash_notes(notes_path: String, paths: Vec<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || trash_notes_blocking(notes_path, paths))
         .await
@@ -623,6 +724,7 @@ pub fn run() {
             write_manifest,
             write_layout_patch,
             write_annotations,
+            write_dates,
             trash_notes,
             read_recent_projects,
             remember_recent_project,
@@ -714,6 +816,10 @@ fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace,
         Ok(annotations) => (annotations, None),
         Err(error) => (AnnotationDocument::default(), Some(error)),
     };
+    let (dates, dates_error) = match read_dates_file(&notes_root) {
+        Ok(dates) => (dates, None),
+        Err(error) => (DateDocument::default(), Some(error)),
+    };
 
     let workspace_name = root
         .file_name()
@@ -728,8 +834,158 @@ fn workspace_from_paths(root: PathBuf, notes_root: PathBuf) -> Result<Workspace,
         positions,
         annotations,
         annotations_error,
+        dates,
+        dates_error,
         notes,
     })
+}
+
+fn dates_path(notes_root: &Path) -> PathBuf {
+    notes_root.join("dates.json")
+}
+
+fn read_dates_file(notes_root: &Path) -> Result<DateDocument, String> {
+    let path = dates_path(notes_root);
+    reject_symlink(&path, "Dates file cannot be a symlink").map_err(to_error)?;
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.len() > MAX_DATE_DOCUMENT_BYTES => {
+            return Err(format!(
+                "dates.json exceeds the {} byte limit",
+                MAX_DATE_DOCUMENT_BYTES
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err("dates.json is not a regular file".into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(DateDocument::default());
+        }
+        Err(error) => return Err(format!("Could not inspect dates.json: {}", error)),
+    }
+
+    let raw = fs::read(&path).map_err(|error| format!("Could not read dates.json: {}", error))?;
+    let dates: DateDocument = serde_json::from_slice(&raw)
+        .map_err(|error| format!("dates.json is invalid: {}", error))?;
+    validate_dates(&dates)?;
+    Ok(dates)
+}
+
+fn validate_dates(dates: &DateDocument) -> Result<(), String> {
+    if dates.version != DATES_VERSION {
+        return Err(format!(
+            "dates.json version {} is not supported (expected version {})",
+            dates.version, DATES_VERSION
+        ));
+    }
+    if dates.notes.len() > MAX_DATE_NOTES {
+        return Err(format!(
+            "dates.json contains more than {} notes",
+            MAX_DATE_NOTES
+        ));
+    }
+
+    let mut total_lines = 0usize;
+    for (path, note) in &dates.notes {
+        validate_date_note_path(path)?;
+        validate_day(note.created.day.as_deref())?;
+        if note.lines.len() > MAX_DATE_LINES_PER_NOTE {
+            return Err(format!(
+                "dates.json contains more than {} lines for {}",
+                MAX_DATE_LINES_PER_NOTE, path
+            ));
+        }
+        total_lines = total_lines
+            .checked_add(note.lines.len())
+            .ok_or("Date line count overflow")?;
+        if total_lines > MAX_DATE_LINES {
+            return Err(format!(
+                "dates.json contains more than {} total lines",
+                MAX_DATE_LINES
+            ));
+        }
+
+        for line in &note.lines {
+            if line.anchor.len() != 32
+                || !line
+                    .anchor
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(format!(
+                    "dates.json contains an invalid line anchor for {}",
+                    path
+                ));
+            }
+            validate_day(line.day.as_deref())?;
+        }
+    }
+
+    let serialized_size = serde_json::to_vec(dates).map_err(to_error)?.len() as u64;
+    if serialized_size > MAX_DATE_DOCUMENT_BYTES {
+        return Err(format!(
+            "dates.json exceeds the {} byte limit",
+            MAX_DATE_DOCUMENT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn validate_date_note_path(path: &str) -> Result<(), String> {
+    let parsed = Path::new(path);
+    if path.is_empty()
+        || path.contains('\\')
+        || path.contains('\0')
+        || !is_markdown_path(parsed)
+        || path_to_frontend(parsed) != path
+        || parsed
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "dates.json contains an invalid Markdown note path: {}",
+            path
+        ));
+    }
+    Ok(())
+}
+
+fn validate_day(day: Option<&str>) -> Result<(), String> {
+    let Some(day) = day else {
+        return Ok(());
+    };
+    let bytes = day.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+        || !bytes[8..].iter().all(u8::is_ascii_digit)
+    {
+        return Err(format!(
+            "dates.json contains an invalid calendar day: {}",
+            day
+        ));
+    }
+
+    let year = day[..4].parse::<u32>().map_err(to_error)?;
+    let month = day[5..7].parse::<u32>().map_err(to_error)?;
+    let date = day[8..].parse::<u32>().map_err(to_error)?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_date = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || date == 0 || date > max_date {
+        return Err(format!(
+            "dates.json contains an invalid calendar day: {}",
+            day
+        ));
+    }
+    Ok(())
 }
 
 fn annotations_path(notes_root: &Path) -> PathBuf {
@@ -945,6 +1201,7 @@ fn collect_note_statuses(
             path: path_to_frontend(relative),
             signature: file_signature(metadata),
             modified_ms: file_modified_ms(metadata),
+            created_ms: file_created_ms(metadata),
             byte_len: metadata.len(),
         });
         Ok(())
@@ -1000,6 +1257,7 @@ fn read_note_file(
         raw: fs::read_to_string(file_path)?,
         signature: file_signature(metadata),
         modified_ms: file_modified_ms(metadata),
+        created_ms: file_created_ms(metadata),
         byte_len: metadata.len(),
     })
 }
@@ -1021,6 +1279,14 @@ fn file_modified_ms(metadata: &fs::Metadata) -> u64 {
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn file_created_ms(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
 fn is_markdown_path(path: &Path) -> bool {
@@ -1173,6 +1439,74 @@ fn write_if_changed(path: &Path, raw: &str) -> std::io::Result<()> {
     }
 }
 
+fn atomic_write_file(path: &Path, raw: &[u8], expected_existing: Option<&[u8]>) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing parent folder"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid sidecar filename"))?;
+
+    let mut temporary = None;
+    for attempt in 0..1000u32 {
+        let candidate = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            file_name,
+            std::process::id(),
+            now_ms()
+                .saturating_mul(1000)
+                .saturating_add(u64::from(attempt))
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    let (temporary_path, mut temporary_file) = temporary.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "Could not create a unique temporary sidecar file",
+        )
+    })?;
+
+    let result = (|| {
+        temporary_file.write_all(raw)?;
+        temporary_file.sync_all()?;
+        drop(temporary_file);
+
+        reject_symlink(path, "Workspace file cannot be a symlink")?;
+        match (fs::read(path), expected_existing) {
+            (Ok(current), Some(expected)) if current == expected => {}
+            (Err(error), None) if error.kind() == io::ErrorKind::NotFound => {}
+            (Ok(_), None) | (Err(_), Some(_)) | (Ok(_), Some(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Sidecar changed while it was being saved",
+                ));
+            }
+            (Err(error), None) => return Err(error),
+        }
+
+        fs::rename(&temporary_path, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        fs::remove_file(&temporary_path).ok();
+    }
+    result
+}
+
 fn reject_symlink(path: &Path, message: &str) -> std::io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1275,6 +1609,9 @@ mod tests {
         assert!(!Path::new(&workspace.notes_path)
             .join("annotations.json")
             .exists());
+        assert_eq!(workspace.dates, DateDocument::default());
+        assert!(workspace.dates_error.is_none());
+        assert!(!Path::new(&workspace.notes_path).join("dates.json").exists());
 
         fs::remove_dir_all(parent).ok();
     }
@@ -1300,6 +1637,379 @@ mod tests {
                 }),
             ],
         }
+    }
+
+    fn sample_dates() -> DateDocument {
+        DateDocument {
+            version: DATES_VERSION,
+            notes: BTreeMap::from([(
+                "nested/example.md".into(),
+                NoteDates {
+                    created: DateStamp {
+                        day: Some("2024-02-29".into()),
+                        estimated: false,
+                    },
+                    lines: vec![DateLine {
+                        anchor: "0123456789abcdef0123456789abcdef".into(),
+                        day: Some("2026-09-09".into()),
+                        estimated: true,
+                    }],
+                },
+            )]),
+        }
+    }
+
+    fn sample_date_line() -> DateLine {
+        DateLine {
+            anchor: "0123456789abcdef0123456789abcdef".into(),
+            day: None,
+            estimated: false,
+        }
+    }
+
+    #[test]
+    fn missing_dates_load_empty_without_creating_a_file() {
+        let notes = temp_notes_dir("dates-missing");
+
+        let result = read_dates_file(&notes).expect("load missing dates");
+
+        assert_eq!(result, DateDocument::default());
+        assert!(!notes.join("dates.json").exists());
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn dates_round_trip_in_compact_form_without_touching_markdown() {
+        let notes = temp_notes_dir("dates-round-trip");
+        let note_path = notes.join("example.md");
+        fs::write(
+            &note_path,
+            "---\ntitle: \"Example\"\nparent: null\n---\nBody\n",
+        )
+        .expect("write note");
+        let before = fs::metadata(&note_path)
+            .expect("inspect note before")
+            .modified()
+            .expect("note modified time before");
+        let dates = sample_dates();
+
+        write_dates_blocking(notes.to_string_lossy().into_owned(), dates.clone())
+            .expect("write dates");
+
+        assert_eq!(read_dates_file(&notes).expect("read dates"), dates);
+        let raw = fs::read(notes.join("dates.json")).expect("read sidecar");
+        assert_eq!(raw, serde_json::to_vec(&dates).expect("serialize dates"));
+        assert_eq!(
+            fs::metadata(&note_path)
+                .expect("inspect note after")
+                .modified()
+                .expect("note modified time after"),
+            before
+        );
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn note_files_and_statuses_expose_optional_created_ms() {
+        let notes = temp_notes_dir("created-ms");
+        let path = notes.join("example.md");
+        fs::write(&path, "# Example\n").expect("write note");
+        let metadata = fs::metadata(&path).expect("inspect note");
+        let expected = file_created_ms(&metadata);
+
+        let note = read_note_file("example.md".into(), &path, &metadata).expect("read note");
+        let statuses = list_note_files_blocking(notes.to_string_lossy().into_owned())
+            .expect("list note files");
+
+        assert_eq!(note.created_ms, expected);
+        assert_eq!(statuses[0].created_ms, expected);
+        let note_json = serde_json::to_value(note).expect("serialize note");
+        let status_json = serde_json::to_value(&statuses[0]).expect("serialize status");
+        if let Some(created_ms) = expected {
+            assert_eq!(note_json["createdMs"], created_ms);
+            assert_eq!(status_json["createdMs"], created_ms);
+        } else {
+            assert!(note_json.get("createdMs").is_none());
+            assert!(status_json.get("createdMs").is_none());
+        }
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn date_validation_accepts_real_leap_days_and_rejects_invalid_input() {
+        validate_dates(&sample_dates()).expect("accept leap day");
+
+        for day in [
+            "2023-02-29",
+            "1900-02-29",
+            "0000-01-01",
+            "2024-13-01",
+            "2024-04-31",
+            "2024-01-00",
+            "2024-1-01",
+            "2024-01-1",
+            "2024-01-01T00:00:00Z",
+        ] {
+            assert!(
+                validate_day(Some(day)).is_err(),
+                "accepted invalid day {day}"
+            );
+        }
+        validate_day(Some("2000-02-29")).expect("accept century leap day");
+
+        let mut invalid_anchor = sample_dates();
+        invalid_anchor
+            .notes
+            .get_mut("nested/example.md")
+            .expect("sample note")
+            .lines[0]
+            .anchor = "0123456789ABCDEF0123456789ABCDEF".into();
+        assert!(validate_dates(&invalid_anchor).is_err());
+    }
+
+    #[test]
+    fn date_schema_rejects_unknown_fields() {
+        let document = r#"{"version":1,"notes":{},"extra":true}"#;
+        let note = r#"{"version":1,"notes":{"a.md":{"created":{"day":null,"estimated":false},"lines":[],"extra":true}}}"#;
+        let stamp = r#"{"version":1,"notes":{"a.md":{"created":{"day":null,"estimated":false,"extra":true},"lines":[]}}}"#;
+        let line = r#"{"version":1,"notes":{"a.md":{"created":{"day":null,"estimated":false},"lines":[{"anchor":"0123456789abcdef0123456789abcdef","day":null,"estimated":false,"extra":true}]}}}"#;
+        let missing_stamp_day = r#"{"version":1,"notes":{"a.md":{"created":{"estimated":false},"lines":[]}}}"#;
+        let missing_line_day = r#"{"version":1,"notes":{"a.md":{"created":{"day":null,"estimated":false},"lines":[{"anchor":"0123456789abcdef0123456789abcdef","estimated":false}]}}}"#;
+
+        for raw in [
+            document,
+            note,
+            stamp,
+            line,
+            missing_stamp_day,
+            missing_line_day,
+        ] {
+            assert!(serde_json::from_str::<DateDocument>(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_and_newer_dates_are_reported_and_never_overwritten() {
+        let notes = temp_notes_dir("dates-corrupt");
+        let path = notes.join("dates.json");
+        for original in [
+            b"{ definitely not json }".as_slice(),
+            br#"{"version":2,"notes":{}}"#.as_slice(),
+        ] {
+            fs::write(&path, original).expect("write invalid sidecar");
+            assert!(read_dates_file(&notes).is_err());
+            assert!(
+                write_dates_blocking(notes.to_string_lossy().into_owned(), sample_dates()).is_err()
+            );
+            assert_eq!(fs::read(&path).expect("reread invalid sidecar"), original);
+        }
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn invalid_dates_are_never_persisted_over_valid_dates() {
+        let notes = temp_notes_dir("dates-invalid-write");
+        let path = notes.join("dates.json");
+        write_dates_blocking(notes.to_string_lossy().into_owned(), sample_dates())
+            .expect("write initial dates");
+        let original = fs::read(&path).expect("read initial dates");
+        let mut invalid = sample_dates();
+        invalid
+            .notes
+            .get_mut("nested/example.md")
+            .expect("sample note")
+            .created
+            .day = Some("2023-02-29".into());
+
+        assert!(write_dates_blocking(notes.to_string_lossy().into_owned(), invalid).is_err());
+        assert_eq!(fs::read(path).expect("reread dates"), original);
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn invalid_dates_do_not_prevent_the_workspace_from_opening() {
+        let root = temp_notes_dir("dates-workspace-error");
+        let notes = root.join("notes");
+        fs::create_dir(&notes).expect("create notes folder");
+        let invalid = br#"{"version":1,"notes":{"a.md":{"created":{"day":"2023-02-29","estimated":false},"lines":[]}}}"#;
+        fs::write(notes.join("dates.json"), invalid).expect("write invalid dates");
+
+        let workspace = workspace_from_paths(root.clone(), notes).expect("open workspace");
+
+        assert_eq!(workspace.dates, DateDocument::default());
+        assert!(workspace
+            .dates_error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid calendar day")));
+        assert_eq!(
+            fs::read(root.join("notes/dates.json")).expect("reread invalid dates"),
+            invalid
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn date_note_paths_must_be_canonical_relative_markdown_paths() {
+        for path in [
+            "../outside.md",
+            "/absolute.md",
+            "nested/../../outside.md",
+            "nested\\outside.md",
+            "nested/\0outside.md",
+            "nested//outside.md",
+            "./outside.md",
+            "outside.txt",
+        ] {
+            let dates = DateDocument {
+                version: DATES_VERSION,
+                notes: BTreeMap::from([(
+                    path.into(),
+                    NoteDates {
+                        created: DateStamp {
+                            day: None,
+                            estimated: false,
+                        },
+                        lines: vec![],
+                    },
+                )]),
+            };
+            assert!(
+                validate_dates(&dates).is_err(),
+                "accepted invalid path {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn date_validation_enforces_note_and_line_caps() {
+        let too_many_notes = DateDocument {
+            version: DATES_VERSION,
+            notes: (0..=MAX_DATE_NOTES)
+                .map(|index| {
+                    (
+                        format!("{}.md", index),
+                        NoteDates {
+                            created: DateStamp {
+                                day: None,
+                                estimated: false,
+                            },
+                            lines: vec![],
+                        },
+                    )
+                })
+                .collect(),
+        };
+        assert!(validate_dates(&too_many_notes).is_err());
+
+        let too_many_for_one_note = DateDocument {
+            version: DATES_VERSION,
+            notes: BTreeMap::from([(
+                "one.md".into(),
+                NoteDates {
+                    created: DateStamp {
+                        day: None,
+                        estimated: false,
+                    },
+                    lines: vec![sample_date_line(); MAX_DATE_LINES_PER_NOTE + 1],
+                },
+            )]),
+        };
+        assert!(validate_dates(&too_many_for_one_note).is_err());
+
+        let too_many_total = DateDocument {
+            version: DATES_VERSION,
+            notes: BTreeMap::from([
+                (
+                    "one.md".into(),
+                    NoteDates {
+                        created: DateStamp {
+                            day: None,
+                            estimated: false,
+                        },
+                        lines: vec![sample_date_line(); MAX_DATE_LINES_PER_NOTE],
+                    },
+                ),
+                (
+                    "two.md".into(),
+                    NoteDates {
+                        created: DateStamp {
+                            day: None,
+                            estimated: false,
+                        },
+                        lines: vec![sample_date_line(); MAX_DATE_LINES_PER_NOTE],
+                    },
+                ),
+                (
+                    "three.md".into(),
+                    NoteDates {
+                        created: DateStamp {
+                            day: None,
+                            estimated: false,
+                        },
+                        lines: vec![sample_date_line()],
+                    },
+                ),
+            ]),
+        };
+        assert!(validate_dates(&too_many_total).is_err());
+    }
+
+    #[test]
+    fn oversized_date_files_are_rejected_before_reading() {
+        let notes = temp_notes_dir("dates-oversized");
+        let path = notes.join("dates.json");
+        fs::write(&path, vec![b' '; MAX_DATE_DOCUMENT_BYTES as usize + 1])
+            .expect("write oversized sidecar");
+
+        let error = read_dates_file(&notes).expect_err("reject oversized sidecar");
+        assert!(error.contains("byte limit"));
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn oversized_date_documents_are_rejected_before_writing() {
+        let notes = temp_notes_dir("dates-write-oversized");
+        let oversized_path = format!("{}.md", "a".repeat(MAX_DATE_DOCUMENT_BYTES as usize));
+        let dates = DateDocument {
+            version: DATES_VERSION,
+            notes: BTreeMap::from([(
+                oversized_path,
+                NoteDates {
+                    created: DateStamp {
+                        day: None,
+                        estimated: false,
+                    },
+                    lines: vec![],
+                },
+            )]),
+        };
+
+        let error = write_dates_blocking(notes.to_string_lossy().into_owned(), dates)
+            .expect_err("reject oversized document");
+        assert!(error.contains("byte limit"));
+        assert!(!notes.join("dates.json").exists());
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn date_sidecar_symlinks_are_never_read_or_written() {
+        use std::os::unix::fs::symlink;
+
+        let notes = temp_notes_dir("dates-symlink");
+        let outside = temp_notes_dir("dates-symlink-outside");
+        let target = outside.join("dates.json");
+        let original = b"outside file";
+        fs::write(&target, original).expect("write outside file");
+        symlink(&target, notes.join("dates.json")).expect("create sidecar symlink");
+
+        assert!(read_dates_file(&notes).is_err());
+        assert!(
+            write_dates_blocking(notes.to_string_lossy().into_owned(), sample_dates()).is_err()
+        );
+        assert_eq!(fs::read(target).expect("read outside file"), original);
+        fs::remove_dir_all(notes).ok();
+        fs::remove_dir_all(outside).ok();
     }
 
     #[test]
