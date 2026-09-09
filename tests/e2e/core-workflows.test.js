@@ -412,8 +412,7 @@ test("pending annotation writes finish before rename and renamed workspaces pres
   await pressShortcut(page, "Z");
   await pressShortcut(page, "Y");
   assert.equal(await page.locator("[data-annotation-tool='line']").isDisabled(), true);
-  await page.locator("[data-annotation-tool='line']").evaluate((button) => { button.disabled = false; });
-  await page.locator("[data-annotation-tool='line']").click();
+  await page.locator("[data-annotation-tool='line']").evaluate((button) => { button.disabled = false; button.click(); });
   await page.mouse.move(graph.x + 520, graph.y + 430);
   await page.mouse.down();
   await page.mouse.move(graph.x + 620, graph.y + 470);
@@ -450,8 +449,7 @@ test("closing and reopening a workspace waits for its delayed annotation write",
   await page.locator(".workspaceTabClose").click();
   assert.equal(await page.locator(".workspaceTab").count(), 1);
   assert.equal(await page.locator("[data-annotation-tool='line']").isDisabled(), true);
-  await page.locator("[data-annotation-tool='line']").evaluate((button) => { button.disabled = false; });
-  await page.locator("[data-annotation-tool='line']").click();
+  await page.locator("[data-annotation-tool='line']").evaluate((button) => { button.disabled = false; button.click(); });
   await page.mouse.move(graph.x + 560, graph.y + 410);
   await page.mouse.down();
   await page.mouse.move(graph.x + 650, graph.y + 450);
