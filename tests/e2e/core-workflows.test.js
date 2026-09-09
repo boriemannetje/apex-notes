@@ -1269,6 +1269,10 @@ test("daily dates group lines across days and restore attribution with editor un
   await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
   assert.match(await page.locator("#noteDates").textContent(), /Created ≈ 1 Sep 2026 · Last edited 1 Sep 2026/);
   assert.equal(await page.locator(".cm-date-stamp").count(), 1);
+  const dateAccessibility = await page.locator(".cm-date-stamp").ariaSnapshot();
+  assert.match(dateAccessibility, /note.*1 Sep 2026/);
+  assert.match(dateAccessibility, /estimated/i);
+  assert.equal(await page.locator(".cm-date-stamp").getAttribute("tabindex"), null);
   await appendDateText(page, "\nToday one\nToday two");
   await waitForStoredDate(page, "2026-09-09");
   assert.equal(await page.locator(".cm-date-stamp").count(), 2);

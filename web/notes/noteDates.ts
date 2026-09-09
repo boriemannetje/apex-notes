@@ -29,6 +29,10 @@ export interface DateGroup {
   stamp: DateStamp;
 }
 
+export interface DateGroupOptions {
+  trusted?: boolean;
+}
+
 const MAX_NOTES = 20_000;
 const MAX_LINES_PER_NOTE = 100_000;
 const MAX_TOTAL_LINES = 200_000;
@@ -106,14 +110,14 @@ export function reconcileNoteDates(body: string, previous: NoteDates | null | un
   let prefix = 0;
   const sharedLength = Math.min(anchors.length, oldAnchors.length);
   while (prefix < sharedLength && anchors[prefix] === oldAnchors[prefix]) {
-    result[prefix] = { ...prior.lines[prefix] };
+    result[prefix] = prior.lines[prefix];
     prefix += 1;
   }
 
   let oldEnd = oldAnchors.length - 1;
   let newEnd = anchors.length - 1;
   while (oldEnd >= prefix && newEnd >= prefix && oldAnchors[oldEnd] === anchors[newEnd]) {
-    result[newEnd] = { ...prior.lines[oldEnd] };
+    result[newEnd] = prior.lines[oldEnd];
     oldEnd -= 1;
     newEnd -= 1;
   }
@@ -128,30 +132,36 @@ export function reconcileNoteDates(body: string, previous: NoteDates | null | un
     const anchor = anchors[newIndex];
     const oldIndex = oldCandidates.get(anchor);
     if (oldIndex === undefined || newCandidates.get(anchor) !== newIndex || oldIndex <= lastOldIndex) continue;
-    result[newIndex] = { ...prior.lines[oldIndex] };
+    result[newIndex] = prior.lines[oldIndex];
     lastOldIndex = oldIndex;
   }
 
   return { created: { ...prior.created }, lines: result };
 }
 
-export function dateGroups(body: string, dates: NoteDates | null | undefined): DateGroup[] {
+export function dateGroups(
+  body: string,
+  dates: NoteDates | null | undefined,
+  options: DateGroupOptions = {}
+): DateGroup[] {
   const lines = logicalLines(body);
-  const normalized = normalizeNoteDates(dates);
+  const normalized = options.trusted ? dates ?? null : normalizeNoteDates(dates);
   const groups: DateGroup[] = [];
   let active: { stamp: DateStamp; lineNumber: number } | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
     if (!lines[index].trim()) continue;
     const line = normalized?.lines[index];
-    const stamp = line ? normalizeStamp(line) : unavailableStamp();
+    const stamp = line
+      ? (options.trusted ? line : normalizeStamp(line))
+      : unavailableStamp();
     if (active && active.stamp.day === stamp.day) {
       active.lineNumber = index + 1;
       active.stamp.estimated ||= stamp.estimated;
       continue;
     }
     if (active) groups.push(active);
-    active = { stamp, lineNumber: index + 1 };
+    active = { stamp: { day: stamp.day, estimated: stamp.estimated }, lineNumber: index + 1 };
   }
 
   if (active) groups.push(active);
@@ -240,7 +250,16 @@ function normalizeNoteDates(value: unknown): NoteDates | null {
   const lines: DateLine[] = [];
   for (const rawLine of value.lines) {
     if (!isRecord(rawLine) || typeof rawLine.anchor !== "string" || !/^[0-9a-f]{32}$/.test(rawLine.anchor)) return null;
-    lines.push({ anchor: rawLine.anchor, ...normalizeStamp(rawLine) });
+    const stamp = normalizeStamp(rawLine);
+    const isCanonical = Object.keys(rawLine).length === 3 &&
+      Object.prototype.hasOwnProperty.call(rawLine, "anchor") &&
+      Object.prototype.hasOwnProperty.call(rawLine, "day") &&
+      Object.prototype.hasOwnProperty.call(rawLine, "estimated");
+    lines.push(
+      isCanonical && rawLine.day === stamp.day && rawLine.estimated === stamp.estimated
+        ? rawLine as unknown as DateLine
+        : { anchor: rawLine.anchor, ...stamp }
+    );
   }
   return { created: normalizeStamp(value.created), lines };
 }

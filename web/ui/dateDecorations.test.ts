@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { history, redo, undo, undoDepth } from "@codemirror/commands";
+import { history, historyField, redo, undo, undoDepth } from "@codemirror/commands";
 import { EditorState, Transaction } from "@codemirror/state";
 import { lineAnchor, seedNoteDates, type NoteDates } from "../notes/noteDates.ts";
 import {
@@ -114,6 +114,46 @@ test("transaction mapping preserves untouched duplicate lines between edits", ()
     "2026-09-03",
     "2026-09-09"
   ]);
+  assert.equal(dates?.lines[1], initial.lines[1]);
+  assert.equal(dates?.lines[2], initial.lines[2]);
+});
+
+test("boundary edits preserve the following line when a first line becomes blank or gains text", () => {
+  const exactDays = (body: string): NoteDates => ({
+    created: { day: "2026-09-01", estimated: false },
+    lines: body.split("\n").map((line, index) => ({
+      anchor: lineAnchor(line),
+      day: `2026-09-0${index + 1}`,
+      estimated: false
+    }))
+  });
+
+  for (const scenario of [
+    { body: "abc\nX", change: { from: 0, to: 3, insert: "" }, expected: "\nX" },
+    { body: "\nX", change: { from: 0, to: 0, insert: "abc" }, expected: "abc\nX" }
+  ]) {
+    const initial = exactDays(scenario.body);
+    let state = EditorState.create({
+      doc: scenario.body,
+      extensions: [history(), createDateTrackingExtension({ getDay: () => "2026-09-09" })]
+    });
+    state = dispatch(state, {
+      effects: setNoteDates.of(initial),
+      annotations: Transaction.addToHistory.of(false)
+    });
+    state = dispatch(state, { changes: scenario.change });
+
+    assert.equal(state.doc.toString(), scenario.expected);
+    assert.equal(getEditorNoteDates(state)?.lines[0]?.day, "2026-09-09");
+    assert.equal(getEditorNoteDates(state)?.lines[1], initial.lines[1]);
+
+    state = runCommand(state, undo);
+    assert.equal(state.doc.toString(), scenario.body);
+    assert.deepEqual(getEditorNoteDates(state), initial);
+    state = runCommand(state, redo);
+    assert.equal(state.doc.toString(), scenario.expected);
+    assert.equal(getEditorNoteDates(state)?.lines[1]?.day, "2026-09-02");
+  }
 });
 
 test("oversized edits retain bounded metadata and recover after shrinking", () => {
@@ -171,4 +211,84 @@ test("undo and redo restore grouped cross-midnight text and dates atomically", (
   state = runCommand(state, redo);
   assert.equal(state.doc.toString(), "abc");
   assert.equal(getEditorNoteDates(state)?.lines[0]?.day, "2026-09-09");
+});
+
+test("grouped multiline deletion and insertion restore compact date deltas across midnight", () => {
+  const body = "A\nB\nC\nD";
+  const initial: NoteDates = {
+    created: { day: "2026-09-01", estimated: false },
+    lines: body.split("\n").map((line, index) => ({
+      anchor: lineAnchor(line),
+      day: `2026-09-0${index + 1}`,
+      estimated: false
+    }))
+  };
+  let currentDay = "2026-09-09";
+  let state = EditorState.create({
+    doc: body,
+    extensions: [history(), createDateTrackingExtension({ getDay: () => currentDay })]
+  });
+  state = dispatch(state, {
+    effects: setNoteDates.of(initial),
+    annotations: Transaction.addToHistory.of(false)
+  });
+
+  state = dispatch(state, {
+    changes: { from: 2, to: 4 },
+    annotations: Transaction.userEvent.of("delete")
+  });
+  currentDay = "2026-09-10";
+  state = dispatch(state, {
+    changes: { from: 2, insert: "X\nY\n" },
+    annotations: Transaction.userEvent.of("input.type")
+  });
+
+  assert.equal(state.doc.toString(), "A\nX\nY\nC\nD");
+  assert.equal(undoDepth(state), 1);
+  assert.deepEqual(getEditorNoteDates(state)?.lines.map((line) => line.day), [
+    "2026-09-01", "2026-09-10", "2026-09-10", "2026-09-03", "2026-09-04"
+  ]);
+
+  state = runCommand(state, undo);
+  assert.equal(state.doc.toString(), body);
+  assert.deepEqual(getEditorNoteDates(state), initial);
+
+  state = runCommand(state, redo);
+  assert.equal(state.doc.toString(), "A\nX\nY\nC\nD");
+  assert.deepEqual(getEditorNoteDates(state)?.lines.map((line) => line.day), [
+    "2026-09-01", "2026-09-10", "2026-09-10", "2026-09-03", "2026-09-04"
+  ]);
+});
+
+test("history retains only touched line metadata for grouped edits in a large note", () => {
+  const body = Array.from({ length: 2_000 }, (_, index) => `line-${index}`).join("\n");
+  let state = EditorState.create({
+    doc: body,
+    extensions: [history(), createDateTrackingExtension({ getDay: () => "2026-09-09" })]
+  });
+  state = dispatch(state, {
+    effects: setNoteDates.of(seedNoteDates(body, { isNew: true, day: "2026-09-08" })),
+    annotations: Transaction.addToHistory.of(false)
+  });
+
+  for (let index = 0; index < 40; index += 1) {
+    state = dispatch(state, {
+      changes: { from: state.doc.length, insert: String(index % 10) },
+      annotations: Transaction.userEvent.of("input.type")
+    });
+  }
+
+  assert.equal(undoDepth(state), 1);
+  const storedHistory = state.field(historyField) as unknown as {
+    done: Array<{ effects: Array<{ value?: { lines?: unknown[] } }> }>;
+  };
+  const effects = storedHistory.done.at(-1)?.effects ?? [];
+  const retainedDateLines = effects.reduce((count, effect) => count + (effect.value?.lines?.length ?? 0), 0);
+  assert.equal(effects.length, 40);
+  assert.equal(retainedDateLines, 40);
+  assert(retainedDateLines < state.doc.lines);
+
+  state = runCommand(state, undo);
+  assert.equal(state.doc.toString(), body);
+  assert.ok(getEditorNoteDates(state)?.lines.every((line) => line.day === "2026-09-08"));
 });

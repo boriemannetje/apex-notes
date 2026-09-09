@@ -11,6 +11,7 @@ import { Decoration, EditorView, WidgetType, type DecorationSet } from "@codemir
 import {
   dateGroups,
   formatDateStamp,
+  lineAnchor,
   localDay,
   reconcileNoteDates,
   type DateStamp,
@@ -18,6 +19,28 @@ import {
 } from "../notes/noteDates.ts";
 
 export const setNoteDates = StateEffect.define<NoteDates | null>();
+
+type DateHistoryLine = {
+  from: number;
+  line: NoteDates["lines"][number];
+};
+
+type DateHistoryDelta = {
+  created: DateStamp;
+  lines: DateHistoryLine[];
+};
+
+const restoreNoteDateDelta = StateEffect.define<DateHistoryDelta>({
+  map(delta, changes) {
+    return {
+      created: delta.created,
+      lines: delta.lines.map((entry) => ({
+        from: changes.mapPos(entry.from, 1),
+        line: entry.line
+      }))
+    };
+  }
+});
 
 const MAX_TRACKED_LINES = 100_000;
 
@@ -37,9 +60,17 @@ const noteDatesField = StateField.define<NoteDates | null>({
   },
   update(noteDates, transaction) {
     let hydrated = false;
+    const historyDeltas: DateHistoryDelta[] = [];
     for (const effect of transaction.effects) {
-      if (!effect.is(setNoteDates)) continue;
-      noteDates = effect.value;
+      if (effect.is(setNoteDates)) {
+        noteDates = effect.value;
+        hydrated = true;
+      } else if (effect.is(restoreNoteDateDelta)) {
+        historyDeltas.push(effect.value);
+      }
+    }
+    if (historyDeltas.length) {
+      noteDates = restoreDateDeltas(transaction, noteDates, historyDeltas);
       hydrated = true;
     }
 
@@ -67,38 +98,64 @@ function reconcileEditorNoteDates(
   previous: NoteDates,
   stamp: DateStamp
 ): NoteDates {
-  const reconciled = reconcileNoteDates(transaction.state.doc.toString(), previous, stamp);
   const oldDocument = transaction.startState.doc;
   const newDocument = transaction.state.doc;
-
-  for (let lineNumber = 1; lineNumber <= oldDocument.lines; lineNumber += 1) {
-    const previousLine = previous.lines[lineNumber - 1];
-    if (!previousLine) continue;
-
-    const oldLine = oldDocument.line(lineNumber);
-    const mappedFrom = transaction.changes.mapPos(oldLine.from, 1);
-    const mappedTo = transaction.changes.mapPos(oldLine.to, -1);
-    if (mappedFrom > mappedTo) continue;
-
-    const newLine = newDocument.lineAt(mappedFrom);
+  if (oldDocument.lines > MAX_TRACKED_LINES || previous.lines.length !== oldDocument.lines) {
+    return reconcileNoteDates(newDocument.toString(), previous, stamp);
+  }
+  const lines: Array<NoteDates["lines"][number] | undefined> = new Array(newDocument.lines);
+  transaction.changes.iterGaps((oldFrom, newFrom, length) => {
+    const oldSpan = completeLineSpan(oldDocument, oldFrom, oldFrom + length);
+    const newSpan = completeLineSpan(newDocument, newFrom, newFrom + length);
+    if (!oldSpan || !newSpan) return;
+    const startOffset = Math.max(oldSpan.firstFrom - oldFrom, newSpan.firstFrom - newFrom);
+    const endOffset = Math.min(oldSpan.lastTo - oldFrom, newSpan.lastTo - newFrom);
+    if (startOffset > endOffset) return;
+    const oldFirst = oldDocument.lineAt(oldFrom + startOffset);
+    const newFirst = newDocument.lineAt(newFrom + startOffset);
+    const oldLast = oldDocument.lineAt(oldFrom + endOffset);
+    const newLast = newDocument.lineAt(newFrom + endOffset);
     if (
-      newLine.from !== mappedFrom ||
-      newLine.to !== mappedTo ||
-      newLine.text !== oldLine.text
+      oldFirst.from !== oldFrom + startOffset ||
+      newFirst.from !== newFrom + startOffset ||
+      oldLast.to !== oldFrom + endOffset ||
+      newLast.to !== newFrom + endOffset
     ) {
-      continue;
+      return;
     }
-
-    const reconciledLine = reconciled.lines[newLine.number - 1];
-    if (!reconciledLine) continue;
-    reconciled.lines[newLine.number - 1] = {
-      ...reconciledLine,
-      day: previousLine.day,
-      estimated: previousLine.estimated
+    const count = oldLast.number - oldFirst.number + 1;
+    if (count !== newLast.number - newFirst.number + 1) return;
+    for (let offset = 0; offset < count; offset += 1) {
+      lines[newFirst.number - 1 + offset] = previous.lines[oldFirst.number - 1 + offset];
+    }
+  });
+  for (let lineNumber = 1; lineNumber <= newDocument.lines; lineNumber += 1) {
+    if (lines[lineNumber - 1]) continue;
+    const text = newDocument.line(lineNumber).text;
+    lines[lineNumber - 1] = {
+      anchor: lineAnchor(text.endsWith("\r") ? text.slice(0, -1) : text),
+      day: stamp.day,
+      estimated: stamp.estimated
     };
   }
+  return {
+    created: previous.created,
+    lines: lines as NoteDates["lines"]
+  };
+}
 
-  return reconciled;
+function completeLineSpan(
+  document: EditorState["doc"],
+  from: number,
+  to: number
+): { firstFrom: number; lastTo: number } | null {
+  let first = document.lineAt(from).number;
+  if (document.line(first).from < from) first += 1;
+  let last = document.lineAt(to).number;
+  if (document.line(last).to > to) last -= 1;
+  return first <= last
+    ? { firstFrom: document.line(first).from, lastTo: document.line(last).to }
+    : null;
 }
 
 class DateStampWidget extends WidgetType {
@@ -121,9 +178,17 @@ class DateStampWidget extends WidgetType {
     element.spellcheck = false;
     element.dataset.dateDay = this.stamp.day ?? "";
     element.dataset.estimated = String(this.stamp.estimated);
-    element.setAttribute("aria-hidden", "true");
+    element.setAttribute("role", "note");
+    element.setAttribute(
+      "aria-label",
+      this.stamp.estimated
+        ? `Line date ${label}. Estimated from file timestamps or external edits; exact line history is unavailable.`
+        : `Line date ${label}.`
+    );
     element.textContent = label;
-    element.title = this.stamp.estimated ? `${label} (estimated)` : label;
+    element.title = this.stamp.estimated
+      ? `${label} — estimated from file timestamps or external edits; exact line history is unavailable.`
+      : label;
     return element;
   }
 
@@ -137,7 +202,7 @@ function buildDateDecorations(state: EditorState): DecorationSet {
   if (noteDates === null || state.doc.lines > MAX_TRACKED_LINES) return Decoration.none;
 
   const ranges = [];
-  for (const group of dateGroups(state.doc.toString(), noteDates)) {
+  for (const group of dateGroups(state.doc.toString(), noteDates, { trusted: true })) {
     if (group.lineNumber < 1 || group.lineNumber > state.doc.lines) continue;
     const line = state.doc.line(group.lineNumber);
     ranges.push(
@@ -152,7 +217,54 @@ function buildDateDecorations(state: EditorState): DecorationSet {
 
 function invertDateState(transaction: Transaction) {
   if (!transaction.docChanged) return [];
-  return [setNoteDates.of(transaction.startState.field(noteDatesField))];
+  const noteDates = transaction.startState.field(noteDatesField);
+  if (noteDates === null) return [];
+  const lineNumbers = new Set<number>();
+  transaction.changes.iterChangedRanges((from, to) => {
+    const first = transaction.startState.doc.lineAt(from).number;
+    const last = Math.min(transaction.startState.doc.lineAt(to).number, noteDates.lines.length);
+    for (let lineNumber = first; lineNumber <= last; lineNumber += 1) {
+      lineNumbers.add(lineNumber);
+    }
+  });
+  const lines: DateHistoryLine[] = [];
+  for (const lineNumber of lineNumbers) {
+    const line = noteDates.lines[lineNumber - 1];
+    if (!line) continue;
+    lines.push({ from: transaction.startState.doc.line(lineNumber).from, line });
+  }
+  return [restoreNoteDateDelta.of({ created: noteDates.created, lines })];
+}
+
+function restoreDateDeltas(
+  transaction: Transaction,
+  current: NoteDates | null,
+  deltas: readonly DateHistoryDelta[]
+): NoteDates | null {
+  if (current === null) return null;
+  let restored: NoteDates;
+  try {
+    restored = reconcileEditorNoteDates(transaction, current, { day: null, estimated: true });
+  } catch {
+    return current;
+  }
+  for (const delta of deltas) {
+    for (const entry of delta.lines) {
+      if (entry.from < 0 || entry.from > transaction.state.doc.length) continue;
+      const documentLine = transaction.state.doc.lineAt(entry.from);
+      const restoredLine = restored.lines[documentLine.number - 1];
+      if (
+        documentLine.from !== entry.from ||
+        !restoredLine ||
+        restoredLine.anchor !== entry.line.anchor
+      ) {
+        continue;
+      }
+      restored.lines[documentLine.number - 1] = entry.line;
+    }
+    restored.created = delta.created;
+  }
+  return restored;
 }
 
 export function createDateTrackingExtension(options: { getDay?: () => string } = {}): Extension {

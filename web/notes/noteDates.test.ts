@@ -103,6 +103,9 @@ test("reconciliation preserves immutable creation and unchanged lines around edi
   ]);
   assert.equal(next.lines[1].anchor, previous.lines[0].anchor);
   assert.equal(next.lines[3].anchor, previous.lines[2].anchor);
+  assert.equal(next.lines[1], previous.lines[0]);
+  assert.equal(next.lines[3], previous.lines[2]);
+  assert.notEqual(next.lines[2], previous.lines[1]);
 });
 
 test("reconciliation safely retains position-aligned duplicate prefix and suffix lines", () => {
