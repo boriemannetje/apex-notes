@@ -5476,6 +5476,8 @@ function buildEditorLinkDecorations(editorState) {
   syntaxTree(editorState).iterate({
     enter(node) {
       if (node.name !== "Link") return;
+      // Keep logical line boundaries and their daily-date widgets visible.
+      if (doc.lineAt(node.from).number !== doc.lineAt(node.to).number) return;
       const urlNode = node.node.getChild("URL");
       if (!urlNode) return;
 
@@ -5502,10 +5504,15 @@ function buildEditorLinkDecorations(editorState) {
   const builder = new RangeSetBuilder();
   const regex = /\[\[([^\]]+)\]\]/g;
   let match;
+  let markdownRangeIndex = 0;
 
   while ((match = regex.exec(text)) !== null) {
     const matchEnd = match.index + match[0].length;
-    if (markdownLinkRanges.some((range) => match.index < range.to && matchEnd > range.from)) continue;
+    while (markdownRangeIndex < markdownLinkRanges.length && markdownLinkRanges[markdownRangeIndex].to <= match.index) {
+      markdownRangeIndex += 1;
+    }
+    const markdownRange = markdownLinkRanges[markdownRangeIndex];
+    if (markdownRange && match.index < markdownRange.to && matchEnd > markdownRange.from) continue;
     const parsed = parseWikiTarget(match[1]);
     const note = resolveWikiNote(parsed.ref);
     const label = note && !match[1].includes("|") ? note.title : parsed.label;

@@ -1419,6 +1419,27 @@ test("readable Markdown links coexist with date labels and copy as Markdown", as
   await page.close();
 });
 
+test("multiline Markdown links preserve separate daily date labels", async () => {
+  const workspace = dateWorkspace();
+  workspace.notes[0].raw = '---\ntitle: "Dates"\nparent: null\n---\n\n[First\nsecond](https://example.com)';
+  const page = await newMockedTauriPage(workspace);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  await page.evaluate(() => {
+    const dates = window.__apexTestState.workspace.dates.notes["root.md"];
+    dates.lines[0].day = "2026-09-01";
+    dates.lines[1].day = "2026-09-02";
+  });
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  await page.locator(".cm-date-stamp[data-date-day='2026-09-02']").waitFor();
+  assert.equal(await page.locator(".cm-markdownLink").count(), 0);
+  assert.equal(await page.locator(".cm-date-stamp").count(), 2);
+  assert.match(await page.locator(".cm-content").textContent(), /https:\/\/example.com/);
+  await page.close();
+});
+
 function dateWorkspace() {
   const workspace = sampleWorkspace();
   workspace.notes = [{ path: "root.md", raw: '---\ntitle: "Dates"\nparent: null\n---\n\nFirst line\nSecond line\n\nThird line', createdMs: Date.parse("2026-09-01T12:00:00Z"), modifiedMs: Date.parse("2026-09-01T12:00:00Z") }];
