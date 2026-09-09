@@ -13,6 +13,7 @@ export interface GraphWheelZoomInput {
   deltaY: number;
   deltaMode: number;
   pageHeight?: number;
+  ctrlKey?: boolean;
 }
 
 /**
@@ -23,7 +24,8 @@ export function getGraphWheelZoomFactor({
   deltaX,
   deltaY,
   deltaMode,
-  pageHeight = DEFAULT_PAGE_HEIGHT_PX
+  pageHeight = DEFAULT_PAGE_HEIGHT_PX,
+  ctrlKey = false
 }: GraphWheelZoomInput): number | null {
   if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || deltaY === 0) return null;
 
@@ -36,6 +38,9 @@ export function getGraphWheelZoomFactor({
   if (Math.abs(normalizedY) <= Math.abs(normalizedX)) return null;
 
   const clampedDelta = clamp(normalizedY, -MAX_WHEEL_DELTA_PX, MAX_WHEEL_DELTA_PX);
+  // Trackpad pinch arrives as small Ctrl-wheel deltas in Chromium/Firefox.
+  // Keep its gain separate from ordinary wheel scrolling.
+  if (ctrlKey) return Math.exp(-clamp(normalizedY, -100, 100) * 0.01);
   const factor = Math.exp(
     (-clampedDelta / WHEEL_NOTCH_DELTA_PX) * Math.log(WHEEL_NOTCH_ZOOM_FACTOR)
   );

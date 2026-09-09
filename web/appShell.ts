@@ -134,6 +134,9 @@ const annotationWriteTailsByWorkspace = new Map();
 const pendingAnnotationWritesByWorkspace = new Map();
 const pendingAnnotationChangesByWorkspace = new Map();
 const annotationSaveTokensByWorkspace = new Map();
+const annotationTransitionLocksByWorkspace = new Map();
+const persistedAnnotationDocumentsByWorkspace = new Map();
+const deferredAnnotationHistoryByWorkspace = new Map();
 const SEARCH_BODY_NOTE_THRESHOLD = 1000;
 const SEARCH_BODY_TOTAL_BYTES_THRESHOLD = 25 * 1024 * 1024;
 const SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD = 3_000_000;
@@ -160,6 +163,7 @@ const state = createWorkspaceStore(loadRecentProjects());
 
 let suppressWorkspaceRenameCommit = false;
 let appEventController = null;
+let graphPinch = null;
 let resizeDebounceTimer = 0;
 let largeGraphRefreshTimer = 0;
 
@@ -269,6 +273,7 @@ export function initializeApp() {
 }
 
 export function disposeApp() {
+  graphPinch = null;
   stopLiveSync();
   cancelQueuedGraphRender();
   cancelGraphViewAnimation();
@@ -647,6 +652,10 @@ function bindEvents() {
   on(document, "pointerdown", onDocumentSearchPointerDown);
 
   on(els.graph, "wheel", onGraphWheel, { passive: false });
+  on(els.graph, "gesturestart", onGraphPinchStart, { passive: false });
+  on(els.graph, "gesturechange", onGraphPinchChange, { passive: false });
+  on(els.graph, "gestureend", onGraphPinchEnd, { passive: false });
+  on(window, "blur", () => { graphPinch = null; });
   on(els.graph, "dblclick", onGraphDoubleClick);
   on(els.graph, "pointerdown", startGraphPointerDown);
   on(els.graph, "pointerover", onGraphPointerOver);
@@ -1007,6 +1016,11 @@ async function renameActiveWorkspace(requestedName) {
   }
 
   const previousRootPath = state.rootPath;
+  const transitionLock = beginAnnotationTransitionLock(state.activeWorkspaceId);
+  if (!transitionLock) {
+    setStatus("Folder transition already in progress");
+    return;
+  }
   stopLiveSync();
 
   try {
@@ -1028,6 +1042,8 @@ async function renameActiveWorkspace(requestedName) {
     setStatus(`Could not rename folder: ${String(error)}`);
     renderWorkspaceTabs();
     startLiveSync();
+  } finally {
+    endAnnotationTransitionLock(transitionLock);
   }
 }
 
@@ -1245,14 +1261,19 @@ async function openNotesFolder() {
     return;
   }
 
-  if (state.dirty) {
-    await flushAutosave();
-    if (state.dirty) return;
-  }
-
+  let transitionLock = null;
   try {
     const rootPath = await pickNativeDirectory();
     if (!rootPath) return;
+    const existing = state.workspaces.find((workspace) => workspace.rootPath === rootPath);
+    if (existing) {
+      transitionLock = beginAnnotationTransitionLock(existing.id);
+      if (!transitionLock) throw new Error("Folder transition already in progress");
+    }
+    if (state.dirty) {
+      await flushAutosave();
+      if (state.dirty) return;
+    }
     await awaitPendingAnnotationWritesForRoot(rootPath);
     const workspace = await invokeNative("read_workspace", { rootPath });
     closeGraphProjectLauncher();
@@ -1262,6 +1283,8 @@ async function openNotesFolder() {
       setStatus("Could not open folder");
       console.error(error);
     }
+  } finally {
+    endAnnotationTransitionLock(transitionLock);
   }
 }
 
@@ -1273,12 +1296,17 @@ async function openRecentProject(rootPath) {
     return;
   }
 
-  if (state.dirty) {
-    await flushAutosave();
-    if (state.dirty) return;
+  const existing = state.workspaces.find((workspace) => workspace.rootPath === rootPath);
+  const transitionLock = existing ? beginAnnotationTransitionLock(existing.id) : null;
+  if (existing && !transitionLock) {
+    setStatus("Folder transition already in progress");
+    return;
   }
-
   try {
+    if (state.dirty) {
+      await flushAutosave();
+      if (state.dirty) return;
+    }
     setStatus("Opening recent project");
     await awaitPendingAnnotationWritesForRoot(rootPath);
     const workspace = await invokeNative("read_workspace", { rootPath });
@@ -1291,6 +1319,8 @@ async function openRecentProject(rootPath) {
     void forgetNativeRecentProject(rootPath);
     setStatus("Could not open recent project");
     console.error(error);
+  } finally {
+    endAnnotationTransitionLock(transitionLock);
   }
 }
 
@@ -1819,6 +1849,10 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath, preser
     target.annotations = emptyAnnotationDocument();
     target.annotationsError = workspace.annotationsError || String(error?.message || error);
   }
+  target.persistedAnnotations = cloneAnnotationDocument(target.annotations);
+  target.annotationSaveError = "";
+  persistedAnnotationDocumentsByWorkspace.set(target.id, cloneAnnotationDocument(target.annotations));
+  deferredAnnotationHistoryByWorkspace.delete(target.id);
   const targetNotePaths = new Set(target.notes.map((note) => note.path));
   target.manualPositions = existing
     ? pruneStoredPositions(existing.manualPositions, targetNotePaths)
@@ -2121,6 +2155,10 @@ async function redoWorkspaceHistory() {
 }
 
 async function stepWorkspaceHistory(direction) {
+  if (isAnnotationTransitionLocked()) {
+    setStatus("Wait for the folder transition before undoing or redoing");
+    return false;
+  }
   if (!hasWritableWorkspace()) {
     setStatus(direction === "undo" ? "Open a folder to undo changes" : "Open a folder to redo changes");
     return false;
@@ -2375,9 +2413,10 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   els.searchInput.value = state.filter;
   updateSearchResults();
   renderSearchResults();
-  renderCurrentSelection(workspacePressureStatus(state.annotationsError
+  const annotationStatus = state.annotationsError
     ? `${statusMessage}. Canvas annotations unavailable: ${state.annotationsError}`
-    : statusMessage));
+    : (workspace.annotationSaveError ? `${statusMessage}. ${workspace.annotationSaveError}` : statusMessage);
+  renderCurrentSelection(workspacePressureStatus(annotationStatus));
   renderNewNoteParents();
   renderLaunchScreen();
   renderGraph({ preserveView });
@@ -2415,32 +2454,44 @@ async function closeWorkspaceTab(workspaceId) {
   if (index === -1) return;
   if (workspaceId === state.activeWorkspaceId && state.historyApplying) return;
 
-  await awaitPendingAnnotationWrites(workspaceId);
-
-  if (workspaceId === state.activeWorkspaceId) prepareAnnotationTransition();
-
-  if (workspaceId === state.activeWorkspaceId && state.dirty) {
-    await flushAutosave();
-    if (state.dirty) return;
-  }
-
-  saveActiveWorkspaceState();
-  state.workspaces.splice(index, 1);
-  annotationWriteTailsByWorkspace.delete(workspaceId);
-  pendingAnnotationWritesByWorkspace.delete(workspaceId);
-  pendingAnnotationChangesByWorkspace.delete(workspaceId);
-  annotationSaveTokensByWorkspace.delete(workspaceId);
-
-  if (workspaceId !== state.activeWorkspaceId) {
-    renderWorkspaceTabs();
+  const transitionLock = beginAnnotationTransitionLock(workspaceId);
+  if (!transitionLock) {
+    setStatus("Folder transition already in progress");
     return;
   }
+  try {
+    await awaitPendingAnnotationWrites(workspaceId);
 
-  const nextWorkspace = state.workspaces[Math.min(index, state.workspaces.length - 1)];
-  if (nextWorkspace) {
-    restoreWorkspaceState(nextWorkspace, "Closed folder tab", { preserveView: true });
-  } else {
-    startEmpty();
+    if (workspaceId === state.activeWorkspaceId && state.dirty) {
+      await flushAutosave();
+      if (state.dirty) return;
+    }
+    await awaitPendingAnnotationWrites(workspaceId);
+
+    saveActiveWorkspaceState();
+    const currentIndex = state.workspaces.findIndex((workspace) => workspace.id === workspaceId);
+    if (currentIndex === -1) return;
+    state.workspaces.splice(currentIndex, 1);
+    annotationWriteTailsByWorkspace.delete(workspaceId);
+    pendingAnnotationWritesByWorkspace.delete(workspaceId);
+    pendingAnnotationChangesByWorkspace.delete(workspaceId);
+    annotationSaveTokensByWorkspace.delete(workspaceId);
+    persistedAnnotationDocumentsByWorkspace.delete(workspaceId);
+    deferredAnnotationHistoryByWorkspace.delete(workspaceId);
+
+    if (workspaceId !== state.activeWorkspaceId) {
+      renderWorkspaceTabs();
+      return;
+    }
+
+    const nextWorkspace = state.workspaces[Math.min(currentIndex, state.workspaces.length - 1)];
+    if (nextWorkspace) {
+      restoreWorkspaceState(nextWorkspace, "Closed folder tab", { preserveView: true });
+    } else {
+      startEmpty();
+    }
+  } finally {
+    endAnnotationTransitionLock(transitionLock);
   }
 }
 
@@ -5146,11 +5197,13 @@ function wrapTitle(title) {
 }
 
 function onGraphWheel(event) {
+  if (graphPinch) { event.preventDefault(); return; }
   if (state.activeInteraction || shouldIgnoreGraphWheelTarget(event.target)) return;
   const factor = getGraphWheelZoomFactor({
     deltaX: event.deltaX,
     deltaY: event.deltaY,
     deltaMode: event.deltaMode,
+    ctrlKey: event.ctrlKey,
     pageHeight: els.graph.getBoundingClientRect().height
   });
   if (factor === null) return;
@@ -5158,6 +5211,37 @@ function onGraphWheel(event) {
   event.preventDefault();
   closeGraphCreatePopover();
   zoomAtPoint(event.clientX, event.clientY, factor);
+}
+
+function onGraphPinchStart(event) {
+  graphPinch = null;
+  if (state.activeInteraction || shouldIgnoreGraphWheelTarget(event.target)) return;
+  if (!Number.isFinite(event.scale) || event.scale <= 0) return;
+  event.preventDefault();
+  graphPinch = { scale: event.scale, workspaceId: state.activeWorkspaceId };
+  closeGraphCreatePopover();
+}
+
+function onGraphPinchChange(event) {
+  if (!graphPinch) return;
+  event.preventDefault();
+  if (state.activeInteraction || graphPinch.workspaceId !== state.activeWorkspaceId) {
+    graphPinch = null;
+    return;
+  }
+  if (!Number.isFinite(event.scale) || event.scale <= 0) return;
+  const factor = event.scale / graphPinch.scale;
+  graphPinch.scale = event.scale;
+  if (Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+    zoomAtPoint(event.clientX, event.clientY, factor);
+  } else {
+    zoomAtCenter(factor);
+  }
+}
+
+function onGraphPinchEnd(event) {
+  if (graphPinch) event.preventDefault();
+  graphPinch = null;
 }
 
 function shouldIgnoreGraphWheelTarget(target) {
@@ -5442,6 +5526,10 @@ function onGraphDoubleClick(event) {
   if (annotationGroup && els.graph.contains(annotationGroup)) {
     event.preventDefault();
     event.stopPropagation();
+    if (isAnnotationTransitionLocked()) {
+      setStatus("Folder transition in progress");
+      return;
+    }
     const item = findAnnotation(annotationGroup.dataset.annotationId);
     if (item && item.type !== "stroke") openAnnotationEditor(item);
     return;
@@ -5479,6 +5567,12 @@ function onAnnotationToolbarClick(event) {
 }
 
 function setAnnotationTool(tool) {
+  if (isAnnotationTransitionLocked()) {
+    state.annotationTool = "select";
+    syncAnnotationControls();
+    setStatus("Folder transition in progress");
+    return;
+  }
   if (!hasWritableWorkspace() || state.annotationsError) tool = "select";
   state.annotationTool = ["select", "pen", "line", "square", "circle", "text"].includes(tool) ? tool : "select";
   if (state.annotationTool !== "select") state.selectedAnnotationId = null;
@@ -5490,14 +5584,17 @@ function setAnnotationTool(tool) {
 function syncAnnotationControls() {
   if (!els.annotationToolbar) return;
   const unavailable = !hasWritableWorkspace() || Boolean(state.annotationsError);
+  const transitionLocked = isAnnotationTransitionLocked();
   for (const button of els.annotationToolbar.querySelectorAll("[data-annotation-tool]")) {
     const selected = button.dataset.annotationTool === state.annotationTool;
     button.setAttribute("aria-pressed", String(selected));
-    button.disabled = unavailable && button.dataset.annotationTool !== "select";
+    button.disabled = transitionLocked || (unavailable && button.dataset.annotationTool !== "select");
   }
   els.graph.classList.toggle("annotationToolActive", state.annotationTool !== "select");
   els.graph.classList.toggle("annotationSelectActive", state.annotationTool === "select");
-  els.annotationToolbar.title = state.annotationsError ? `Annotations unavailable: ${state.annotationsError}` : "Canvas drawing tools";
+  els.annotationToolbar.title = transitionLocked
+    ? "Canvas tools unavailable while the folder changes"
+    : (state.annotationsError ? `Annotations unavailable: ${state.annotationsError}` : "Canvas drawing tools");
 }
 
 function findAnnotation(id) {
@@ -5509,6 +5606,32 @@ function captureWorkspaceContext() {
     workspaceId: state.activeWorkspaceId,
     notesPath: state.notesPath
   };
+}
+
+function beginAnnotationTransitionLock(workspaceId) {
+  if (!workspaceId || annotationTransitionLocksByWorkspace.has(workspaceId)) return null;
+  const token = Symbol(workspaceId);
+  const lock = { workspaceId, token };
+  annotationTransitionLocksByWorkspace.set(workspaceId, token);
+  if (workspaceId === state.activeWorkspaceId) {
+    prepareAnnotationTransition();
+    state.annotationTool = "select";
+    state.selectedAnnotationId = null;
+    syncAnnotationControls();
+    renderGraph({ preserveView: true });
+  }
+  return lock;
+}
+
+function endAnnotationTransitionLock(lock) {
+  if (!lock) return;
+  if (annotationTransitionLocksByWorkspace.get(lock.workspaceId) !== lock.token) return;
+  annotationTransitionLocksByWorkspace.delete(lock.workspaceId);
+  if (lock.workspaceId === state.activeWorkspaceId) syncAnnotationControls();
+}
+
+function isAnnotationTransitionLocked(workspaceId = state.activeWorkspaceId) {
+  return Boolean(workspaceId && annotationTransitionLocksByWorkspace.has(workspaceId));
 }
 
 function isCurrentWorkspaceContext(context) {
@@ -5526,10 +5649,13 @@ function requireCurrentWorkspaceContext(context) {
 function enqueueAnnotationWrite(workspaceContext, annotations) {
   const document = cloneAnnotationDocument(annotations);
   const previous = annotationWriteTailsByWorkspace.get(workspaceContext.workspaceId) || Promise.resolve();
-  const write = previous.catch(() => undefined).then(() => invokeNative("write_annotations", {
-    notesPath: workspaceContext.notesPath,
-    annotations: document
-  }));
+  const write = previous.catch(() => undefined).then(async () => {
+    await invokeNative("write_annotations", {
+      notesPath: workspaceContext.notesPath,
+      annotations: document
+    });
+    markAnnotationDocumentPersisted(workspaceContext.workspaceId, document);
+  });
   annotationWriteTailsByWorkspace.set(workspaceContext.workspaceId, write);
   const pendingWrites = pendingAnnotationWritesByWorkspace.get(workspaceContext.workspaceId) || new Set();
   pendingWrites.add(write);
@@ -5542,6 +5668,22 @@ function enqueueAnnotationWrite(workspaceContext, annotations) {
     if (!pendingWrites.size) pendingAnnotationWritesByWorkspace.delete(workspaceContext.workspaceId);
   }).catch(() => undefined);
   return write;
+}
+
+function markAnnotationDocumentPersisted(workspaceId, annotations) {
+  const document = cloneAnnotationDocument(annotations);
+  persistedAnnotationDocumentsByWorkspace.set(workspaceId, document);
+  const workspace = state.workspaces.find((item) => item.id === workspaceId);
+  if (workspace) {
+    workspace.persistedAnnotations = cloneAnnotationDocument(document);
+    workspace.annotationSaveError = "";
+  }
+}
+
+function getPersistedAnnotationDocument(workspaceId) {
+  const workspace = state.workspaces.find((item) => item.id === workspaceId);
+  const document = persistedAnnotationDocumentsByWorkspace.get(workspaceId) || workspace?.persistedAnnotations;
+  return cloneAnnotationDocument(document || emptyAnnotationDocument());
 }
 
 function beginPendingAnnotationChange(workspaceId) {
@@ -5574,6 +5716,7 @@ async function awaitPendingAnnotationWritesForRoot(rootPath) {
 }
 
 function prepareAnnotationTransition() {
+  graphPinch = null;
   const editorState = state.annotationEditorState;
   if (editorState?.isNew && editorState.workspaceId === state.activeWorkspaceId) {
     state.annotations = cloneAnnotationDocument(editorState.historyBefore.annotations);
@@ -5609,6 +5752,12 @@ function clearNodeSelectionForAnnotation() {
 }
 
 function startAnnotationDrawing(event) {
+  if (isAnnotationTransitionLocked()) {
+    event.preventDefault();
+    event.stopPropagation();
+    setStatus("Folder transition in progress");
+    return;
+  }
   if (!hasWritableWorkspace() || state.annotationsError || state.annotations.items.length >= MAX_ANNOTATION_ITEMS) {
     setStatus(state.annotationsError ? `Annotations unavailable: ${state.annotationsError}` : "Annotation limit reached");
     return;
@@ -5638,6 +5787,12 @@ function startAnnotationDrawing(event) {
 }
 
 function startAnnotationSelectionInteraction(event, group) {
+  if (isAnnotationTransitionLocked()) {
+    event.preventDefault();
+    event.stopPropagation();
+    setStatus("Folder transition in progress");
+    return;
+  }
   const item = findAnnotation(group.dataset.annotationId);
   if (!item) return;
   event.preventDefault();
@@ -5661,49 +5816,103 @@ function startAnnotationSelectionInteraction(event, group) {
 
 async function finishAnnotationChange(label, historyBefore) {
   const workspaceContext = captureWorkspaceContext();
+  if (isAnnotationTransitionLocked(workspaceContext.workspaceId)) {
+    if (historyBefore?.annotations && isCurrentWorkspaceContext(workspaceContext)) {
+      state.annotations = cloneAnnotationDocument(historyBefore.annotations);
+      renderGraph({ preserveView: true });
+    }
+    setStatus("Folder transition in progress");
+    return false;
+  }
   const saveToken = (annotationSaveTokensByWorkspace.get(workspaceContext.workspaceId) || 0) + 1;
   annotationSaveTokensByWorkspace.set(workspaceContext.workspaceId, saveToken);
   const completePendingChange = beginPendingAnnotationChange(workspaceContext.workspaceId);
+  let historyEntry = null;
   try {
     const normalized = normalizeAnnotationDocument(state.annotations);
     const savedDocument = cloneAnnotationDocument(normalized);
     const historyAfter = snapshotWorkspaceForHistory();
     if (historyAfter) historyAfter.annotations = savedDocument;
+    historyEntry = buildWorkspaceHistoryEntry(label, historyBefore, historyAfter);
     await enqueueAnnotationWrite(workspaceContext, savedDocument);
-    recordCapturedAnnotationHistory(label, historyBefore, historyAfter, workspaceContext);
+    recordPersistedAnnotationHistory(historyEntry, workspaceContext, savedDocument);
     if (saveToken !== annotationSaveTokensByWorkspace.get(workspaceContext.workspaceId)) return false;
     if (!isCurrentWorkspaceContext(workspaceContext)) {
       const workspace = state.workspaces.find((item) => item.id === workspaceContext.workspaceId);
       if (workspace) workspace.annotations = savedDocument;
       return false;
     }
-    state.annotations = normalized;
+    const activeEditor = state.annotationEditorState?.workspaceId === workspaceContext.workspaceId
+      ? state.annotationEditorState
+      : null;
+    const activeInteraction = state.activeInteraction?.type?.startsWith?.("annotation-") &&
+      state.activeInteraction.historyBefore?.workspaceId === workspaceContext.workspaceId
+      ? state.activeInteraction
+      : null;
+    if (activeEditor || activeInteraction) {
+      const liveDocument = cloneAnnotationDocument(state.annotations);
+      if (activeEditor?.historyBefore) {
+        activeEditor.historyBefore.annotations = cloneAnnotationDocument(savedDocument);
+      }
+      if (activeInteraction?.historyBefore) {
+        activeInteraction.historyBefore.annotations = cloneAnnotationDocument(savedDocument);
+      }
+      state.annotations = liveDocument;
+    } else {
+      state.annotations = normalized;
+    }
     saveActiveWorkspaceState();
     renderGraph({ preserveView: true });
     setStatus(`${label[0].toUpperCase()}${label.slice(1)}`);
     return true;
   } catch (error) {
-    if (saveToken !== annotationSaveTokensByWorkspace.get(workspaceContext.workspaceId)) return false;
-    if (isCurrentWorkspaceContext(workspaceContext)) {
-      state.annotations = cloneAnnotationDocument(historyBefore.annotations);
-      renderGraph({ preserveView: true });
-      setStatus(`Could not save annotation: ${error?.message || error}`);
-    } else {
-      const workspace = state.workspaces.find((item) => item.id === workspaceContext.workspaceId);
-      if (workspace) workspace.annotations = cloneAnnotationDocument(historyBefore.annotations);
+    if (saveToken !== annotationSaveTokensByWorkspace.get(workspaceContext.workspaceId)) {
+      deferAnnotationHistory(workspaceContext.workspaceId, historyEntry);
+      return false;
     }
+    deferredAnnotationHistoryByWorkspace.delete(workspaceContext.workspaceId);
+    restoreLastPersistedAnnotationDocument(workspaceContext, error);
     return false;
   } finally {
     completePendingChange();
   }
 }
 
-function recordCapturedAnnotationHistory(label, before, after, workspaceContext) {
-  const entry = buildWorkspaceHistoryEntry(label, before, after);
+function deferAnnotationHistory(workspaceId, entry) {
   if (!entry) return;
+  const deferred = deferredAnnotationHistoryByWorkspace.get(workspaceId) || [];
+  deferred.push(entry);
+  deferredAnnotationHistoryByWorkspace.set(workspaceId, deferred);
+}
+
+function recordPersistedAnnotationHistory(entry, workspaceContext, persistedDocument) {
+  const deferred = deferredAnnotationHistoryByWorkspace.get(workspaceContext.workspaceId) || [];
+  deferredAnnotationHistoryByWorkspace.delete(workspaceContext.workspaceId);
+  const candidates = [...deferred, entry].filter(Boolean);
+  if (!candidates.length) return;
+
+  const chainIsContiguous = candidates.every((candidate, index) => (
+    index === 0 || sameAnnotationDocument(candidates[index - 1].afterAnnotations, candidate.beforeAnnotations)
+  ));
+  const chainReachedPersistedDocument = sameAnnotationDocument(
+    candidates[candidates.length - 1].afterAnnotations,
+    persistedDocument
+  );
+  const entries = chainIsContiguous && chainReachedPersistedDocument
+    ? candidates
+    : (entry && sameAnnotationDocument(entry.afterAnnotations, persistedDocument) ? [entry] : []);
+  recordCapturedAnnotationHistoryEntries(entries, workspaceContext);
+}
+
+function sameAnnotationDocument(left, right) {
+  return JSON.stringify(left || null) === JSON.stringify(right || null);
+}
+
+function recordCapturedAnnotationHistoryEntries(entries, workspaceContext) {
+  if (!entries.length) return;
   if (isCurrentWorkspaceContext(workspaceContext)) {
     if (state.historyApplying) return;
-    state.undoStack.push(entry);
+    state.undoStack.push(...entries);
     state.undoStack = trimWorkspaceHistoryStack(state.undoStack, workspaceHistoryBudgetOptions());
     state.redoStack = [];
     saveActiveWorkspaceState();
@@ -5711,12 +5920,29 @@ function recordCapturedAnnotationHistory(label, before, after, workspaceContext)
   }
   const workspace = state.workspaces.find((item) => item.id === workspaceContext.workspaceId);
   if (!workspace) return;
-  workspace.undoStack = trimWorkspaceHistoryStack([...(workspace.undoStack || []), entry], workspaceHistoryBudgetOptions());
+  workspace.undoStack = trimWorkspaceHistoryStack([...(workspace.undoStack || []), ...entries], workspaceHistoryBudgetOptions());
   workspace.redoStack = [];
 }
 
+function restoreLastPersistedAnnotationDocument(workspaceContext, error) {
+  const persisted = getPersistedAnnotationDocument(workspaceContext.workspaceId);
+  const message = `Could not save annotation: ${error?.message || error}`;
+  const workspace = state.workspaces.find((item) => item.id === workspaceContext.workspaceId);
+  if (workspace) {
+    workspace.annotations = cloneAnnotationDocument(persisted);
+    workspace.annotationSaveError = message;
+  }
+  if (!isCurrentWorkspaceContext(workspaceContext)) return;
+  prepareAnnotationTransition();
+  state.annotations = cloneAnnotationDocument(persisted);
+  state.selectedAnnotationId = null;
+  saveActiveWorkspaceState();
+  renderGraph({ preserveView: true });
+  setStatus(message);
+}
+
 function openAnnotationEditor(item, options = {}) {
-  if (!item || item.type === "stroke" || state.annotationsError) return;
+  if (!item || item.type === "stroke" || state.annotationsError || isAnnotationTransitionLocked()) return;
   const point = item.type === "text" ? { x: item.x, y: item.y } : annotationLabelPoint(item);
   const svgPoint = { x: point.x * state.view.scale + state.view.x, y: point.y * state.view.scale + state.view.y };
   els.annotationEditor.style.left = "0px";
@@ -5782,6 +6008,12 @@ async function commitAnnotationEditor() {
   state.annotationEditorState = null;
   els.annotationEditor.hidden = true;
   if (!isCurrentWorkspaceContext(editorState)) return;
+  if (isAnnotationTransitionLocked(editorState.workspaceId)) {
+    if (editorState.isNew) state.annotations = cloneAnnotationDocument(editorState.historyBefore.annotations);
+    renderGraph({ preserveView: true });
+    setStatus("Folder transition in progress");
+    return;
+  }
   const item = findAnnotation(editorState.annotationId);
   if (!item) return;
   const value = els.annotationEditor.value;
@@ -6964,6 +7196,10 @@ async function onDocumentKeydown(event) {
 
   if ((event.key === "Backspace" || event.key === "Delete") && state.selectedAnnotationId) {
     event.preventDefault();
+    if (isAnnotationTransitionLocked()) {
+      setStatus("Folder transition in progress");
+      return;
+    }
     const historyBefore = snapshotWorkspaceForHistory();
     state.annotations.items = state.annotations.items.filter((item) => item.id !== state.selectedAnnotationId);
     state.selectedAnnotationId = null;

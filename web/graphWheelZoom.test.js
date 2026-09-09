@@ -3,6 +3,15 @@ import test from "node:test";
 
 import { getGraphWheelZoomFactor } from "./graphWheelZoom.ts";
 
+test("pinch uses responsive gain without accelerating ordinary wheel scrolling", () => {
+  const gesture = { deltaX: 0, deltaY: -10, deltaMode: 0 };
+  const pinch = getGraphWheelZoomFactor({ ...gesture, ctrlKey: true });
+  const wheel = getGraphWheelZoomFactor(gesture);
+  assert(Math.abs(pinch - Math.exp(0.1)) < 1e-12);
+  assert(pinch > wheel * 1.09);
+  assert(Math.abs(pinch * getGraphWheelZoomFactor({ ...gesture, deltaY: 10, ctrlKey: true }) - 1) < 1e-12);
+});
+
 test("rejects zero, horizontal, non-finite, and unsupported wheel gestures", () => {
   assert.equal(getGraphWheelZoomFactor({ deltaX: 0, deltaY: 0, deltaMode: 0 }), null);
   assert.equal(getGraphWheelZoomFactor({ deltaX: 20, deltaY: 10, deltaMode: 0 }), null);

@@ -385,7 +385,7 @@ test("reopening an externally changed workspace clears stale annotation undo his
 });
 
 test("pending annotation writes finish before rename and renamed workspaces preserve undo history", async () => {
-  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true });
+  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true, holdRenameWorkspace: true });
   await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Open project" }).click();
   const graph = await page.locator("#graph").boundingBox();
@@ -405,6 +405,25 @@ test("pending annotation writes finish before rename and renamed workspaces pres
   await page.evaluate(() => {
     window.__apexTestState.holdAnnotationWrites = false;
     window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => window.__apexTestState.renameWorkspaceResolvers.length === 1);
+  const callsAtRenameBarrier = await page.evaluate(() => window.__apexTestState.calls.length);
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await pressShortcut(page, "Y");
+  assert.equal(await page.locator("[data-annotation-tool='line']").isDisabled(), true);
+  await page.locator("[data-annotation-tool='line']").evaluate((button) => { button.disabled = false; });
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 520, graph.y + 430);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 620, graph.y + 470);
+  await page.mouse.up();
+  await page.locator(".annotationItem[data-annotation-type='line']").dblclick();
+  assert.equal(await page.locator("#annotationEditor").isVisible(), false);
+  assert.equal(await page.evaluate((index) => window.__apexTestState.calls.slice(index).some((call) => call.command === "write_annotations"), callsAtRenameBarrier), false);
+  await page.evaluate(() => {
+    window.__apexTestState.holdRenameWorkspace = false;
+    window.__apexTestState.releaseRenameWorkspace();
   });
   await page.waitForFunction(() => document.querySelector(".workspaceTab.active")?.textContent?.includes("Renamed During Save"));
   assert.equal(await page.locator(".annotationItem[data-annotation-type='line']").count(), 1);
@@ -430,6 +449,14 @@ test("closing and reopening a workspace waits for its delayed annotation write",
   await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
   await page.locator(".workspaceTabClose").click();
   assert.equal(await page.locator(".workspaceTab").count(), 1);
+  assert.equal(await page.locator("[data-annotation-tool='line']").isDisabled(), true);
+  await page.locator("[data-annotation-tool='line']").evaluate((button) => { button.disabled = false; });
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 560, graph.y + 410);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 650, graph.y + 450);
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.filter((call) => call.command === "write_annotations").length), 1);
 
   await page.evaluate(() => {
     window.__apexTestState.holdAnnotationWrites = false;
@@ -500,6 +527,154 @@ test("rapid queued annotation writes retain one undo entry per successful gestur
   await page.close();
 });
 
+test("a superseded failed annotation write is covered by the next persisted document and remains undoable", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), {
+    holdAnnotationWrites: true,
+    annotationWriteFailures: [true, false]
+  });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 310, graph.y + 330);
+  await page.locator("#annotationEditor").fill("Survives first failure");
+  await page.locator("#annotationEditor").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 510, graph.y + 430);
+  await page.locator("#annotationEditor").fill("Persists both changes");
+  await page.locator("#annotationEditor").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => window.__apexTestState.calls.filter((call) => call.command === "write_annotations").length === 2 && window.__apexTestState.workspace.annotations.items.length === 2);
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='text']").count(), 2);
+
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 1);
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 0);
+  await page.close();
+});
+
+test("an older successful annotation save preserves and rebases the live next gesture", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 300, graph.y + 350);
+  await page.locator("#annotationEditor").fill("First saved change");
+  await page.locator("#annotationEditor").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 500, graph.y + 420);
+  await page.mouse.down();
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 1);
+  assert.equal(await page.locator(".annotationItem").count(), 2);
+
+  await page.mouse.move(graph.x + 620, graph.y + 470);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 2);
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 1);
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='text']").count(), 1);
+  await page.close();
+});
+
+test("a terminal annotation failure cancels a live next gesture without resurrecting failed state", async () => {
+  const workspace = sampleWorkspace();
+  workspace.annotations.items = [{ id: "on-disk", type: "line", x1: 680, y1: 280, x2: 820, y2: 320, name: "On disk" }];
+  const diskSnapshot = structuredClone(workspace.annotations);
+  const page = await newMockedTauriPage(workspace, {
+    holdAnnotationWrites: true,
+    annotationWriteFailures: [true]
+  });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 300, graph.y + 360);
+  await page.locator("#annotationEditor").fill("Failed change");
+  await page.locator("#annotationEditor").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+
+  await page.locator("[data-annotation-tool='line']").click();
+  await page.mouse.move(graph.x + 500, graph.y + 430);
+  await page.mouse.down();
+  await page.mouse.move(graph.x + 620, graph.y + 480);
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => document.querySelector("#editorStatus")?.textContent?.includes("Could not save annotation"));
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations), diskSnapshot);
+  assert.equal(await page.locator(".annotationItem").count(), 1);
+
+  await page.mouse.up();
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations), diskSnapshot);
+  assert.equal(await page.locator(".annotationItem").count(), 1);
+  assert.equal(await page.locator(".annotationItem[data-annotation-id='on-disk']").count(), 1);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.filter((call) => call.command === "write_annotations").length), 1);
+  await page.close();
+});
+
+test("terminal annotation write failures restore the exact persisted document and reopen identically", async () => {
+  const workspace = sampleWorkspace();
+  workspace.annotations.items = [{ id: "on-disk", type: "line", x1: 680, y1: 280, x2: 820, y2: 320, name: "On disk" }];
+  const diskSnapshot = structuredClone(workspace.annotations);
+  const page = await newMockedTauriPage(workspace, {
+    holdAnnotationWrites: true,
+    annotationWriteFailures: [true, true]
+  });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  assert(graph);
+
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 300, graph.y + 360);
+  await page.locator("#annotationEditor").fill("First failed change");
+  await page.locator("#annotationEditor").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 500, graph.y + 440);
+  await page.locator("#annotationEditor").fill("Second failed change");
+  await page.locator("#annotationEditor").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+
+  await page.waitForFunction(() => document.querySelector("#editorStatus")?.textContent?.includes("Could not save annotation"));
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations), diskSnapshot);
+  assert.equal(await page.locator(".annotationItem").count(), 1);
+  assert.equal(await page.locator(".annotationItem[data-annotation-id='on-disk']").count(), 1);
+
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  await page.waitForFunction(() => window.__apexTestState.calls.filter((call) => call.command === "read_workspace").length === 2);
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations), diskSnapshot);
+  assert.equal(await page.locator(".annotationItem").count(), 1);
+  assert.equal(await page.locator(".annotationItem[data-annotation-id='on-disk']").count(), 1);
+  await page.close();
+});
+
 test("annotation selection and drawing preserve an immediately edited open note", async () => {
   const workspace = sampleWorkspace();
   workspace.annotations.items = [{ id: "select-me", type: "line", x1: 700, y1: 300, x2: 850, y2: 330, name: "Select me" }];
@@ -566,6 +741,35 @@ test("workspace chrome supports rename and fullscreen without losing the graph",
   assert.equal(await isVisible(page, ".graphPane"), true);
   assert.equal(await page.locator("#fullscreenEditorButton").getAttribute("aria-label"), "Enter full screen editor");
 
+  await page.close();
+});
+
+test("native pinch follows finger scale and Ctrl-wheel pinch remains responsive", async () => {
+  const page = await newMockedTauriPage();
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".graphCanvas").waitFor();
+  const box = await page.locator("#graph").boundingBox();
+  const x = box.x + 280, y = box.y + 250;
+  const before = await graphWheelSnapshot(page, x, y);
+  const gesture = async (type, scale) => page.locator("#graph").evaluate((el, init) => {
+    const event = new Event(init.type, { bubbles: true, cancelable: true });
+    Object.defineProperties(event, { scale: { value: init.scale }, clientX: { value: init.x }, clientY: { value: init.y } });
+    el.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, { type, scale, x, y });
+  assert(await gesture("gesturestart", 1));
+  await gesture("gesturechange", 1.4);
+  const enlarged = await graphWheelSnapshot(page, x, y, before.graphPoint);
+  assert(Math.abs(enlarged.scale / before.scale - 1.4) < 0.01);
+  assert(Math.hypot(enlarged.anchorError.x, enlarged.anchorError.y) < 1, JSON.stringify({ before, enlarged }));
+  await page.locator("#graph").dispatchEvent("wheel", { deltaY: -10, ctrlKey: true, bubbles: true, cancelable: true });
+  assert.equal((await graphWheelSnapshot(page, x, y)).scale, enlarged.scale);
+  await gesture("gesturechange", 1);
+  await gesture("gestureend", 1);
+  assert(Math.abs((await graphWheelSnapshot(page, x, y)).scale - before.scale) < 0.001);
+  await page.locator("#graph").dispatchEvent("wheel", { deltaX: 0, deltaY: -10, ctrlKey: true, clientX: x, clientY: y, bubbles: true, cancelable: true });
+  assert((await graphWheelSnapshot(page, x, y)).scale / before.scale > 1.1);
   await page.close();
 });
 
@@ -1038,7 +1242,9 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     seedUpdateRelease,
     seedHoldInstallUpdate,
     seedInstallUpdateError,
-    seedHoldAnnotationWrites
+    seedHoldAnnotationWrites,
+    seedAnnotationWriteFailures,
+    seedHoldRenameWorkspace
   }) => {
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const state = {
@@ -1053,9 +1259,13 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
       resolveInstallUpdate: null,
       holdAnnotationWrites: seedHoldAnnotationWrites,
       annotationWriteResolvers: [],
+      annotationWriteFailures: [...seedAnnotationWriteFailures],
+      holdRenameWorkspace: seedHoldRenameWorkspace,
+      renameWorkspaceResolvers: [],
       updateRelease: seedUpdateRelease
     };
     state.releaseAnnotationWrite = () => state.annotationWriteResolvers.shift()?.();
+    state.releaseRenameWorkspace = () => state.renameWorkspaceResolvers.shift()?.();
 
     const signatureFor = (note) => `${note.path}:${note.raw.length}`;
     const noteFiles = () => state.workspace.notes.map((note) => ({
@@ -1158,11 +1368,17 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             if (state.holdAnnotationWrites) {
               await new Promise((resolve) => state.annotationWriteResolvers.push(resolve));
             }
+            if (state.annotationWriteFailures.shift()) {
+              throw new Error("Injected annotation write failure");
+            }
             target.annotations = clone(args.annotations);
             target.annotationsError = "";
             return null;
           }
           if (command === "rename_workspace") {
+            if (state.holdRenameWorkspace) {
+              await new Promise((resolve) => state.renameWorkspaceResolvers.push(resolve));
+            }
             state.workspace.workspaceName = args.folderName;
             state.workspace.rootPath = `/tmp/${args.folderName}`;
             state.workspace.notesPath = `${state.workspace.rootPath}/notes`;
@@ -1186,6 +1402,8 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
   }, {
     seedHoldInstallUpdate: options.holdInstallUpdate || false,
     seedHoldAnnotationWrites: options.holdAnnotationWrites || false,
+    seedAnnotationWriteFailures: options.annotationWriteFailures || [],
+    seedHoldRenameWorkspace: options.holdRenameWorkspace || false,
     seedInstallUpdateError: options.installUpdateError || "",
     seedWorkspace: workspace,
     seedWorkspaces: [workspace, ...(options.additionalWorkspaces || [])],
