@@ -2165,10 +2165,18 @@ async function stepWorkspaceHistory(direction) {
   }
 
   if (state.historyApplying) return false;
+  const workspaceId = state.activeWorkspaceId;
   if (state.dirty) {
     await flushAutosave();
     if (state.dirty) return false;
   }
+  await awaitPendingAnnotationWrites(workspaceId);
+  if (workspaceId !== state.activeWorkspaceId) return false;
+  if (isAnnotationTransitionLocked(workspaceId)) {
+    setStatus("Wait for the folder transition before undoing or redoing");
+    return false;
+  }
+  if (state.historyApplying) return false;
 
   const undo = direction === "undo";
   const fromStack = undo ? state.undoStack : state.redoStack;
@@ -3739,6 +3747,9 @@ function getAvailableMarkdownPath(candidate, reservedPaths) {
 function renderGraph({ preserveView } = { preserveView: true }) {
   const perf = startPerfMeasure("renderGraph");
   cancelQueuedGraphRender();
+  const focusedAnnotationId = document.activeElement instanceof Element && els.graph.contains(document.activeElement)
+    ? document.activeElement.closest(".annotationItem")?.dataset.annotationId || null
+    : null;
   const viewport = measureGraphViewport({ allowFallback: !hasWritableWorkspace() });
   if (!viewport) {
     requestGraphRender({ preserveView });
@@ -3798,6 +3809,7 @@ function renderGraph({ preserveView } = { preserveView: true }) {
     applyViewTransform();
     updateLabelVisibility({ force: true });
     syncFitViewButton();
+    restoreRenderedAnnotationFocus(focusedAnnotationId);
     finishPerfMeasure(perf);
     return;
   }
@@ -3844,7 +3856,14 @@ function renderGraph({ preserveView } = { preserveView: true }) {
   updateGraphGeometry();
   updateLabelVisibility({ force: true });
   syncFitViewButton();
+  restoreRenderedAnnotationFocus(focusedAnnotationId);
   finishPerfMeasure(perf);
+}
+
+function restoreRenderedAnnotationFocus(annotationId) {
+  if (!annotationId) return;
+  const annotation = els.graphCanvas?.querySelector(`.annotationItem[data-annotation-id="${CSS.escape(annotationId)}"]`);
+  annotation?.focus({ preventScroll: true });
 }
 
 function combineGraphBounds(first, second) {

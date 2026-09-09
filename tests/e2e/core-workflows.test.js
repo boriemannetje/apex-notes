@@ -322,7 +322,13 @@ test("annotation labels, keyboard access, viewport clamping, wheel routing, and 
   await page.waitForFunction(() => !document.body.classList.contains("graphFullscreen"));
 
   await page.locator(".annotationItem[data-annotation-id='edge-text']").press("Space");
-  await page.locator(".annotationItem[data-annotation-id='edge-text']").press("Delete");
+  await page.evaluate(() => {
+    window.__focusedAnnotationBeforeResize = document.activeElement;
+    window.dispatchEvent(new Event("resize"));
+  });
+  await page.waitForFunction(() => !window.__focusedAnnotationBeforeResize.isConnected);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-annotation-id")), "edge-text");
+  await page.keyboard.press("Delete");
   await page.waitForFunction(() => !document.querySelector(".annotationItem[data-annotation-id='edge-text']"));
   await page.close();
 });
@@ -557,6 +563,29 @@ test("a superseded failed annotation write is covered by the next persisted docu
   await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 1);
   await pressShortcut(page, "Z");
   await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 0);
+  await page.close();
+});
+
+test("undo requested during an annotation save waits for its history entry", async () => {
+  const page = await newMockedTauriPage(sampleWorkspace(), { holdAnnotationWrites: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const graph = await page.locator("#graph").boundingBox();
+  await page.locator("[data-annotation-tool='text']").click();
+  await page.mouse.click(graph.x + 300, graph.y + 350);
+  await page.locator("#annotationEditor").fill("Undo after pending save");
+  await page.locator("#annotationEditor").press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+  await page.waitForFunction(() => window.__apexTestState.annotationWriteResolvers.length === 1);
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.evaluate(() => {
+    window.__apexTestState.holdAnnotationWrites = false;
+    window.__apexTestState.releaseAnnotationWrite();
+  });
+  await page.waitForFunction(() => window.__apexTestState.calls.filter((call) => call.command === "write_annotations").length === 2 && window.__apexTestState.workspace.annotations.items.length === 0);
+  assert.equal(await page.locator(".annotationItem").count(), 0);
+  await pressShortcut(page, "Y");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items.length === 1);
   await page.close();
 });
 
