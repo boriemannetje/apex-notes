@@ -1397,6 +1397,28 @@ test("large external batches pause date tracking without replacing the sidecar",
   await page.close();
 });
 
+test("readable Markdown links coexist with date labels and copy as Markdown", async () => {
+  const workspace = dateWorkspace();
+  workspace.notes[0].raw += "\n[Example](https://example.com/path)";
+  const page = await newMockedTauriPage(workspace);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".cm-markdownLink").waitFor();
+  assert.equal(await page.locator(".cm-date-stamp").count(), 1);
+  await page.locator(".cm-markdownLink").click();
+  await page.waitForFunction(() => window.__apexTestState.calls.some((call) => call.command === "plugin:opener|open_url" && call.args.url === "https://example.com/path"));
+  await page.locator(".cm-content").focus();
+  await pressShortcut(page, "A");
+  const copied = await page.evaluate(() => {
+    const event = new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: new DataTransfer() });
+    document.querySelector(".cm-content").dispatchEvent(event);
+    return event.clipboardData.getData("text/plain");
+  });
+  assert.match(copied, /\[Example\]\(https:\/\/example.com\/path\)/);
+  assert.doesNotMatch(copied, /Sep 2026|≈/);
+  await page.close();
+});
+
 function dateWorkspace() {
   const workspace = sampleWorkspace();
   workspace.notes = [{ path: "root.md", raw: '---\ntitle: "Dates"\nparent: null\n---\n\nFirst line\nSecond line\n\nThird line', createdMs: Date.parse("2026-09-01T12:00:00Z"), modifiedMs: Date.parse("2026-09-01T12:00:00Z") }];
@@ -1709,10 +1731,12 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             return null;
           }
 
+          if (command === "plugin:opener|open_url") return null;
           throw new Error(`Unhandled test Tauri command: ${command}`);
         }
       }
     };
+    window.__TAURI_INTERNALS__ = { invoke: window.__TAURI__.core.invoke };
   }, {
     seedHoldInstallUpdate: options.holdInstallUpdate || false,
     seedHoldAnnotationWrites: options.holdAnnotationWrites || false,
