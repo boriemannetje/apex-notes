@@ -13,6 +13,7 @@
   --accent-ink: #14150f;
   --danger: #ff7896;
   --tag: #9fc5ff;
+  --link: #9fcfff;
   --tag-missing: #ffb6d1;
   --purple: #b88cff;
   --purple-soft: rgba(184, 140, 255, 0.2);
@@ -1572,6 +1573,24 @@ h2 {
 
 .cm-wikiLink.is-missing {
   color: var(--tag-missing);
+}
+
+.cm-markdownLink {
+  border-radius: 3px;
+  color: var(--link);
+  cursor: pointer;
+  font-weight: 650;
+  text-decoration: underline;
+  text-decoration-color: rgba(159, 207, 255, 0.72);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.cm-markdownLink:hover,
+.cm-markdownLink:focus-visible {
+  background: rgba(159, 207, 255, 0.12);
+  color: #c6e3ff;
+  outline: none;
 }
 
 .emptyGraphText {

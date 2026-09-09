@@ -610,6 +610,7 @@ open -n "/Applications/Apex Notes.app"
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             read_workspace,
             list_note_files,
