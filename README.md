@@ -58,6 +58,14 @@ This public repository contains the app source, neutral sample notes, and the bu
 
 Markdown files live in `notes/`. The bundled folder contains only neutral starter data.
 
+### Automatic note dates
+
+The note editor shows creation and last-edit dates below the title. Last edited reflects the file's modification time in the device's current timezone. Consecutive nonblank lines last written or edited on the same calendar day share one quiet date label after the group's last line. Editing an older line updates that line's day; undo/redo restores its date attribution with the text. Blank spacing and soft wrapping do not create extra date labels.
+
+Dates are stored in `notes/dates.json`, not in Markdown or frontmatter. Keep this sidecar with a folder when moving or backing it up to retain precise attribution. Existing `Written` and `Added` date markers are preserved and recognized; otherwise dates are estimated from filesystem timestamps and marked `≈`. External edits preserve confidently matched unchanged lines and estimate the changed lines' day. Stored calendar days do not shift when changing timezones. Dates have no manual correction control.
+
+Invalid or unsupported date metadata is left untouched and reported without blocking Markdown editing. Date tracking is bounded to 20,000 notes, 100,000 lines per note, 200,000 lines per workspace and a 16 MiB sidecar; exceeding those limits leaves Markdown usable and reports a date-metadata warning.
+
 The graph uses frontmatter, not body links, for hierarchy. `parent` is the canonical hierarchy edge when present. Parentless notes are valid loose notes or independent roots, and connected-note depth is derived from the parent chain. Legacy `level` frontmatter is ignored and may be removed when a note is rewritten.
 
 See `AGENTS.md` before creating or linking notes.

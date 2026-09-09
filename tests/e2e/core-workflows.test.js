@@ -1261,6 +1261,265 @@ test("editor resize separator supports pointer drag, persistence, and keyboard c
   await page.close();
 });
 
+test("daily dates group lines across days and restore attribution with editor undo", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.clock.setFixedTime("2026-09-09T12:00:00Z");
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  assert.match(await page.locator("#noteDates").textContent(), /Created ≈ 1 Sep 2026 · Last edited 1 Sep 2026/);
+  assert.equal(await page.locator(".cm-date-stamp").count(), 1);
+  await appendDateText(page, "\nToday one\nToday two");
+  await waitForStoredDate(page, "2026-09-09");
+  assert.equal(await page.locator(".cm-date-stamp").count(), 2);
+  assert.equal(await page.locator(".cm-date-stamp[data-date-day='2026-09-09']").count(), 1);
+  assert.match(await page.locator("#noteDates").textContent(), /Created ≈ 1 Sep 2026 · Last edited 9 Sep 2026/);
+
+  await page.clock.setFixedTime("2026-09-10T12:00:00Z");
+  await appendDateText(page, "\nTomorrow");
+  await waitForStoredDate(page, "2026-09-10");
+  assert.equal(await page.locator(".cm-date-stamp").count(), 3);
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => !document.querySelector(".cm-date-stamp[data-date-day='2026-09-10']"));
+  assert.equal(await page.locator(".cm-date-stamp").count(), 2);
+  await pressShortcut(page, "Y");
+  await page.locator(".cm-date-stamp[data-date-day='2026-09-10']").waitFor();
+  await appendDateText(page, `\n${"A long wrapped daily entry with ordinary words. ".repeat(10)}`);
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes[0].raw.includes("A long wrapped daily entry"));
+
+  // Labels are decorations, not Markdown or text exported by CodeMirror copy.
+  await pressShortcut(page, "A");
+  await page.evaluate(() => {
+    const content = document.querySelector(".cm-content");
+    const event = new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: new DataTransfer() });
+    content.dispatchEvent(event);
+    window.__dateCopiedText = event.clipboardData.getData("text/plain");
+  });
+  assert.match(await page.evaluate(() => window.__dateCopiedText), /First line/);
+  assert.doesNotMatch(await page.evaluate(() => window.__dateCopiedText), /Sep 2026|≈/);
+  assert.doesNotMatch(await noteRaw(page, "root.md"), /Sep 2026|≈|Written:|Added:/);
+  assert.equal(await page.locator("#graph .cm-date-stamp").count(), 0);
+
+  await page.setViewportSize({ width: 600, height: 700 });
+  await page.locator("#fullscreenEditorButton").click();
+  const bounds = await page.locator(".cm-date-stamp").evaluateAll((items) => items.map((item) => {
+    const rect = item.getBoundingClientRect();
+    const pane = item.closest(".editorPane").getBoundingClientRect();
+    return { left: rect.left, right: rect.right, paneLeft: pane.left, paneRight: pane.right };
+  }));
+  assert(bounds.every((item) => item.left >= item.paneLeft && item.right <= item.paneRight));
+  await page.close();
+});
+
+test("editing an older line splits its date group and reopening preserves it", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.clock.setFixedTime("2026-09-09T12:00:00Z");
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".cm-line").filter({ hasText: /^Second line$/ }).click();
+  await page.keyboard.press("End");
+  await page.keyboard.insertText(" edited");
+  await waitForStoredDate(page, "2026-09-09");
+  assert.equal(await page.locator(".cm-date-stamp").count(), 3);
+  const saved = await page.evaluate(() => window.__apexTestState.workspace.dates);
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  await page.waitForFunction(() => window.__apexTestState.calls.filter((item) => item.command === "read_workspace").length === 2);
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.dates), saved);
+  assert.equal(await page.locator(".cm-date-stamp").count(), 3);
+  await page.close();
+});
+
+test("invalid or failing date metadata does not block Markdown saves", async () => {
+  for (const corrupt of [false, true]) {
+    const workspace = dateWorkspace();
+    if (corrupt) workspace.datesError = "dates.json is invalid";
+    const page = await newMockedTauriPage(workspace, { dateWriteError: corrupt ? "" : "Injected date failure" });
+    await page.clock.setFixedTime("2026-09-09T12:00:00Z");
+    await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Open project" }).click();
+    await appendDateText(page, "\nStill saved safely");
+    await page.waitForFunction(() => window.__apexTestState.workspace.notes[0].raw.includes("Still saved safely"));
+    await page.locator("#noteDatesWarning").waitFor();
+    if (corrupt) assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((item) => item.command === "write_dates")), false);
+    await page.close();
+  }
+});
+
+test("external note edits retain unchanged dates and estimate changed lines", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  await page.evaluate(() => {
+    const note = window.__apexTestState.workspace.notes[0];
+    note.raw = note.raw.replace("Second line", "Second line from external editor");
+    note.modifiedMs = Date.parse("2026-09-12T12:00:00Z");
+  });
+  await page.locator(".cm-date-stamp[data-date-day='2026-09-12']").waitFor();
+  assert.equal(await page.locator(".cm-date-stamp[data-date-day='2026-09-12']").getAttribute("data-estimated"), "true");
+  assert.equal(await page.locator(".cm-date-stamp[data-date-day='2026-09-01']").count(), 2);
+  await page.close();
+});
+
+test("large external batches pause date tracking without replacing the sidecar", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  const before = await page.evaluate(() => JSON.stringify(window.__apexTestState.workspace.dates));
+  await page.evaluate(() => {
+    const state = window.__apexTestState;
+    state.calls = [];
+    state.workspace.notes.push(...Array.from({ length: 4 }, (_, index) => ({
+      path: `external-${index}.md`,
+      raw: `---\ntitle: "External ${index}"\nparent: null\n---\n\n${"text\n".repeat(67_000)}`,
+      modifiedMs: Date.now()
+    })));
+  });
+  await page.locator("#noteDatesWarning").waitFor();
+  assert.match(await page.locator("#noteDatesWarning").textContent(), /200,000/);
+  assert.equal(await page.evaluate(() => JSON.stringify(window.__apexTestState.workspace.dates)), before);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "write_dates")), false);
+  await page.close();
+});
+
+function dateWorkspace() {
+  const workspace = sampleWorkspace();
+  workspace.notes = [{ path: "root.md", raw: '---\ntitle: "Dates"\nparent: null\n---\n\nFirst line\nSecond line\n\nThird line', createdMs: Date.parse("2026-09-01T12:00:00Z"), modifiedMs: Date.parse("2026-09-01T12:00:00Z") }];
+  return workspace;
+}
+
+test("delayed date saves retain newer edits and stay with their originating tab", async () => {
+  const second = dateWorkspace();
+  second.rootPath = "/tmp/second-dated-workspace";
+  second.notesPath = `${second.rootPath}/notes`;
+  second.workspaceName = "Second dated workspace";
+  const page = await newMockedTauriPage(dateWorkspace(), { additionalWorkspaces: [second] });
+  await page.clock.setFixedTime("2026-09-09T12:00:00Z");
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  await page.locator("[data-switch-workspace]").first().click();
+  await page.waitForFunction(() => window.__apexTestState.workspaces[0].dates?.notes?.["root.md"]);
+  await page.evaluate(() => { window.__apexTestState.holdDateWrites = true; });
+  await appendDateText(page, "\nPending first day");
+  await page.waitForFunction(() => window.__apexTestState.dateWriteResolvers.length === 1);
+  await page.clock.setFixedTime("2026-09-10T12:00:00Z");
+  await appendDateText(page, "\nNewer second day");
+  await page.locator("[data-switch-workspace]").nth(1).click();
+  await page.evaluate(() => {
+    window.__apexTestState.holdDateWrites = false;
+    window.__apexTestState.releaseDateWrite();
+  });
+  await page.waitForFunction(() => document.querySelector(".workspaceTab.active")?.textContent?.includes("Second dated workspace"));
+  const stored = await page.evaluate(() => window.__apexTestState.workspaces[0]);
+  assert.match(stored.notes[0].raw, /Pending first day\nNewer second day/);
+  assert(stored.dates.notes["root.md"].lines.some((line) => line.day === "2026-09-09" && !line.estimated));
+  assert(stored.dates.notes["root.md"].lines.some((line) => line.day === "2026-09-10" && !line.estimated));
+  assert.doesNotMatch(await page.locator(".cm-content").textContent(), /Newer second day/);
+  await page.locator("[data-switch-workspace]").first().click();
+  await page.locator(".cm-date-stamp[data-date-day='2026-09-10']").waitFor();
+  await page.close();
+});
+
+test("workspace undo restores date attribution and manual date markers remain unchanged", async () => {
+  const workspace = dateWorkspace();
+  workspace.notes[0].raw += "\n\n## Later section\n*Added: 2026-09-03*\nLater words";
+  workspace.notes[0].raw = workspace.notes[0].raw.replace("First line", "*Written: 2026-08-25*\nFirst line");
+  const page = await newMockedTauriPage(workspace);
+  await page.clock.setFixedTime("2026-09-09T12:00:00Z");
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  const baseline = await page.evaluate(() => window.__apexTestState.workspace.dates.notes["root.md"]);
+  assert.match(await page.locator("#noteDates").textContent(), /Created 25 Aug 2026/);
+  await appendDateText(page, "\nAdded today");
+  await waitForStoredDate(page, "2026-09-09");
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => !window.__apexTestState.workspace.notes[0].raw.includes("Added today"));
+  await page.waitForFunction(() => !window.__apexTestState.workspace.dates.notes["root.md"].lines.some((line) => line.day === "2026-09-09"));
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.dates.notes["root.md"]), baseline);
+  assert.match(await noteRaw(page, "root.md"), /\*Written: 2026-08-25\*/);
+  assert.match(await noteRaw(page, "root.md"), /\*Added: 2026-09-03\*/);
+  await pressShortcut(page, "Y");
+  await waitForStoredDate(page, "2026-09-09");
+  await page.close();
+});
+
+async function appendDateText(page, text) {
+  await page.locator(".cm-content").focus();
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowDown" : "Control+End");
+  await page.keyboard.insertText(text);
+}
+
+test("same-body workspace reopen discards old editor date history", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.clock.setFixedTime("2026-09-09T12:00:00Z");
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await appendDateText(page, "\nSaved edit");
+  await waitForStoredDate(page, "2026-09-09");
+  await page.evaluate(() => {
+    const dates = window.__apexTestState.workspace.dates.notes["root.md"];
+    dates.lines.forEach((line) => { line.day = "2026-09-08"; line.estimated = false; });
+  });
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  await page.locator(".cm-date-stamp[data-date-day='2026-09-08']").waitFor();
+  await page.locator(".cm-content").focus();
+  await pressShortcut(page, "Z");
+  assert.match(await page.locator(".cm-content").textContent(), /Saved edit/);
+  assert.equal(await page.locator(".cm-date-stamp[data-date-day='2026-09-08']").count(), 1);
+  await page.close();
+});
+
+test("workspace date capacity pauses metadata but leaves Markdown writable", async () => {
+  const workspace = dateWorkspace();
+  workspace.notes = Array.from({ length: 3 }, (_, index) => ({
+    path: `large-${index}.md`,
+    raw: `---\ntitle: "Large ${index}"\nparent: null\n---\n\n${"text\n".repeat(67_000)}`,
+    createdMs: Date.parse("2026-09-01T12:00:00Z"),
+    modifiedMs: Date.parse("2026-09-01T12:00:00Z")
+  }));
+  const page = await newMockedTauriPage(workspace);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator("#noteDatesWarning").waitFor();
+  assert.match(await page.locator("#noteDatesWarning").textContent(), /200,000/);
+  assert.equal(await page.locator(".cm-date-stamp").count(), 0);
+  await appendDateText(page, "Still writable");
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes[0].raw.includes("Still writable"));
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "write_dates")), false);
+  await page.close();
+});
+
+test("oversized reopened note preserves its previously recorded date sidecar", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  const before = await page.evaluate(() => JSON.stringify(window.__apexTestState.workspace.dates));
+  await page.evaluate(() => {
+    const state = window.__apexTestState;
+    state.workspace.notes[0].raw += "\ntext".repeat(100_001);
+    state.calls = [];
+  });
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  await page.locator("#noteDatesWarning").waitFor();
+  assert.match(await page.locator("#noteDatesWarning").textContent(), /preserved/);
+  assert.equal(await page.evaluate(() => JSON.stringify(window.__apexTestState.workspace.dates)), before);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "write_dates")), false);
+  await page.close();
+});
+
+async function waitForStoredDate(page, day) {
+  await page.waitForFunction((day) => window.__apexTestState.workspace.dates?.notes?.["root.md"]?.lines.some((line) => line.day === day && !line.estimated), day);
+}
+
 async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.addInitScript(({
@@ -1271,7 +1530,8 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     seedInstallUpdateError,
     seedHoldAnnotationWrites,
     seedAnnotationWriteFailures,
-    seedHoldRenameWorkspace
+    seedHoldRenameWorkspace,
+    seedDateWriteError
   }) => {
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const state = {
@@ -1291,6 +1551,10 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
       renameWorkspaceResolvers: [],
       updateRelease: seedUpdateRelease
     };
+    state.dateWriteError = seedDateWriteError;
+    state.holdDateWrites = false;
+    state.dateWriteResolvers = [];
+    state.releaseDateWrite = () => state.dateWriteResolvers.shift()?.();
     state.releaseAnnotationWrite = () => state.annotationWriteResolvers.shift()?.();
     state.releaseRenameWorkspace = () => state.renameWorkspaceResolvers.shift()?.();
 
@@ -1298,7 +1562,8 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     const noteFiles = () => state.workspace.notes.map((note) => ({
       path: note.path,
       raw: note.raw,
-      modifiedMs: 1,
+      createdMs: note.createdMs,
+      modifiedMs: note.modifiedMs || 1,
       byteLen: note.raw.length,
       signature: signatureFor(note)
     }));
@@ -1361,12 +1626,21 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             return null;
           }
           if (command === "write_note") {
-            let note = state.workspace.notes.find((item) => item.path === args.path);
+            const target = state.workspaces.find((item) => item.notesPath === args.notesPath) || state.workspace;
+            let note = target.notes.find((item) => item.path === args.path);
             if (!note) {
               note = { path: args.path, raw: "" };
-              state.workspace.notes.push(note);
+              target.notes.push(note);
             }
+            if (note.raw !== args.raw) note.modifiedMs = Date.now();
             note.raw = args.raw;
+            return null;
+          }
+          if (command === "write_dates") {
+            const target = state.workspaces.find((item) => item.notesPath === args.notesPath) || state.workspace;
+            if (state.holdDateWrites) await new Promise((resolve) => state.dateWriteResolvers.push(resolve));
+            if (state.dateWriteError || target.datesError) throw new Error(state.dateWriteError || target.datesError);
+            target.dates = clone(args.dates);
             return null;
           }
           if (command === "trash_notes") {
@@ -1431,6 +1705,7 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     seedHoldAnnotationWrites: options.holdAnnotationWrites || false,
     seedAnnotationWriteFailures: options.annotationWriteFailures || [],
     seedHoldRenameWorkspace: options.holdRenameWorkspace || false,
+    seedDateWriteError: options.dateWriteError || "",
     seedInstallUpdateError: options.installUpdateError || "",
     seedWorkspace: workspace,
     seedWorkspaces: [workspace, ...(options.additionalWorkspaces || [])],

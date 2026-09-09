@@ -2,7 +2,7 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoEditorHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap, placeholder } from "@codemirror/view";
 import {
   detectLargeGraphMode,
@@ -53,7 +53,9 @@ import {
   diffFileSignatures,
   liveUpdateStatus
 } from "./persistence/liveSync.ts";
-import { invokeNative, isTauriApp, pickNativeDirectory } from "./persistence/nativeWorkspaceAdapter.ts";
+import { invokeNative as nativeInvoke, isTauriApp, pickNativeDirectory } from "./persistence/nativeWorkspaceAdapter.ts";
+import { dayFromTimestamp, emptyDateDocument, formatDateStamp, localDay, normalizeDateDocument, reconcileNoteDates, seedNoteDates } from "./notes/noteDates.ts";
+import { createDateTrackingExtension, getEditorNoteDates, setNoteDates } from "./ui/dateDecorations.ts";
 import {
   bodyFromText,
   composeRaw,
@@ -137,6 +139,10 @@ const annotationSaveTokensByWorkspace = new Map();
 const annotationTransitionLocksByWorkspace = new Map();
 const persistedAnnotationDocumentsByWorkspace = new Map();
 const deferredAnnotationHistoryByWorkspace = new Map();
+const dateWriteTailsByWorkspace = new Map();
+const editorDateHistory = new Compartment();
+let editorNoteKey = "";
+let editorHydrationEpoch = 0;
 const SEARCH_BODY_NOTE_THRESHOLD = 1000;
 const SEARCH_BODY_TOTAL_BYTES_THRESHOLD = 25 * 1024 * 1024;
 const SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD = 3_000_000;
@@ -330,7 +336,8 @@ function initializeEditor() {
     state: EditorState.create({
       doc: "",
       extensions: [
-        history(),
+        editorDateHistory.of(history()),
+        createDateTrackingExtension(),
         drawSelection(),
         dropCursor(),
         EditorView.lineWrapping,
@@ -1211,6 +1218,9 @@ function startEmpty() {
   state.graphHasHierarchy = true;
   state.annotations = emptyAnnotationDocument();
   state.annotationsError = "";
+  state.dates = emptyDateDocument();
+  state.datesError = "";
+  state.noteFileTimes = {};
   state.annotationTool = "select";
   state.selectedAnnotationId = null;
   state.annotationEditorState = null;
@@ -1680,7 +1690,7 @@ async function checkLiveFolderUpdates() {
   state.liveSyncInFlight = true;
 
   try {
-    if (state.dirty || state.saveTimer || state.activeInteraction) return;
+    if (state.dirty || state.saveTimer || state.activeInteraction || dateWriteTailsByWorkspace.has(state.activeWorkspaceId)) return;
 
     const statuses = await invokeNative("list_note_files", {
       notesPath: state.notesPath
@@ -1695,7 +1705,7 @@ async function checkLiveFolderUpdates() {
       return;
     }
 
-    if (state.dirty || state.saveTimer || state.activeInteraction) return;
+    if (state.dirty || state.saveTimer || state.activeInteraction || dateWriteTailsByWorkspace.has(state.activeWorkspaceId)) return;
 
     const files = pathsToRead.length
       ? await invokeNative("read_notes", {
@@ -1709,7 +1719,8 @@ async function checkLiveFolderUpdates() {
       !canLiveSyncWorkspace() ||
       state.dirty ||
       state.saveTimer ||
-      state.activeInteraction
+      state.activeInteraction ||
+      dateWriteTailsByWorkspace.has(state.activeWorkspaceId)
     ) {
       return;
     }
@@ -1733,13 +1744,28 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   const added = new Set();
   const changed = new Set();
   const layoutSnapshot = snapshotGraphPositions();
+  const dateNotes = { ...(state.dates?.notes || {}) };
+  const dateBudget = dateMetadataBudget(dateNotes);
 
   for (const file of files || []) {
     if (!file || !file.path) continue;
+    state.noteFileTimes[file.path] = { createdMs: file.createdMs, modifiedMs: file.modifiedMs };
     const existing = state.byPath.get(file.path);
     if (existing && existing.raw === file.raw) continue;
 
     const note = parseNote(file.path, file.raw);
+    try {
+      if (!getActiveWorkspace().dateCapacityError) {
+        const nextDates = dateNotes[file.path]
+          ? reconcileNoteDates(note.body, dateNotes[file.path], { day: dayFromTimestamp(file.modifiedMs), estimated: true })
+          : seedNoteDates(note.body, file);
+        assignBoundedNoteDates(getActiveWorkspace(), dateNotes, file.path, nextDates, dateBudget);
+      }
+    } catch (error) {
+      const workspace = getActiveWorkspace();
+      workspace.dateTrackingErrors ||= {};
+      workspace.dateTrackingErrors[file.path] = `Date tracking unavailable: ${error?.message || error}`;
+    }
     incomingNotes.set(file.path, note);
     if (existing) {
       changed.add(file.path);
@@ -1751,8 +1777,13 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   if (!incomingNotes.size && !deletedSet.size) {
     state.fileSignatures = nextSignatures;
     saveActiveWorkspaceState();
+    renderNoteDates();
     return;
   }
+
+  for (const path of deletedSet) { delete dateNotes[path]; delete state.noteFileTimes[path]; }
+  setWorkspaceDates(getActiveWorkspace(), { version: 1, notes: dateNotes });
+  editorHydrationEpoch += 1;
 
   state.notes = state.notes.filter((note) => !deletedSet.has(note.path) && !incomingNotes.has(note.path));
   state.notes.push(...incomingNotes.values());
@@ -1780,6 +1811,7 @@ function applyLiveWorkspaceUpdate({ files, deletedPaths, nextSignatures }) {
   renderValidationStatus();
   clearWorkspaceHistory();
   saveActiveWorkspaceState();
+  void queueDatePersistence();
 }
 
 function normalizeSelectionAfterNotesChanged() {
@@ -1806,6 +1838,7 @@ function normalizeSelectionAfterNotesChanged() {
 }
 
 function setNativeWorkspace(workspace, statusMessage, { previousRootPath, preserveHistory = false } = {}) {
+  editorHydrationEpoch += 1;
   prepareAnnotationTransition();
   saveActiveWorkspaceState();
 
@@ -1837,6 +1870,7 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath, preser
   target.workspaceMetrics = buildWorkspaceMetricsFromFiles(workspace.notes || []);
   target.searchIndexMode = searchIndexModeForMetrics(target.workspaceMetrics);
   target.fileSignatures = buildFileSignatureMap(workspace.notes || []);
+  initializeWorkspaceDates(target, workspace);
   target.dirty = false;
   if (!preserveHistory) {
     target.undoStack = [];
@@ -1864,6 +1898,180 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath, preser
 
   restoreWorkspaceState(target, statusMessage, { preserveView: target.hasView });
   rememberWorkspaceRecent({ rootPath, workspaceName }, previousRootPath);
+  void queueDatePersistence({ workspaceId: target.id, notesPath: target.notesPath });
+}
+
+function initializeWorkspaceDates(target, nativeWorkspace) {
+  target.datesError = nativeWorkspace.datesError || "";
+  target.dateSaveError = "";
+  target.dateTrackingErrors = {};
+  target.dateCapacityError = "";
+  target.noteFileTimes = Object.fromEntries((nativeWorkspace.notes || []).map((file) => [file.path, { createdMs: file.createdMs, modifiedMs: file.modifiedMs }]));
+  let stored = emptyDateDocument();
+  try {
+    stored = normalizeDateDocument(nativeWorkspace.dates || stored);
+  } catch (error) {
+    target.datesError = String(error?.message || error);
+  }
+  target.persistedDates = stored;
+  if ((nativeWorkspace.notes || []).length > 20_000) {
+    target.dates = emptyDateDocument();
+    target.dateCapacityError = "Date tracking paused: workspace exceeds 20,000 notes. Reopen after reducing its size.";
+    return;
+  }
+  const notes = {};
+  let totalLines = 0;
+  for (const file of nativeWorkspace.notes || []) {
+    target.noteFileTimes[file.path] = { createdMs: file.createdMs, modifiedMs: file.modifiedMs };
+    const body = parseNote(file.path, file.raw).body;
+    try {
+      const noteDates = stored.notes[file.path]
+        ? reconcileNoteDates(body, stored.notes[file.path], { day: dayFromTimestamp(file.modifiedMs), estimated: true })
+        : seedNoteDates(body, file);
+      totalLines += noteDates.lines.length;
+      if (totalLines > 200_000) {
+        target.dates = emptyDateDocument();
+        target.dateCapacityError = "Date tracking paused: workspace exceeds 200,000 tracked lines. Reopen after reducing its size.";
+        return;
+      }
+      notes[file.path] = noteDates;
+    } catch (error) {
+      target.dateTrackingErrors[file.path] = `Date tracking unavailable: ${error?.message || error}`;
+      target.dateCapacityError = `Date tracking paused: ${error?.message || error} Existing date metadata is preserved. Reopen after reducing the note size.`;
+      target.dates = emptyDateDocument();
+      return;
+    }
+  }
+  setWorkspaceDates(target, { version: 1, notes });
+}
+
+function setWorkspaceDates(workspace, dates) {
+  if (!workspace.dateCapacityError) {
+    try { normalizeDateDocument(dates); }
+    catch (error) { workspace.dateCapacityError = `Date tracking paused: ${error?.message || error} Reopen after reducing its size.`; }
+  }
+  workspace.dates = workspace.dateCapacityError ? emptyDateDocument() : dates;
+  if (workspace.id === state.activeWorkspaceId) {
+    state.dates = workspace.dates;
+    if (workspace.dateCapacityError && state.editorView) {
+      state.editorView.dispatch({ effects: setNoteDates.of(null), annotations: Transaction.addToHistory.of(false) });
+    }
+  }
+}
+
+function dateMetadataBudget(notes) {
+  return { notes: Object.keys(notes).length, lines: Object.values(notes).reduce((sum, note) => sum + note.lines.length, 0) };
+}
+
+function assignBoundedNoteDates(workspace, notes, path, next, budget) {
+  const noteCount = budget.notes + (Object.hasOwn(notes, path) ? 0 : 1);
+  const lineCount = budget.lines - (notes[path]?.lines.length || 0) + next.lines.length;
+  if (noteCount > 20_000 || lineCount > 200_000) {
+    workspace.dateCapacityError = "Date tracking paused: workspace exceeds 20,000 notes or 200,000 tracked lines. Existing date metadata is preserved. Reopen after reducing its size.";
+    return;
+  }
+  notes[path] = next;
+  budget.notes = noteCount;
+  budget.lines = lineCount;
+}
+
+function queueWorkspaceDateTask(context, action) {
+  const previous = dateWriteTailsByWorkspace.get(context.workspaceId) || Promise.resolve();
+  const task = previous.catch(() => undefined).then(action);
+  dateWriteTailsByWorkspace.set(context.workspaceId, task);
+  void task.finally(() => {
+    if (dateWriteTailsByWorkspace.get(context.workspaceId) === task) dateWriteTailsByWorkspace.delete(context.workspaceId);
+  }).catch(() => undefined);
+  return task;
+}
+
+async function persistWorkspaceDates(context) {
+  const workspace = state.workspaces.find((item) => item.id === context.workspaceId);
+  if (!workspace || workspace.notesPath !== context.notesPath || workspace.datesError || workspace.dateCapacityError) return;
+  try {
+    const dates = normalizeDateDocument(workspace.dates || emptyDateDocument());
+    if (JSON.stringify(dates) !== JSON.stringify(workspace.persistedDates)) {
+      await nativeInvoke("write_dates", { notesPath: context.notesPath, dates });
+      workspace.persistedDates = dates;
+    }
+    workspace.dateSaveError = "";
+  } catch (error) {
+    workspace.dateSaveError = `Dates could not be saved. Your Markdown is safe. ${error?.message || error}`;
+  }
+  if (workspace.id === state.activeWorkspaceId) renderNoteDates();
+}
+
+function queueDatePersistence(context = captureWorkspaceContext()) {
+  if (!context.workspaceId || !context.notesPath) return Promise.resolve();
+  return queueWorkspaceDateTask(context, () => persistWorkspaceDates(context));
+}
+
+// Keep Markdown writes and their date sidecar in one per-workspace queue. Capture
+// the originating workspace and editor metadata before any asynchronous work.
+async function invokeNative(command, args = {}) {
+  if (!["write_note", "create_note", "create_notes", "trash_notes"].includes(command)) return nativeInvoke(command, args);
+  const workspace = state.workspaces.find((item) => item.notesPath === args.notesPath);
+  if (!workspace) return nativeInvoke(command, args);
+  const context = { workspaceId: workspace.id, notesPath: args.notesPath };
+  const day = localDay();
+  const writes = command === "create_notes" ? args.notes : (command === "trash_notes" ? [] : [{ path: args.path, raw: args.raw }]);
+  const capturedEditorDates = workspace.id === state.activeWorkspaceId && state.editorView &&
+    writes.some((write) => write.path === state.selectedPath && parseNote(write.path, write.raw).body === parseNote(write.path, composeRaw({}, getEditorBody(), { title: "" })).body)
+    ? { path: state.selectedPath, dates: getEditorNoteDates(state.editorView.state) }
+    : null;
+  return queueWorkspaceDateTask(context, async () => {
+    if (workspace.notesPath !== context.notesPath) throw new Error("Folder changed before note save");
+    const result = await nativeInvoke(command, args);
+    const notes = { ...(workspace.dates?.notes || {}) };
+    const dateBudget = dateMetadataBudget(notes);
+    for (const write of writes) {
+      const body = parseNote(write.path, write.raw).body;
+      try {
+        const editorDates = capturedEditorDates?.path === write.path ? capturedEditorDates.dates : null;
+        if (!workspace.dateCapacityError) {
+          const nextDates = editorDates
+            ? reconcileNoteDates(body, editorDates, { day, estimated: false })
+            : notes[write.path]
+              ? reconcileNoteDates(body, notes[write.path], { day, estimated: false })
+              : seedNoteDates(body, { isNew: true, day });
+          assignBoundedNoteDates(workspace, notes, write.path, nextDates, dateBudget);
+        }
+        if (workspace.dateTrackingErrors) delete workspace.dateTrackingErrors[write.path];
+      } catch (error) {
+        workspace.dateTrackingErrors ||= {};
+        workspace.dateTrackingErrors[write.path] = `Date tracking unavailable: ${error?.message || error}`;
+      }
+      const previousTimes = workspace.noteFileTimes?.[write.path] || {};
+      workspace.noteFileTimes ||= {};
+      const unchanged = workspace.notes?.find((note) => note.path === write.path)?.raw === write.raw;
+      workspace.noteFileTimes[write.path] = { createdMs: previousTimes.createdMs || Date.now(), modifiedMs: unchanged ? previousTimes.modifiedMs : Date.now() };
+    }
+    for (const path of command === "trash_notes" ? args.paths : []) {
+      delete notes[path];
+      delete workspace.noteFileTimes?.[path];
+    }
+    setWorkspaceDates(workspace, { version: 1, notes });
+    if (workspace.id === state.activeWorkspaceId) state.noteFileTimes = workspace.noteFileTimes;
+    await persistWorkspaceDates(context);
+    return result;
+  });
+}
+
+function renderNoteDates(note = getSelectedNote()) {
+  if (!els.noteDates) return;
+  els.noteDates.hidden = !note;
+  els.noteDatesWarning.hidden = true;
+  if (!note) { els.noteDates.textContent = ""; return; }
+  const dates = state.dates?.notes?.[note.path];
+  const created = dates?.created || { day: null, estimated: true };
+  const modified = { day: dayFromTimestamp(state.noteFileTimes?.[note.path]?.modifiedMs), estimated: false };
+  els.noteDates.textContent = `Created ${formatDateStamp(created)} · Last edited ${formatDateStamp(modified)}`;
+  els.noteDates.title = `${created.estimated ? "Creation date is estimated from available file history. " : ""}Line dates retain their recorded calendar day. Last edited is the file modification date in this device's local timezone.`;
+  const warning = state.datesError || getActiveWorkspace()?.dateCapacityError || getActiveWorkspace()?.dateTrackingErrors?.[note.path] || getActiveWorkspace()?.dateSaveError;
+  if (warning) {
+    els.noteDatesWarning.textContent = `Date metadata: ${warning}`;
+    els.noteDatesWarning.hidden = false;
+  }
 }
 
 function buildWorkspaceMetricsFromFiles(files = []) {
@@ -2010,6 +2218,7 @@ function snapshotWorkspaceForHistory() {
       .sort((a, b) => compareText(a.path, b.path)),
     positions: cloneHistoryPositions(state.manualPositions),
     annotations: cloneAnnotationDocument(state.annotations),
+    dates: state.dates,
     selectedPath: state.selectedPath,
     selectedPaths: [...state.selectedPaths].filter((path) => state.notePaths.has(path)),
     view: { ...state.view }
@@ -2082,8 +2291,10 @@ function buildWorkspaceHistoryEntry(label, before, after) {
   for (const path of [...notePaths].sort(compareText)) {
     const beforeRaw = beforeNotes.has(path) ? beforeNotes.get(path) : null;
     const afterRaw = afterNotes.has(path) ? afterNotes.get(path) : null;
-    if (beforeRaw !== afterRaw) {
-      notes.push({ path, beforeRaw, afterRaw });
+    const beforeDates = before.dates?.notes?.[path] || null;
+    const afterDates = after.dates?.notes?.[path] || null;
+    if (beforeRaw !== afterRaw || JSON.stringify(beforeDates) !== JSON.stringify(afterDates)) {
+      notes.push({ path, beforeRaw, afterRaw, beforeDates, afterDates });
     }
   }
 
@@ -2250,6 +2461,18 @@ async function applyWorkspaceHistoryEntry(entry, side) {
     requireCurrentWorkspaceContext(workspaceContext);
   }
 
+  if (noteChanges.length) {
+    const dates = { ...(state.dates?.notes || {}) };
+    for (const change of noteChanges) {
+      const restored = side === "before" ? change.beforeDates : change.afterDates;
+      if (restored) dates[change.path] = restored;
+      else delete dates[change.path];
+    }
+    setWorkspaceDates(getActiveWorkspace(), { version: 1, notes: dates });
+    await queueDatePersistence(workspaceContext);
+    requireCurrentWorkspaceContext(workspaceContext);
+  }
+
   const nextNotes = new Map(state.notes.map((note) => [note.path, note]));
   for (const change of noteChanges) {
     const raw = side === "before" ? change.beforeRaw : change.afterRaw;
@@ -2335,6 +2558,9 @@ function saveActiveWorkspaceState() {
   workspace.view = { ...state.view };
   workspace.annotations = cloneAnnotationDocument(state.annotations);
   workspace.annotationsError = state.annotationsError;
+  workspace.dates = state.dates;
+  workspace.datesError = state.datesError;
+  workspace.noteFileTimes = state.noteFileTimes;
   workspace.hasView = true;
 }
 
@@ -2358,6 +2584,9 @@ function restoreWorkspaceState(workspace, statusMessage, { preserveView } = { pr
   state.notes = workspace.notes || [];
   state.annotations = cloneAnnotationDocument(workspace.annotations || emptyAnnotationDocument());
   state.annotationsError = workspace.annotationsError || "";
+  state.dates = workspace.dates || emptyDateDocument();
+  state.datesError = workspace.datesError || "";
+  state.noteFileTimes = workspace.noteFileTimes || {};
   state.annotationTool = "select";
   state.selectedAnnotationId = null;
   state.graphIndex = null;
@@ -3077,6 +3306,7 @@ function renderGraphSelectionSummary(statusMessage) {
   els.notePath.textContent = onlyPath || "";
   setEditorPlaceholder(false);
   setEditorBody("");
+  renderNoteDates(null);
   renderInfoPanel(null);
   setStatus(statusMessage || selectionStatus(count));
 }
@@ -3099,6 +3329,7 @@ function getOnlyGraphSelectedNote() {
 
 function renderSelectedNote(statusMessage) {
   const note = getSelectedNote();
+  renderNoteDates(note);
 
   if (!note) {
     els.noteTitle.textContent = "Select a note";
@@ -3124,15 +3355,27 @@ function getSelectedNote() {
 
 function setEditorBody(body) {
   const view = state.editorView;
+  const note = getSelectedNote();
+  const nextKey = note ? `${state.activeWorkspaceId}:${editorHydrationEpoch}:${note.path}` : "";
+  const dates = note ? state.dates?.notes?.[note.path] || null : null;
   state.editorHydrating = true;
+  if (editorNoteKey === nextKey && view.state.doc.toString() === (body || "")) {
+    view.dispatch({ effects: [setNoteDates.of(dates), wikiLinkRefreshEffect.of(null)], annotations: Transaction.addToHistory.of(false) });
+    state.editorHydrating = false;
+    return;
+  }
+  // Never let editor undo cross note boundaries or an external rehydrate.
+  view.dispatch({ effects: editorDateHistory.reconfigure([]), annotations: Transaction.addToHistory.of(false) });
   view.dispatch({
     changes: {
       from: 0,
       to: view.state.doc.length,
       insert: body || ""
     },
-    effects: wikiLinkRefreshEffect.of(null)
+    effects: [wikiLinkRefreshEffect.of(null), setNoteDates.of(dates), editorDateHistory.reconfigure(history())],
+    annotations: Transaction.addToHistory.of(false)
   });
+  editorNoteKey = nextKey;
   state.editorHydrating = false;
 }
 
@@ -3221,6 +3464,7 @@ function getHeaderTitleValue(note) {
 function markSelectedDirty() {
   if (!state.selectedPath || state.source !== "folder") return;
   state.dirty = true;
+  state.saveToken += 1;
   setStatus("Autosaving...");
   updateSourceStatus();
   scheduleAutosave();
@@ -3378,6 +3622,7 @@ async function autosaveSelectedNote() {
   const raw = composeRaw(note, getEditorBody(), getInfoValues(note));
   const path = note.path;
   const token = ++state.saveToken;
+  const workspaceContext = captureWorkspaceContext();
   const layoutSnapshot = snapshotGraphPositions();
   const previousGraphIndex = state.graphIndex;
   setStatus("Saving...");
@@ -3388,7 +3633,7 @@ async function autosaveSelectedNote() {
       path,
       raw
     });
-    if (token !== state.saveToken) return;
+    if (token !== state.saveToken || !isCurrentWorkspaceContext(workspaceContext)) return;
 
     const updated = parseNote(path, raw);
     const needsFullRefresh = noteNeedsFullRefresh(note, updated);
@@ -3421,8 +3666,10 @@ async function autosaveSelectedNote() {
     const createdLinkedNotes = await createMissingWikiLinkNotes(latestNote, note, layoutSnapshot);
     updateSourceStatus();
     recordWorkspaceHistory("note edit", historyBefore);
+    renderNoteDates();
     setStatus(saveStatusMessage({ createdLinkedNotes, updatedLinkCount }));
   } catch (error) {
+    if (token !== state.saveToken || !isCurrentWorkspaceContext(workspaceContext)) return;
     state.dirty = true;
     setStatus("Autosave failed");
     console.error(error);
@@ -5720,10 +5967,11 @@ function beginPendingAnnotationChange(workspaceId) {
 
 async function awaitPendingAnnotationWrites(workspaceId) {
   if (!workspaceId) return;
-  while (pendingAnnotationChangesByWorkspace.get(workspaceId)?.size || pendingAnnotationWritesByWorkspace.get(workspaceId)?.size) {
+  while (pendingAnnotationChangesByWorkspace.get(workspaceId)?.size || pendingAnnotationWritesByWorkspace.get(workspaceId)?.size || dateWriteTailsByWorkspace.has(workspaceId)) {
     const pending = [
       ...(pendingAnnotationChangesByWorkspace.get(workspaceId) || []),
-      ...(pendingAnnotationWritesByWorkspace.get(workspaceId) || [])
+      ...(pendingAnnotationWritesByWorkspace.get(workspaceId) || []),
+      ...(dateWriteTailsByWorkspace.has(workspaceId) ? [dateWriteTailsByWorkspace.get(workspaceId)] : [])
     ];
     await Promise.all(pending.map((operation) => operation.catch(() => undefined)));
   }

@@ -32,6 +32,8 @@ export interface DomElements {
   editorPane: Element | null;
   editor: Element | null;
   noteTitle: Element | null;
+  noteDates: HTMLElement | null;
+  noteDatesWarning: HTMLElement | null;
   notePath: Element | null;
   noteInfo: Element | null;
   infoParent: Element | null;
@@ -107,6 +109,8 @@ export function getDomElements(): DomElements {
     editorPane: document.querySelector(".editorPane"),
     editor: document.querySelector("#editor"),
     noteTitle: document.querySelector("#noteTitle"),
+    noteDates: document.querySelector("#noteDates"),
+    noteDatesWarning: document.querySelector("#noteDatesWarning"),
     notePath: document.querySelector("#notePath"),
     noteInfo: document.querySelector("#noteInfo"),
     infoParent: document.querySelector("#infoParent"),
