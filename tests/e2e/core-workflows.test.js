@@ -55,6 +55,15 @@ test("core Tauri workspace flows keep working", async () => {
   await page.locator("[data-search-result-path='child.md']").click();
   await page.waitForFunction(() => document.querySelector("#notePath")?.textContent === "child.md");
   assert.equal(await textContent(page, "#noteTitle"), "Child");
+  const markdownLink = page.locator(".cm-markdownLink");
+  assert.equal(await markdownLink.count(), 1);
+  assert.equal(await markdownLink.textContent(), "Waymo for Business");
+  assert.equal(await markdownLink.getAttribute("href"), "https://waymo.com/business/");
+  assert.equal(await markdownLink.getAttribute("target"), "_blank");
+  assert.equal(await markdownLink.getAttribute("rel"), "noopener noreferrer");
+  assert.equal(await markdownLink.evaluate((element) => getComputedStyle(element).color), "rgb(159, 207, 255)");
+  assert.equal((await page.locator(".cm-content").innerText()).includes("https://waymo.com/business/"), false);
+  assert.equal((await page.locator(".cm-content").innerText()).includes("javascript:alert(1)"), true);
 
   await page.locator("#newNoteButton").click();
   await page.locator("#newNoteTitle").fill("Grandchild");
@@ -1765,7 +1774,8 @@ function sampleWorkspace() {
           "",
           "# Child",
           "",
-          "A child note."
+          "A child note with [Waymo for Business](https://waymo.com/business/).",
+          "An [Unsafe](javascript:alert(1)) target stays plain Markdown."
         ].join("\n")
       }
     ]
