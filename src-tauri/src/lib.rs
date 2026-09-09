@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -527,25 +527,29 @@ fn write_dates_blocking(notes_path: String, dates: DateDocument) -> Result<(), S
         ));
     }
 
-    let path = dates_path(&notes_root);
-    reject_symlink(&path, "Dates file cannot be a symlink").map_err(to_error)?;
-
     // Never replace a sidecar that the app could not safely understand.
-    let expected_existing = match fs::metadata(&path) {
-        Ok(_) => {
-            read_dates_file(&notes_root)?;
-            let existing =
-                fs::read(&path).map_err(|error| format!("Could not read dates.json: {}", error))?;
+    // The exact bounded bytes that pass validation are also the bytes used by
+    // atomic_write_file's compare-and-replace guard. Do not re-read the path
+    // after validation: it may have changed to corrupt or newer metadata.
+    let expected_existing = match read_dates_snapshot(&notes_root)? {
+        Some(existing) => {
+            parse_dates_snapshot(&existing)?;
             if existing == raw {
                 return Ok(());
             }
             Some(existing)
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("Could not read dates.json: {}", error)),
+        None => None,
     };
 
-    atomic_write_file(&path, &raw, expected_existing.as_deref()).map_err(to_error)
+    let path = dates_path(&notes_root);
+    atomic_write_file(
+        &path,
+        &raw,
+        expected_existing.as_deref(),
+        MAX_DATE_DOCUMENT_BYTES,
+    )
+    .map_err(to_error)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -845,28 +849,79 @@ fn dates_path(notes_root: &Path) -> PathBuf {
 }
 
 fn read_dates_file(notes_root: &Path) -> Result<DateDocument, String> {
+    match read_dates_snapshot(notes_root)? {
+        Some(raw) => parse_dates_snapshot(&raw),
+        None => Ok(DateDocument::default()),
+    }
+}
+
+fn read_dates_snapshot(notes_root: &Path) -> Result<Option<Vec<u8>>, String> {
     let path = dates_path(notes_root);
     reject_symlink(&path, "Dates file cannot be a symlink").map_err(to_error)?;
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.len() > MAX_DATE_DOCUMENT_BYTES => {
-            return Err(format!(
-                "dates.json exceeds the {} byte limit",
-                MAX_DATE_DOCUMENT_BYTES
+    read_bounded_file(&path, MAX_DATE_DOCUMENT_BYTES, "dates.json")
+        .map_err(|error| format!("Could not read dates.json: {}", error))
+}
+
+fn read_bounded_file(path: &Path, max_bytes: u64, label: &str) -> io::Result<Option<Vec<u8>>> {
+    match fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is not a regular file", label),
             ));
         }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err("dates.json is not a regular file".into());
+        Ok(metadata) if metadata.len() > max_bytes => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} exceeds the {} byte limit", label, max_bytes),
+            ));
         }
         Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(DateDocument::default());
-        }
-        Err(error) => return Err(format!("Could not inspect dates.json: {}", error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a regular file", label),
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} exceeds the {} byte limit", label, max_bytes),
+        ));
     }
 
-    let raw = fs::read(&path).map_err(|error| format!("Could not read dates.json: {}", error))?;
-    let dates: DateDocument = serde_json::from_slice(&raw)
-        .map_err(|error| format!("dates.json is invalid: {}", error))?;
+    // The descriptor may outgrow the metadata snapshot. Bound the actual read
+    // as well so a concurrent append cannot force an unbounded allocation.
+    let mut raw = Vec::with_capacity(metadata.len() as usize);
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut raw)?;
+    if raw.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} exceeds the {} byte limit", label, max_bytes),
+        ));
+    }
+    Ok(Some(raw))
+}
+
+fn parse_dates_snapshot(raw: &[u8]) -> Result<DateDocument, String> {
+    if raw.len() as u64 > MAX_DATE_DOCUMENT_BYTES {
+        return Err(format!(
+            "dates.json exceeds the {} byte limit",
+            MAX_DATE_DOCUMENT_BYTES
+        ));
+    }
+    let dates: DateDocument =
+        serde_json::from_slice(raw).map_err(|error| format!("dates.json is invalid: {}", error))?;
     validate_dates(&dates)?;
     Ok(dates)
 }
@@ -1439,7 +1494,12 @@ fn write_if_changed(path: &Path, raw: &str) -> std::io::Result<()> {
     }
 }
 
-fn atomic_write_file(path: &Path, raw: &[u8], expected_existing: Option<&[u8]>) -> io::Result<()> {
+fn atomic_write_file(
+    path: &Path,
+    raw: &[u8],
+    expected_existing: Option<&[u8]>,
+    max_existing_bytes: u64,
+) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing parent folder"))?;
@@ -1484,16 +1544,16 @@ fn atomic_write_file(path: &Path, raw: &[u8], expected_existing: Option<&[u8]>) 
         drop(temporary_file);
 
         reject_symlink(path, "Workspace file cannot be a symlink")?;
-        match (fs::read(path), expected_existing) {
-            (Ok(current), Some(expected)) if current == expected => {}
-            (Err(error), None) if error.kind() == io::ErrorKind::NotFound => {}
-            (Ok(_), None) | (Err(_), Some(_)) | (Ok(_), Some(_)) => {
+        let current = read_bounded_file(path, max_existing_bytes, "Sidecar")?;
+        match (current, expected_existing) {
+            (Some(current), Some(expected)) if current == expected => {}
+            (None, None) => {}
+            (Some(_), None) | (None, Some(_)) | (Some(_), Some(_)) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Sidecar changed while it was being saved",
                 ));
             }
-            (Err(error), None) => return Err(error),
         }
 
         fs::rename(&temporary_path, path)?;
@@ -1803,6 +1863,31 @@ mod tests {
             );
             assert_eq!(fs::read(&path).expect("reread invalid sidecar"), original);
         }
+        fs::remove_dir_all(notes).ok();
+    }
+
+    #[test]
+    fn validated_date_snapshot_detects_replacement_before_atomic_write() {
+        let notes = temp_notes_dir("dates-snapshot-race");
+        let path = notes.join("dates.json");
+        let original = serde_json::to_vec(&sample_dates()).expect("serialize valid dates");
+        fs::write(&path, &original).expect("write valid dates");
+
+        let expected = read_dates_snapshot(&notes)
+            .expect("read bounded date snapshot")
+            .expect("existing dates snapshot");
+        parse_dates_snapshot(&expected).expect("validate exact snapshot");
+
+        let replacement = br#"{"version":2,"notes":{}}"#;
+        fs::write(&path, replacement).expect("replace dates after validation");
+        let next = serde_json::to_vec(&DateDocument::default()).expect("serialize next dates");
+
+        let error = atomic_write_file(&path, &next, Some(&expected), MAX_DATE_DOCUMENT_BYTES)
+            .expect_err("reject replacement after validation");
+        assert!(error
+            .to_string()
+            .contains("changed while it was being saved"));
+        assert_eq!(fs::read(&path).expect("reread replaced dates"), replacement);
         fs::remove_dir_all(notes).ok();
     }
 
