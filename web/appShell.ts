@@ -1,9 +1,10 @@
 // @ts-nocheck
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo as redoEditorHistory } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap, placeholder } from "@codemirror/view";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
@@ -171,11 +172,11 @@ const els = getDomElements();
 
 const wikiLinkField = StateField.define({
   create(editorState) {
-    return buildWikiLinkDecorations(editorState.doc);
+    return buildEditorLinkDecorations(editorState);
   },
   update(decorations, transaction) {
     if (transaction.effects.some((effect) => effect.is(wikiLinkRefreshEffect))) {
-      return buildWikiLinkDecorations(transaction.state.doc);
+      return buildEditorLinkDecorations(transaction.state);
     }
     if (transaction.docChanged) {
       scheduleWikiLinkRefresh();
@@ -255,6 +256,50 @@ class WikiLinkWidget extends WidgetType {
 
   ignoreEvent() {
     return false;
+  }
+}
+
+class MarkdownLinkWidget extends WidgetType {
+  constructor(label, url) {
+    super();
+    this.label = label;
+    this.url = url;
+  }
+
+  eq(other) {
+    return other.label === this.label && other.url === this.url;
+  }
+
+  toDOM() {
+    const anchor = document.createElement("a");
+    anchor.className = "cm-markdownLink";
+    anchor.href = this.url;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    anchor.textContent = this.label;
+    anchor.title = `Open ${this.url}`;
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openExternalLink(this.url);
+    });
+    return anchor;
+  }
+
+  ignoreEvent() {
+    return true;
+  }
+}
+
+async function openExternalLink(url) {
+  try {
+    if (isTauriApp()) {
+      await openUrl(url);
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  } catch {
+    setStatus("Could not open link");
   }
 }
 
@@ -5175,27 +5220,73 @@ function refreshLabelsAfterZoom(previousScale) {
   }
 }
 
-function buildWikiLinkDecorations(doc) {
+function buildEditorLinkDecorations(editorState) {
+  const doc = editorState.doc;
+  const decorations = [];
+  const markdownLinkRanges = [];
+  const text = doc.toString();
+
+  syntaxTree(editorState).iterate({
+    enter(node) {
+      if (node.name !== "Link") return;
+      const urlNode = node.node.getChild("URL");
+      if (!urlNode) return;
+
+      const url = safeExternalLink(text.slice(urlNode.from, urlNode.to));
+      if (!url) return;
+
+      const markup = text.slice(node.from, node.to);
+      const labelEnd = markup.indexOf("](");
+      const label = labelEnd > 1 ? markup.slice(1, labelEnd).trim() : "";
+      if (!label) return;
+
+      markdownLinkRanges.push({ from: node.from, to: node.to });
+      decorations.push({
+        from: node.from,
+        to: node.to,
+        decoration: Decoration.replace({
+          widget: new MarkdownLinkWidget(label, url),
+          inclusive: false
+        })
+      });
+    }
+  });
+
   const builder = new RangeSetBuilder();
   const regex = /\[\[([^\]]+)\]\]/g;
-  const text = doc.toString();
   let match;
 
   while ((match = regex.exec(text)) !== null) {
+    const matchEnd = match.index + match[0].length;
+    if (markdownLinkRanges.some((range) => match.index < range.to && matchEnd > range.from)) continue;
     const parsed = parseWikiTarget(match[1]);
     const note = resolveWikiNote(parsed.ref);
     const label = note && !match[1].includes("|") ? note.title : parsed.label;
-    builder.add(
-      match.index,
-      match.index + match[0].length,
-      Decoration.replace({
+    decorations.push({
+      from: match.index,
+      to: matchEnd,
+      decoration: Decoration.replace({
         widget: new WikiLinkWidget(parsed.ref, label, note),
         inclusive: false
       })
-    );
+    });
+  }
+
+  decorations.sort((a, b) => a.from - b.from || a.to - b.to);
+  for (const entry of decorations) {
+    builder.add(entry.from, entry.to, entry.decoration);
   }
 
   return builder.finish();
+}
+
+function safeExternalLink(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+  } catch {
+    return "";
+  }
 }
 
 function wrapTitle(title) {
