@@ -1,6 +1,6 @@
 {
   "name": "apex-notes",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "type": "module",
   "scripts": {
     "build:web": "node scripts/build-web.mjs",
@@ -23,6 +23,8 @@
     "@codemirror/language": "^6.12.3",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.42.1",
+    "@tauri-apps/plugin-deep-link": "2.4.10",
+    "@tauri-apps/plugin-dialog": "2.7.1",
     "@tauri-apps/plugin-opener": "^2.5.5",
     "lucide": "1.16.0"
   },

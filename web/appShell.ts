@@ -5,6 +5,8 @@ import { defaultHighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirr
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField, Transaction } from "@codemirror/state";
 import { Decoration, EditorView, WidgetType, drawSelection, dropCursor, highlightActiveLine, keymap, placeholder } from "@codemirror/view";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { confirm as confirmNative } from "@tauri-apps/plugin-dialog";
 import {
   detectLargeGraphMode,
   selectLargeModeReferenceEdges
@@ -54,7 +56,8 @@ import {
   diffFileSignatures,
   liveUpdateStatus
 } from "./persistence/liveSync.ts";
-import { invokeNative as nativeInvoke, isTauriApp, pickNativeDirectory } from "./persistence/nativeWorkspaceAdapter.ts";
+import { invokeNative as underlyingNativeInvoke, isTauriApp, pickNativeDirectory } from "./persistence/nativeWorkspaceAdapter.ts";
+import { parseWorkspaceDeepLink } from "./persistence/deepLinks.ts";
 import { dayFromTimestamp, emptyDateDocument, formatDateStamp, localDay, normalizeDateDocument, reconcileNoteDates, seedNoteDates } from "./notes/noteDates.ts";
 import { createDateTrackingExtension, getEditorNoteDates, setNoteDates } from "./ui/dateDecorations.ts";
 import {
@@ -144,6 +147,16 @@ const dateWriteTailsByWorkspace = new Map();
 const editorDateHistory = new Compartment();
 let editorNoteKey = "";
 let editorHydrationEpoch = 0;
+let deepLinkEpoch = 0;
+let stopDeepLinks = null;
+let deepLinkBusy = false;
+let deepLinkImporting = false;
+const pendingNativeOperations = new Set();
+const pendingUiOperations = new Set();
+const failedNativeWrites = new Set();
+let nativeWriteFailureCount = 0;
+const workspaceMutationCommands = new Set(["write_note", "create_note", "create_notes", "trash_notes", "write_dates", "write_annotations", "write_layout_patch", "write_manifest", "rename_workspace", "create_workspace"]);
+const retainedDraftWriteCommands = new Set(["write_note", "write_dates", "write_annotations", "write_layout_patch"]);
 const SEARCH_BODY_NOTE_THRESHOLD = 1000;
 const SEARCH_BODY_TOTAL_BYTES_THRESHOLD = 25 * 1024 * 1024;
 const SEARCH_TRIGRAM_TOTAL_CHARS_THRESHOLD = 3_000_000;
@@ -321,9 +334,13 @@ export function initializeApp() {
   startEmpty();
   void hydrateRecentProjects();
   startAppUpdateChecks();
+  void startDeepLinkHandling();
 }
 
 export function disposeApp() {
+  deepLinkEpoch += 1;
+  stopDeepLinks?.();
+  stopDeepLinks = null;
   graphPinch = null;
   stopLiveSync();
   cancelQueuedGraphRender();
@@ -373,6 +390,173 @@ function initializeIcons() {
   setButtonIcon(els.fullscreenGraphButton, "fullscreenEnter");
   setButtonIcon(els.fullscreenEditorButton, "fullscreenEnter");
   setButtonIcon(els.deleteNoteButton, "trash");
+}
+
+function trackOperation(set, operation) {
+  set.add(operation);
+  void operation.finally(() => set.delete(operation)).catch(() => undefined);
+  return operation;
+}
+
+function nativeInvoke(command, args = {}) {
+  const mutation = workspaceMutationCommands.has(command);
+  const key = JSON.stringify([command, args.notesPath, args.rootPath, args.path]);
+  const operation = (async () => {
+    if (mutation && deepLinkImporting) throw new Error("Workspace sync in progress");
+    try {
+      const result = await underlyingNativeInvoke(command, args);
+      if (mutation) failedNativeWrites.delete(key);
+      return result;
+    } catch (error) {
+      if (mutation) {
+        if (retainedDraftWriteCommands.has(command)) failedNativeWrites.add(key);
+        nativeWriteFailureCount += 1;
+      }
+      throw error;
+    }
+  })();
+  return trackOperation(pendingNativeOperations, operation);
+}
+
+async function startDeepLinkHandling() {
+  if (!isTauriApp()) return;
+  const epoch = ++deepLinkEpoch;
+  const startupEvents = [];
+  const queue = [];
+  let starting = true;
+  let processing = false;
+  const enqueue = (urls) => {
+    if (epoch !== deepLinkEpoch || !Array.isArray(urls)) return;
+    for (const url of urls.slice(0, 8)) {
+      if (queue.length >= 8) { setStatus("Too many browser requests. Try again after the current operation."); break; }
+      try { queue.push(parseWorkspaceDeepLink(url)); }
+      catch { setStatus("Ignored an invalid Apex Notes link"); }
+    }
+    if (!processing) void processQueue();
+  };
+  const processQueue = async () => {
+    processing = true;
+    while (queue.length && epoch === deepLinkEpoch) await handleWorkspaceDeepLink(queue.shift());
+    processing = false;
+  };
+  try {
+    const unlisten = await onOpenUrl((urls) => {
+      if (starting) startupEvents.push(...urls.slice(0, Math.max(0, 8 - startupEvents.length)));
+      else enqueue(urls);
+    });
+    if (epoch !== deepLinkEpoch) { unlisten(); return; }
+    stopDeepLinks = unlisten;
+    const current = await getCurrent();
+    if (epoch !== deepLinkEpoch) return;
+    starting = false;
+    // getCurrent may reflect an event delivered while its request was pending.
+    // Deduplicate only that startup overlap; later identical clicks still sync.
+    const initial = (current || []).filter((url) => !startupEvents.includes(url));
+    enqueue([...initial, ...startupEvents]);
+  } catch {
+    starting = false;
+    // Do not log incoming URLs: even rejected links might contain credentials.
+    if (epoch === deepLinkEpoch) setStatus("Browser handoff unavailable in this app build");
+  }
+}
+
+async function drainWorkspaceOperations() {
+  while (pendingUiOperations.size || pendingNativeOperations.size || dateWriteTailsByWorkspace.size || pendingAnnotationChangesByWorkspace.size || pendingAnnotationWritesByWorkspace.size) {
+    await Promise.allSettled([...pendingUiOperations, ...pendingNativeOperations]);
+    for (const workspace of state.workspaces) await awaitPendingAnnotationWrites(workspace.id);
+  }
+}
+
+async function handleWorkspaceDeepLink(request) {
+  if (state.activeInteraction || isAnyDialogOpen() || !els.graphCreatePopover.hidden || state.renamingWorkspaceId) {
+    setStatus("Finish the current edit or dialog, then click Open in Apex Notes again");
+    return;
+  }
+  deepLinkBusy = true;
+  const failuresBeforeDrain = nativeWriteFailureCount;
+  stopLiveSync();
+  document.body.inert = true;
+  document.body.setAttribute("aria-busy", "true");
+  setEditorEditable(false);
+  try {
+    await drainWorkspaceOperations();
+    if (isAnyDialogOpen() || !els.graphCreatePopover.hidden || state.renamingWorkspaceId) {
+      setStatus("Finish the current edit or dialog, then click Open in Apex Notes again");
+      return;
+    }
+    const message = request.action === "open"
+      ? `Open this local workspace?\n\n${request.rootPath}\n\nYour pending edits will be saved first.`
+      : `Sync the locally configured connection “${request.connectionId}” and open its workspace?\n\nPending edits will be saved first. Conflicting local files will be preserved.`;
+    if (!await confirmNative(message, { title: "Open in Apex Notes", kind: "warning", okLabel: request.action === "sync" ? "Sync and open" : "Open", cancelLabel: "Cancel" })) return;
+    commitHeaderNoteTitle();
+    await commitAnnotationEditor();
+    await flushAutosave();
+    await drainWorkspaceOperations();
+    saveActiveWorkspaceState();
+    const openNoteRoots = new Set(state.workspaces.map((workspace) => workspace.notesPath));
+    const unresolvedSaveFailure = [...failedNativeWrites].some((key) => openNoteRoots.has(JSON.parse(key)[1]));
+    if (state.dirty || state.workspaces.some((workspace) => workspace.dirty) || unresolvedSaveFailure || nativeWriteFailureCount !== failuresBeforeDrain) {
+      setStatus("Browser request stopped: save pending edits successfully before opening or syncing");
+      return;
+    }
+    deepLinkImporting = true;
+    setStatus(request.action === "sync" ? "Syncing configured workspace…" : "Opening local workspace…");
+    const result = request.action === "sync"
+      ? await nativeInvoke("sync_workspace", { connectionId: request.connectionId })
+      : { workspace: await nativeInvoke("read_workspace", { rootPath: request.rootPath }), conflicts: [] };
+    deepLinkImporting = false;
+    if (result.reloadRequired || !result.workspace) {
+      invalidateSyncedWorkspace(result.rootPath, result.notesPath);
+      setStatus(result.warning || "Sync changed files but the folder could not be reloaded. Reopen it before editing.");
+      return;
+    }
+    closeGraphProjectLauncher();
+    // Reset stale history and load disk layout, including a previously open tab.
+    const conflicts = result.conflicts?.length || 0;
+    setNativeWorkspace(result.workspace, result.warning
+      ? `Sync needs attention: ${result.warning}`
+      : conflicts
+      ? `Synced with ${conflicts} conflict${conflicts === 1 ? "" : "s"}. Local files preserved; incoming copies are in .apex-sync-conflicts.`
+      : (request.action === "sync" ? "Workspace synced and opened" : "Workspace opened from browser"), { reloadLayout: true });
+    const refreshed = getActiveWorkspace();
+    for (const alias of state.workspaces) {
+      if (alias.id === refreshed.id || alias.notesPath !== refreshed.notesPath) continue;
+      const identity = { id: alias.id, rootPath: alias.rootPath, view: alias.view };
+      Object.assign(alias, refreshed, identity, { undoStack: [], redoStack: [], dirty: false });
+    }
+  } catch {
+    setStatus("Could not open or sync the workspace. Check the local connection setup, then retry; existing edits have been kept.");
+  } finally {
+    deepLinkImporting = false;
+    deepLinkBusy = false;
+    document.body.inert = false;
+    document.body.removeAttribute("aria-busy");
+    updateSourceStatus();
+    startLiveSync();
+  }
+}
+
+function invalidateSyncedWorkspace(rootPath, notesPath) {
+  const affected = state.workspaces.filter((workspace) =>
+    (!rootPath && !notesPath) || workspace.rootPath === rootPath || workspace.notesPath === notesPath || workspace.notesPath === rootPath
+  );
+  const ids = new Set(affected.map((workspace) => workspace.id));
+  state.workspaces = state.workspaces.filter((workspace) => !ids.has(workspace.id));
+  for (const id of ids) {
+    annotationWriteTailsByWorkspace.delete(id);
+    pendingAnnotationWritesByWorkspace.delete(id);
+    pendingAnnotationChangesByWorkspace.delete(id);
+    annotationSaveTokensByWorkspace.delete(id);
+    persistedAnnotationDocumentsByWorkspace.delete(id);
+    deferredAnnotationHistoryByWorkspace.delete(id);
+    dateWriteTailsByWorkspace.delete(id);
+  }
+  if (ids.has(state.activeWorkspaceId)) {
+    const next = state.workspaces[0];
+    if (next) restoreWorkspaceState(next, "Synced folder must be reopened", { preserveView: true });
+    else startEmpty();
+  }
+  renderWorkspaceTabs();
 }
 
 function initializeEditor() {
@@ -639,11 +823,24 @@ function bindEvents() {
   if (appEventController) appEventController.abort();
   appEventController = new AbortController();
   const on = (target, type, listener, options = {}) => {
-    target.addEventListener(type, listener, {
+    target.addEventListener(type, (event) => {
+      if (deepLinkBusy) return;
+      const result = listener(event);
+      if (result && typeof result.then === "function") trackOperation(pendingUiOperations, result);
+      return result;
+    }, {
       ...(typeof options === "boolean" ? { capture: options } : options),
       signal: appEventController.signal
     });
   };
+
+  for (const type of ["pointerdown", "pointerup", "click", "dblclick", "keydown", "beforeinput", "input", "paste", "drop", "submit"]) {
+    document.addEventListener(type, (event) => {
+      if (!deepLinkBusy) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, { capture: true, signal: appEventController.signal });
+  }
 
   on(els.graphHelpButton, "click", openGraphHelpDialog);
   on(els.annotationToolbar, "click", onAnnotationToolbarClick);
@@ -1153,7 +1350,7 @@ function onWorkspaceTabsClick(event) {
   if (closeButton) {
     event.preventDefault();
     event.stopPropagation();
-    void closeWorkspaceTab(closeButton.dataset.closeWorkspace);
+    void trackOperation(pendingUiOperations, closeWorkspaceTab(closeButton.dataset.closeWorkspace));
     return;
   }
 
@@ -1164,7 +1361,7 @@ function onWorkspaceTabsClick(event) {
       closeGraphProjectLauncher();
       return;
     }
-    void switchWorkspaceTab(switchButton.dataset.switchWorkspace);
+    void trackOperation(pendingUiOperations, switchWorkspaceTab(switchButton.dataset.switchWorkspace));
   }
 }
 
@@ -1189,7 +1386,7 @@ function onWorkspaceTabsFocusOut(event) {
   if (suppressWorkspaceRenameCommit) return;
   const input = event.target.closest("[data-rename-workspace]");
   if (!input) return;
-  void commitWorkspaceTabRename(input);
+  void trackOperation(pendingUiOperations, commitWorkspaceTabRename(input));
 }
 
 function onWorkspaceTabsKeydown(event) {
@@ -1198,7 +1395,7 @@ function onWorkspaceTabsKeydown(event) {
     event.stopPropagation();
     if (event.key === "Enter") {
       event.preventDefault();
-      void commitWorkspaceTabRename(renameInput);
+      void trackOperation(pendingUiOperations, commitWorkspaceTabRename(renameInput));
     } else if (event.key === "Escape") {
       event.preventDefault();
       cancelWorkspaceTabRename();
@@ -1218,7 +1415,7 @@ function onLaunchRecentClick(event) {
   if (!recentButton) return;
 
   event.preventDefault();
-  void openRecentProject(recentButton.dataset.recentRootPath);
+  void trackOperation(pendingUiOperations, openRecentProject(recentButton.dataset.recentRootPath));
 }
 
 function startEmpty() {
@@ -1692,7 +1889,7 @@ function waitForPaint() {
 }
 
 function canLiveSyncWorkspace() {
-  return isTauriApp() && state.source === "folder" && Boolean(state.notesPath);
+  return !deepLinkBusy && isTauriApp() && state.source === "folder" && Boolean(state.notesPath);
 }
 
 function startLiveSync() {
@@ -1882,14 +2079,19 @@ function normalizeSelectionAfterNotesChanged() {
   }
 }
 
-function setNativeWorkspace(workspace, statusMessage, { previousRootPath, preserveHistory = false } = {}) {
+function setNativeWorkspace(workspace, statusMessage, { previousRootPath, preserveHistory = false, reloadLayout = false } = {}) {
   editorHydrationEpoch += 1;
   prepareAnnotationTransition();
   saveActiveWorkspaceState();
+  // A successful explicit disk reload establishes a new saved baseline. Do not
+  // let a failure from a previously abandoned draft poison future handoffs.
+  for (const key of failedNativeWrites) {
+    if (JSON.parse(key)[1] === workspace.notesPath) failedNativeWrites.delete(key);
+  }
 
   const rootPath = workspace.rootPath || "";
   const workspaceName = workspace.workspaceName || rootPath || "Folder";
-  const existing = state.workspaces.find((item) => item.rootPath === rootPath || (
+  const existing = state.workspaces.find((item) => item.rootPath === rootPath || (reloadLayout && item.notesPath === workspace.notesPath) || (
     previousRootPath &&
     item.rootPath === previousRootPath
   ));
@@ -1933,7 +2135,7 @@ function setNativeWorkspace(workspace, statusMessage, { previousRootPath, preser
   persistedAnnotationDocumentsByWorkspace.set(target.id, cloneAnnotationDocument(target.annotations));
   deferredAnnotationHistoryByWorkspace.delete(target.id);
   const targetNotePaths = new Set(target.notes.map((note) => note.path));
-  target.manualPositions = existing
+  target.manualPositions = existing && !reloadLayout
     ? pruneStoredPositions(existing.manualPositions, targetNotePaths)
     : readStoredPositions(workspace.positions || {}, layoutKey, targetNotePaths);
 
@@ -3655,6 +3857,10 @@ async function flushAutosave() {
 }
 
 async function autosaveSelectedNote() {
+  return trackOperation(pendingUiOperations, performAutosaveSelectedNote());
+}
+
+async function performAutosaveSelectedNote() {
   const note = getSelectedNote();
   if (!note) return;
 
@@ -5306,7 +5512,7 @@ function onSearchKeydown(event) {
     const result = state.searchResults[state.searchActiveIndex] || state.searchResults[0];
     if (!result) return;
     event.preventDefault();
-    void chooseSearchResult(result.path);
+    void trackOperation(pendingUiOperations, chooseSearchResult(result.path));
     return;
   }
 
@@ -5329,7 +5535,7 @@ function moveSearchActive(delta) {
 function onSearchResultsClick(event) {
   const resultButton = event.target.closest("[data-search-result-path]");
   if (!resultButton || !els.searchResults.contains(resultButton)) return;
-  void chooseSearchResult(resultButton.dataset.searchResultPath);
+  void trackOperation(pendingUiOperations, chooseSearchResult(resultButton.dataset.searchResultPath));
 }
 
 async function chooseSearchResult(path) {
@@ -5916,7 +6122,7 @@ function onGraphDoubleClick(event) {
     return;
   }
 
-  void openGraphCreatePopover(event);
+  void trackOperation(pendingUiOperations, openGraphCreatePopover(event));
 }
 
 function focusGraph() {
@@ -6642,7 +6848,7 @@ function armNodeRope(note) {
   };
   const group = state.nodeElements.get(note.path);
   if (group) group.classList.add("ropeArmed");
-  void selectNote(note.path);
+  void trackOperation(pendingUiOperations, selectNote(note.path));
   setStatus(mode === "connect"
     ? `Drag from ${note.title} to a note to set it as parent`
     : `Drag from ${note.title} to a note to add a body link`);
@@ -8288,7 +8494,7 @@ function canDeleteCurrentSelection() {
 function setEditorEditable(isEditable) {
   if (!state.editorView) return;
   state.editorView.dispatch({
-    effects: editorEditable.reconfigure(EditorView.editable.of(isEditable))
+    effects: editorEditable.reconfigure(EditorView.editable.of(isEditable && !deepLinkBusy))
   });
 }
 

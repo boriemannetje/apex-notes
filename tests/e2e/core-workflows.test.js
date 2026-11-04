@@ -1572,6 +1572,178 @@ test("oversized reopened note preserves its previously recorded date sidecar", a
   await page.close();
 });
 
+test("cold browser links open a folder once despite startup event overlap", async () => {
+  const workspace = dateWorkspace();
+  const url = `apex-notes://open?path=${encodeURIComponent(workspace.rootPath)}`;
+  const page = await newMockedTauriPage(workspace, { deepLinks: [url], duplicateStartupLink: true });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.waitForFunction(() => document.querySelector("#noteTitle")?.textContent === "Dates" && !document.body.inert);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.filter((call) => call.command === "read_workspace").length), 1);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.filter((call) => call.command === "plugin:dialog|message").length), 1);
+  await page.close();
+});
+
+test("repeated warm sync links refresh the same workspace and disk layout each time", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  for (const index of [1, 2]) {
+    await page.evaluate((index) => {
+      const state = window.__apexTestState;
+      state.workspace.notes[0].raw += `\nRemote generation ${index}`;
+      state.workspace.positions = { "root.md": { x: 100 * index, y: 20 } };
+      state.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]);
+    }, index);
+    await page.waitForFunction((index) => !document.body.inert && document.querySelector(".cm-content")?.textContent.includes(`Remote generation ${index}`), index);
+    assert.equal(await page.evaluate(() => window.__apexTestState.calls.filter((call) => call.command === "sync_workspace").length), index);
+    assert.deepEqual(await page.locator(".node[data-path='root.md']").evaluate((node) => {
+      const matrix = node.transform.baseVal.consolidate().matrix;
+      return { x: matrix.e, y: matrix.f };
+    }), { x: 100 * index, y: 20 });
+  }
+  assert.equal(await page.locator(".workspaceTab[data-workspace-id]").count(), 1);
+  await page.close();
+});
+
+test("browser sync drains pending date and note saves and blocks edits during import", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  await page.evaluate(() => { window.__apexTestState.holdDateWrites = true; window.__apexTestState.holdSync = true; });
+  await appendDateText(page, "\nPending local edit");
+  await page.waitForFunction(() => window.__apexTestState.dateWriteResolvers.length === 1);
+  await page.evaluate(() => window.__apexTestState.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]));
+  await page.waitForFunction(() => document.body.inert);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "sync_workspace")), false);
+  await page.evaluate(() => { window.__apexTestState.holdDateWrites = false; window.__apexTestState.releaseDateWrite(); });
+  await page.waitForFunction(() => typeof window.__apexTestState.releaseSync === "function");
+  assert.equal(await page.locator(".cm-content").getAttribute("contenteditable"), "false");
+  await page.keyboard.type("must not enter note");
+  await page.evaluate(() => window.__apexTestState.releaseSync());
+  await page.waitForFunction(() => !document.body.inert);
+  assert.match(await noteRaw(page, "root.md"), /Pending local edit/);
+  assert.doesNotMatch(await noteRaw(page, "root.md"), /must not enter note/);
+  await page.close();
+});
+
+test("sync refreshes every tab alias sharing the same native note root", async () => {
+  const workspace = dateWorkspace();
+  const alias = structuredClone(workspace);
+  alias.rootPath = workspace.notesPath;
+  alias.workspaceName = "Notes alias";
+  const page = await newMockedTauriPage(workspace, { additionalWorkspaces: [alias] });
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".workspaceTabAdd").click();
+  await page.locator("#graphOpenProjectButton").click();
+  assert.equal(await page.locator(".workspaceTab[data-workspace-id]").count(), 2);
+  await page.evaluate(() => {
+    window.__apexTestState.workspace.notes[0].raw += "\nFresh shared disk content";
+    window.__apexTestState.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]);
+  });
+  await page.waitForFunction(() => !document.body.inert && document.querySelector(".cm-content")?.textContent.includes("Fresh shared disk content"));
+  await page.locator("[data-switch-workspace]").last().click();
+  assert.match(await page.locator(".cm-content").textContent(), /Fresh shared disk content/);
+  await appendDateText(page, "\nNew alias edit");
+  await page.waitForFunction(() => window.__apexTestState.workspaces[0].notes[0].raw.includes("New alias edit"));
+  assert.match(await page.evaluate(() => window.__apexTestState.workspaces[0].notes[0].raw), /Fresh shared disk content/);
+  await page.close();
+});
+
+test("an abandoned create-folder failure does not block a later browser open", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.locator("#launchCreateProjectButton").click();
+  await page.locator("#createFolderName").fill("Already exists");
+  await page.locator("#createFolderForm button[type='submit']").click();
+  await page.waitForFunction(() => document.querySelector("#launchStatus")?.textContent === "Could not create folder");
+  await page.locator("#cancelCreateFolderButton").click();
+  await page.evaluate(() => window.__apexTestState.emitDeepLinks([`apex-notes://open?path=${encodeURIComponent(window.__apexTestState.workspace.rootPath)}`]));
+  await page.waitForFunction(() => !document.body.inert && document.querySelector("#noteTitle")?.textContent === "Dates");
+  await page.close();
+});
+
+test("failed saves stop browser sync and retain editable pending text", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.evaluate(() => { window.__apexTestState.writeNoteError = "Injected save failure"; });
+  await appendDateText(page, "\nKeep this unsaved text");
+  await page.evaluate(() => window.__apexTestState.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]));
+  await page.waitForFunction(() => !document.body.inert && document.querySelector("#editorStatus")?.textContent.includes("Browser request stopped"));
+  assert.match(await page.locator(".cm-content").textContent(), /Keep this unsaved text/);
+  assert.equal(await page.locator(".cm-content").getAttribute("contenteditable"), "true");
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "sync_workspace")), false);
+  await page.close();
+});
+
+test("failed date metadata writes stop sync even when Markdown saved successfully", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.waitForFunction(() => window.__apexTestState.workspace.dates?.notes?.["root.md"]);
+  await page.evaluate(() => { window.__apexTestState.dateWriteError = "Injected sidecar write failure"; });
+  await appendDateText(page, "\nMarkdown still saves");
+  await page.waitForFunction(() => window.__apexTestState.workspace.notes[0].raw.includes("Markdown still saves"));
+  await page.evaluate(() => window.__apexTestState.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]));
+  await page.waitForFunction(() => !document.body.inert && document.querySelector("#editorStatus")?.textContent.includes("Browser request stopped"));
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "sync_workspace")), false);
+  assert.match(await noteRaw(page, "root.md"), /Markdown still saves/);
+  await page.close();
+});
+
+test("partial import warnings still reload the native recovery workspace", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.evaluate(() => {
+    const state = window.__apexTestState;
+    state.workspace.notes[0].raw += "\nRecovered native state";
+    state.syncWarning = "Some changes could not be rolled back; review recovery copies.";
+    state.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]);
+  });
+  await page.waitForFunction(() => !document.body.inert && document.querySelector("#editorStatus")?.textContent.includes("Sync needs attention"));
+  assert.match(await page.locator(".cm-content").textContent(), /Recovered native state/);
+  await page.close();
+});
+
+test("a post-import reload failure closes affected tabs instead of leaving stale text editable", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.evaluate(() => {
+    const state = window.__apexTestState;
+    state.syncReloadFailure = true;
+    state.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]);
+  });
+  await page.waitForFunction(() => !document.body.inert && document.querySelector("#launchStatus")?.textContent.includes("Reopen the synced workspace"));
+  assert.equal(await page.locator(".workspaceTab[data-workspace-id]").count(), 0);
+  assert.equal(await page.locator(".cm-content").getAttribute("contenteditable"), "false");
+  assert.doesNotMatch(await page.locator(".cm-content").textContent(), /First line/);
+  await page.close();
+});
+
+test("invalid and declined browser links do nothing; sync failure unlocks the existing workspace", async () => {
+  const page = await newMockedTauriPage(dateWorkspace());
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.evaluate(() => window.__apexTestState.emitDeepLinks(["apex-notes://sync?connection=healthy-habits&token=secret"]));
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "plugin:dialog|message")), false);
+  await page.evaluate(() => { window.__apexTestState.confirmDeepLinks = false; window.__apexTestState.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]); });
+  await page.waitForFunction(() => window.__apexTestState.calls.some((call) => call.command === "plugin:dialog|message") && !document.body.inert);
+  assert.equal(await page.evaluate(() => window.__apexTestState.calls.some((call) => call.command === "sync_workspace")), false);
+  await page.evaluate(() => {
+    window.__apexTestState.confirmDeepLinks = true;
+    window.__apexTestState.syncError = "Injected network failure";
+    window.__apexTestState.emitDeepLinks(["apex-notes://sync?connection=healthy-habits"]);
+  });
+  await page.waitForFunction(() => !document.body.inert && document.querySelector("#editorStatus")?.textContent.includes("Could not open or sync"));
+  assert.match(await page.locator(".cm-content").textContent(), /First line/);
+  assert.equal(await page.locator(".cm-content").getAttribute("contenteditable"), "true");
+  await page.close();
+});
+
 async function waitForStoredDate(page, day) {
   await page.waitForFunction((day) => window.__apexTestState.workspace.dates?.notes?.["root.md"]?.lines.some((line) => line.day === day && !line.estimated), day);
 }
@@ -1587,7 +1759,9 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     seedHoldAnnotationWrites,
     seedAnnotationWriteFailures,
     seedHoldRenameWorkspace,
-    seedDateWriteError
+    seedDateWriteError,
+    seedDeepLinks,
+    seedDuplicateStartupLink
   }) => {
     const clone = (value) => JSON.parse(JSON.stringify(value));
     const state = {
@@ -1613,6 +1787,17 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
     state.releaseDateWrite = () => state.dateWriteResolvers.shift()?.();
     state.releaseAnnotationWrite = () => state.annotationWriteResolvers.shift()?.();
     state.releaseRenameWorkspace = () => state.renameWorkspaceResolvers.shift()?.();
+    const callbacks = new Map();
+    const deepLinkListeners = new Map();
+    let callbackId = 0;
+    state.confirmDeepLinks = true;
+    state.syncError = "";
+    state.writeNoteError = "";
+    state.holdSync = false;
+    state.releaseSync = null;
+    state.emitDeepLinks = (urls) => {
+      for (const id of deepLinkListeners.values()) callbacks.get(id)?.({ event: "deep-link://new-url", payload: urls });
+    };
 
     const signatureFor = (note) => `${note.path}:${note.raw.length}`;
     const noteFiles = () => state.workspace.notes.map((note) => ({
@@ -1654,7 +1839,25 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
         invoke: async (command, args = {}) => {
           state.calls.push({ command, args: clone(args) });
 
+          if (command === "plugin:event|listen") {
+            deepLinkListeners.set(args.handler, args.handler);
+            return args.handler;
+          }
+          if (command === "plugin:event|unlisten") { deepLinkListeners.delete(args.eventId); return null; }
+          if (command === "plugin:deep-link|get_current") {
+            if (seedDuplicateStartupLink) state.emitDeepLinks(seedDeepLinks);
+            return clone(seedDeepLinks);
+          }
+          if (command === "plugin:dialog|message") return state.confirmDeepLinks ? args.buttons.OkCancelCustom[0] : "Cancel";
+          if (command === "sync_workspace") {
+            if (state.holdSync) await new Promise((resolve) => { state.releaseSync = resolve; });
+            if (state.syncError) throw new Error(state.syncError);
+            if (state.syncReloadFailure) return { workspace: null, rootPath: state.workspace.rootPath, notesPath: state.workspace.notesPath, reloadRequired: true, warning: "Reopen the synced workspace before editing.", conflicts: [], updated: 1, unchanged: 0 };
+            return { workspace: clone(state.workspace), conflicts: [], updated: 0, unchanged: state.workspace.notes.length, warning: state.syncWarning };
+          }
+
           if (command === "read_recent_projects") return [];
+          if (command === "create_workspace") throw new Error("Folder already exists");
           if (command === "default_project_location") return "/tmp";
           if (command === "read_workspace") {
             const selected = state.workspaces.find((item) => item.rootPath === args.rootPath) || state.workspace;
@@ -1682,6 +1885,7 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
             return null;
           }
           if (command === "write_note") {
+            if (state.writeNoteError) throw new Error(state.writeNoteError);
             const target = state.workspaces.find((item) => item.notesPath === args.notesPath) || state.workspace;
             let note = target.notes.find((item) => item.path === args.path);
             if (!note) {
@@ -1757,13 +1961,20 @@ async function newMockedTauriPage(workspace = sampleWorkspace(), options = {}) {
         }
       }
     };
-    window.__TAURI_INTERNALS__ = { invoke: window.__TAURI__.core.invoke };
+    window.__TAURI_INTERNALS__ = {
+      invoke: window.__TAURI__.core.invoke,
+      transformCallback: (callback) => { const id = ++callbackId; callbacks.set(id, callback); return id; },
+      unregisterCallback: (id) => callbacks.delete(id)
+    };
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => deepLinkListeners.delete(id) };
   }, {
     seedHoldInstallUpdate: options.holdInstallUpdate || false,
     seedHoldAnnotationWrites: options.holdAnnotationWrites || false,
     seedAnnotationWriteFailures: options.annotationWriteFailures || [],
     seedHoldRenameWorkspace: options.holdRenameWorkspace || false,
     seedDateWriteError: options.dateWriteError || "",
+    seedDeepLinks: options.deepLinks || [],
+    seedDuplicateStartupLink: options.duplicateStartupLink || false,
     seedInstallUpdateError: options.installUpdateError || "",
     seedWorkspace: workspace,
     seedWorkspaces: [workspace, ...(options.additionalWorkspaces || [])],
