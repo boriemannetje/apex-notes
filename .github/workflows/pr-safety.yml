@@ -69,5 +69,11 @@ jobs:
       - name: Run Rust/Tauri tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Install WebKit for canvas rendering checks
+        run: npx playwright install webkit
+
+      - name: Verify WebKit canvas screen strokes and drag updates
+        run: npm run test:e2e:webkit
+
       - name: Build Tauri release bundle
         run: npm run build

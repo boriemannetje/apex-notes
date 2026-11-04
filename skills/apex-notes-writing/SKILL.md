@@ -1,6 +1,6 @@
 ---
 name: apex-notes-writing
-description: Create, edit, import, delete, and connect Apex Notes (Apex Nodes) Markdown notes, or create named canvas lines, squares, circles, freehand strokes, and text through the workspace annotation sidecar. Preserve hierarchy, dates, and existing canvas content.
+description: Create, edit, import, delete, and connect Apex Notes (Apex Nodes) Markdown notes, or create named canvas lines, rectangles, circles, freehand strokes, and text through the workspace annotation sidecar. Preserve hierarchy, dates, legacy squares, and existing canvas content.
 ---
 
 # Apex Notes Writing
@@ -70,10 +70,13 @@ Use graph/world coordinates, not screen pixels: x increases rightward, y downwar
 
 Every item has a nonempty unique string `id` and a `type`. Only these fields are supported:
 
+Rectangles require Apex Notes 0.1.11 or newer. Confirm that version before adding rectangle items; older apps reject the unknown type and leave annotation writes disabled. The document remains version 1. Existing `square` items remain supported without a migration on load. Prefer `rectangle` for new boxes, including equal-sided ones (`width === height`).
+
 | Type | Geometry/content fields | Optional visible name |
 | --- | --- | --- |
 | `line` | `x1`, `y1`, `x2`, `y2` (distinct endpoints) | `name` |
-| `square` | `x`, `y` (top-left), `size` (positive equal side length) | `name` |
+| `rectangle` | `x`, `y` (top-left), `width`, `height` (independent positive dimensions) | `name` |
+| `square` (legacy) | `x`, `y` (top-left), `size` (positive equal side length) | `name` |
 | `circle` | `cx`, `cy` (center), `radius` (positive) | `name` |
 | `stroke` | `points`: array of `{ "x": number, "y": number }` | None |
 | `text` | `x`, `y` (text origin), `text` (string; `\n` for multiline) | None; use `text` |
@@ -84,7 +87,7 @@ Example complete document for a NEW empty annotation canvas:
 {
   "version": 1,
   "items": [
-    { "id": "idea-boundary", "type": "square", "x": -200, "y": -200, "size": 400, "name": "Ideas" },
+    { "id": "idea-boundary", "type": "rectangle", "x": -200, "y": -200, "width": 400, "height": 280, "name": "Ideas" },
     { "id": "review-area", "type": "circle", "cx": 500, "cy": 0, "radius": 140, "name": "Review" },
     { "id": "next-step", "type": "line", "x1": 220, "y1": 0, "x2": 340, "y2": 0, "name": "Next step" },
     { "id": "freehand-mark", "type": "stroke", "points": [{ "x": -180, "y": 240 }, { "x": -80, "y": 270 }, { "x": 20, "y": 240 }] },
@@ -93,11 +96,11 @@ Example complete document for a NEW empty annotation canvas:
 }
 ```
 
-Rename with `name` on a line/square/circle; move by changing its coordinates (both endpoints for a line, every point for a stroke); resize with endpoints, `size`, or `radius`. Preserve equal-sided squares and circular circles. No rectangles, arrows, color/fill controls, grouping, custom layers, or arbitrary extra fields in v1. The Pen toolbar produces `stroke` items, not a `pen` type.
+Rename with `name` on a line/rectangle/legacy square/circle; move by changing its coordinates (both endpoints for a line, every point for a stroke). Resize rectangles with independent `width` and `height`, lines with endpoints, and circles with `radius`. The Rectangle toolbar replaces the old Square tool. Explicitly resizing a legacy square in the app converts only that item to a rectangle, preserving its ID/name and supporting undo. Do not bulk-rewrite legacy squares when adding or moving other items. Agents can make the same conversion when asked to resize a legacy box: replace `type`/`size` with `type: "rectangle"`, `width`, and `height`, retaining the other fields. Circles stay circular. No arrows, color/fill controls, grouping, custom layers, or arbitrary extra fields in v1. The Pen toolbar produces `stroke` items, not a `pen` type.
 
 ### Validation limits
 
-- All geometry must be finite JSON numbers, not strings, null, NaN, or Infinity. Lines must have distinct endpoints; squares/circles must have positive dimensions.
+- All geometry must be finite JSON numbers, not strings, null, NaN, or Infinity. Lines must have distinct endpoints; rectangle width/height, legacy square size, and circle radius must be positive.
 - At most 5,000 items; at most 4 MiB serialized UTF-8 JSON (keep the on-disk file within this limit too).
 - Stroke: 2–4,096 points, with at least two distinct points; at most 100,000 stroke points across the document. Simplify long freehand paths before saving.
 - Names: at most 120 Unicode characters. Text: at most 20,000 per text item. Combined names + text: at most 200,000. These are Unicode code-point counts, not UTF-16 code units.

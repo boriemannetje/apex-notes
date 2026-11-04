@@ -340,7 +340,8 @@ test("annotation labels, keyboard access, viewport clamping, wheel routing, and 
 
   const labelBox = await page.locator(".annotationLabelHit").boundingBox();
   assert(labelBox);
-  const annotationWheel = await page.locator(".annotationLabelHit").evaluate((element, init) => {
+  const annotationWheel = await page.evaluate((init) => {
+    const element = document.querySelector(".annotationLabelHit");
     const event = new WheelEvent("wheel", { ...init, bubbles: true, cancelable: true });
     element.dispatchEvent(event);
     return { defaultPrevented: event.defaultPrevented };
@@ -958,7 +959,9 @@ test("canvas screen strokes and resize handles stay stable through extreme zoom 
   const clientX = graph.x + graph.width / 2;
   const clientY = graph.y + graph.height / 2;
   const assertStrokeSizes = async () => {
-    const metrics = await page.locator(".graphCanvas").evaluate((canvas) => {
+    const metrics = await page.evaluate(() => {
+      // Selection saves may replace SVG groups; sample the attached tree atomically.
+      const canvas = document.querySelector(".graphCanvas");
       const width = (selector) => {
         const element = canvas.querySelector(selector);
         const css = getComputedStyle(element);
