@@ -15,10 +15,17 @@
         "id": "stroke",
         "type": "stroke",
         "points": [{ "x": 0, "y": 0 }, { "x": 0.1, "y": 0 }]
-      }
+      },
+      { "id": "rectangle", "type": "rectangle", "x": -20, "y": 30, "width": 90, "height": 25, "name": "Wide area" },
+      { "id": "legacy-square", "type": "square", "x": 4, "y": 8, "size": 12 }
     ]
   },
   "invalid": [
+    { "version": 1, "items": [{ "id": "rectangle", "type": "rectangle", "x": 0, "y": 0, "width": 0, "height": 25 }] },
+    { "version": 1, "items": [{ "id": "rectangle", "type": "rectangle", "x": 0, "y": 0, "width": 90, "height": -1 }] },
+    { "version": 1, "items": [{ "id": "rectangle", "type": "rectangle", "x": 0, "y": 0, "width": 90, "height": null }] },
+    { "version": 1, "items": [{ "id": "rectangle", "type": "rectangle", "x": 0, "y": 0, "width": "90", "height": 25 }] },
+    { "version": 1, "items": [{ "id": "rectangle", "type": "rectangle", "x": 0, "y": 0, "width": 90, "height": 25, "size": 90 }] },
     { "version": 1, "items": [{ "id": "   ", "type": "text", "x": 0, "y": 0, "text": "blank id" }] },
     { "version": 1, "items": [{ "id": "line", "type": "line", "x1": 1, "y1": 1, "x2": 1, "y2": 1 }] },
     { "version": 1, "items": [{ "id": "stroke", "type": "stroke", "points": [{ "x": 1, "y": 1 }, { "x": 1, "y": 1 }] }] },

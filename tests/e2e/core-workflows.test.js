@@ -167,7 +167,7 @@ test("annotation-only workspaces fit and corrupt sidecars disable drawing", asyn
   await blocked.close();
 });
 
-test("annotation tools support pen and constrained shapes without rebuilding the graph per frame", async () => {
+test("annotation tools support pen, independent rectangles and circles without rebuilding the graph per frame", async () => {
   const page = await newMockedTauriPage();
   await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: "Open project" }).click();
@@ -176,7 +176,7 @@ test("annotation tools support pen and constrained shapes without rebuilding the
 
   for (const [tool, start, end] of [
     ["pen", [240, 380], [330, 420]],
-    ["square", [520, 220], [610, 300]],
+    ["rectangle", [520, 220], [670, 280]],
     ["circle", [540, 430], [620, 480]]
   ]) {
     await page.locator(`[data-annotation-tool='${tool}']`).click();
@@ -190,9 +190,11 @@ test("annotation tools support pen and constrained shapes without rebuilding the
     }
   }
   assert.equal(await page.locator(".annotationItem[data-annotation-type='stroke']").count(), 1);
-  assert.equal(await page.locator(".annotationItem[data-annotation-type='square']").count(), 1);
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='rectangle']").count(), 1);
   assert.equal(await page.locator(".annotationItem[data-annotation-type='circle']").count(), 1);
-  assert.deepEqual(await page.locator(".annotationLabel").allTextContents(), ["square name", "circle name"]);
+  assert.deepEqual(await page.locator(".annotationLabel").allTextContents(), ["rectangle name", "circle name"]);
+  const drawnRectangle = await page.evaluate(() => window.__apexTestState.workspace.annotations.items.find((item) => item.type === "rectangle"));
+  assert(drawnRectangle.width > drawnRectangle.height * 2.4 && drawnRectangle.width < drawnRectangle.height * 2.6);
 
   await page.locator("[data-annotation-tool='line']").click();
   await page.mouse.move(graph.x + 700, graph.y + 240);
@@ -227,21 +229,67 @@ test("annotation tools support pen and constrained shapes without rebuilding the
   assert.equal(await page.locator(".annotationItem").count(), beforePanCount);
 
   await page.locator("[data-annotation-tool='select']").click();
-  const squareHit = page.locator(".annotationItem[data-annotation-type='square'] .annotationHit");
-  const squareBox = await squareHit.boundingBox();
-  assert(squareBox);
-  await page.mouse.move(squareBox.x + 2, squareBox.y + squareBox.height / 2);
+  const rectangleHit = page.locator(".annotationItem[data-annotation-type='rectangle'] .annotationHit");
+  const rectangleBox = await rectangleHit.boundingBox();
+  assert(rectangleBox);
+  await page.mouse.move(rectangleBox.x + 2, rectangleBox.y + rectangleBox.height / 2);
   await page.mouse.down();
   await page.evaluate(() => { window.__annotationCanvasBeforeMove = document.querySelector(".graphCanvas"); });
-  await page.mouse.move(squareBox.x + 42, squareBox.y + squareBox.height / 2 + 25, { steps: 5 });
+  await page.mouse.move(rectangleBox.x + 42, rectangleBox.y + rectangleBox.height / 2 + 25, { steps: 5 });
   await page.waitForTimeout(40);
   assert.equal(await page.evaluate(() => window.__annotationCanvasBeforeMove === document.querySelector(".graphCanvas")), true);
   await page.mouse.up();
 
-  const handle = page.locator(".annotationItem[data-annotation-type='square'] .annotationHandleHit");
+  const handle = page.locator(".annotationItem[data-annotation-type='rectangle'] .annotationHandleHit");
   await handle.dragTo(page.locator("#graph"), { targetPosition: { x: 800, y: 600 } });
+  assert.equal(await page.locator(".annotationItem[data-annotation-type='rectangle']").count(), 1);
+
+  await page.close();
+});
+
+test("legacy squares resize into rectangles only after a gesture and undo restores the original type", async () => {
+  const workspace = sampleWorkspace();
+  workspace.notes = [];
+  const legacy = { id: "legacy-box", type: "square", x: 100, y: 120, size: 180, name: "Existing area" };
+  workspace.annotations = { version: 1, items: [legacy] };
+  const page = await newMockedTauriPage(workspace);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const box = await page.locator(".annotationItem .annotationHit").boundingBox();
+  assert(box);
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations.items[0]), legacy);
+  await page.mouse.click(box.x + 2, box.y + box.height / 2);
+  const handle = await page.locator(".annotationHandleHit").boundingBox();
+  assert(handle);
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2 - 80, handle.y + handle.height / 2 - 30, { steps: 4 });
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations.items[0]), legacy);
   assert.equal(await page.locator(".annotationItem[data-annotation-type='square']").count(), 1);
 
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2 - 80, handle.y + handle.height / 2 - 30, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items[0].type === "rectangle");
+  const resized = await page.evaluate(() => window.__apexTestState.workspace.annotations.items[0]);
+  assert.equal(resized.id, legacy.id);
+  assert.equal(resized.name, legacy.name);
+  assert(resized.width < resized.height);
+  assert.equal(Object.hasOwn(resized, "size"), false);
+  await page.locator("#graph").focus();
+  await pressShortcut(page, "Z");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items[0].type === "square");
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations.items[0]), legacy);
+  await pressShortcut(page, "Y");
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items[0].type === "rectangle");
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations.items[0]), resized);
+  await page.locator(".workspaceTabClose").click();
+  await page.getByRole("button", { name: "Open project" }).click();
+  await page.locator(".annotationItem[data-annotation-type='rectangle']").waitFor();
+  assert.deepEqual(await page.evaluate(() => window.__apexTestState.workspace.annotations.items[0]), resized);
   await page.close();
 });
 

@@ -85,6 +85,7 @@ import {
   emptyAnnotationDocument,
   hitTestAnnotation,
   normalizeAnnotationDocument,
+  rectangleGeometry,
   resizeAnnotation,
   simplifyStroke,
   translateAnnotation
@@ -4390,7 +4391,7 @@ function createAnnotationGroup(item) {
     group.setAttribute("tabindex", "0");
     group.setAttribute("aria-label", `${item.type} annotation${item.name ? `: ${item.name}` : ""}`);
 
-    const shape = document.createElementNS("http://www.w3.org/2000/svg", item.type === "circle" ? "circle" : item.type === "square" ? "rect" : item.type === "text" ? "text" : "path");
+    const shape = document.createElementNS("http://www.w3.org/2000/svg", item.type === "circle" ? "circle" : (item.type === "square" || item.type === "rectangle") ? "rect" : item.type === "text" ? "text" : "path");
     shape.setAttribute("class", item.type === "text" ? "annotationText" : "annotationShape");
     setAnnotationShapeGeometry(shape, item);
     group.appendChild(shape);
@@ -4409,7 +4410,7 @@ function createAnnotationGroup(item) {
       group.insertBefore(hit, shape);
     }
 
-    if (item.name && (item.type === "line" || item.type === "square" || item.type === "circle")) {
+    if (item.name && (item.type === "line" || item.type === "square" || item.type === "rectangle" || item.type === "circle")) {
       const labelPoint = annotationLabelPoint(item);
       const labelHit = document.createElementNS("http://www.w3.org/2000/svg", "rect");
       const labelWidth = Math.max(24, [...item.name].length * 7.5 + 12);
@@ -4443,6 +4444,8 @@ function setAnnotationShapeGeometry(element, item) {
   else if (item.type === "stroke") element.setAttribute("d", item.points.map((point, index) => `${index ? "L" : "M"} ${round(point.x)} ${round(point.y)}`).join(" "));
   else if (item.type === "square") {
     element.setAttribute("x", String(item.x)); element.setAttribute("y", String(item.y)); element.setAttribute("width", String(item.size)); element.setAttribute("height", String(item.size));
+  } else if (item.type === "rectangle") {
+    element.setAttribute("x", String(item.x)); element.setAttribute("y", String(item.y)); element.setAttribute("width", String(item.width)); element.setAttribute("height", String(item.height));
   } else if (item.type === "circle") {
     element.setAttribute("cx", String(item.cx)); element.setAttribute("cy", String(item.cy)); element.setAttribute("r", String(item.radius));
   } else {
@@ -4460,6 +4463,8 @@ function appendAnnotationHandles(group, item) {
     ? [{ key: "start", x: item.x1, y: item.y1 }, { key: "end", x: item.x2, y: item.y2 }]
     : item.type === "square"
       ? [{ key: "size", x: item.x + item.size, y: item.y + item.size }]
+      : item.type === "rectangle"
+        ? [{ key: "size", x: item.x + item.width, y: item.y + item.height }]
       : [{ key: "radius", x: item.cx + item.radius, y: item.cy }];
   for (const point of points) {
     const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
@@ -6152,7 +6157,7 @@ function setAnnotationTool(tool) {
     return;
   }
   if (!hasWritableWorkspace() || state.annotationsError) tool = "select";
-  state.annotationTool = ["select", "pen", "line", "square", "circle", "text"].includes(tool) ? tool : "select";
+  state.annotationTool = ["select", "pen", "line", "rectangle", "circle", "text"].includes(tool) ? tool : "select";
   if (state.annotationTool !== "select") state.selectedAnnotationId = null;
   syncAnnotationControls();
   renderGraph({ preserveView: true });
@@ -6350,7 +6355,7 @@ function startAnnotationDrawing(event) {
   const id = createAnnotationId();
   let item;
   if (state.annotationTool === "line") item = { id, type: "line", x1: point.x, y1: point.y, x2: point.x, y2: point.y };
-  else if (state.annotationTool === "square") item = { id, type: "square", x: point.x, y: point.y, size: 1 };
+  else if (state.annotationTool === "rectangle") item = { id, type: "rectangle", x: point.x, y: point.y, width: 1, height: 1 };
   else if (state.annotationTool === "circle") item = { id, type: "circle", cx: point.x, cy: point.y, radius: 1 };
   else if (state.annotationTool === "pen") item = { id, type: "stroke", points: [point, { ...point }] };
   else item = { id, type: "text", x: point.x, y: point.y, text: "" };
@@ -6926,7 +6931,7 @@ function continueInteraction(event) {
     const item = findAnnotation(interaction.annotationId);
     if (!item) return;
     if (item.type === "line") { item.x2 = point.x; item.y2 = point.y; }
-    else if (item.type === "square") { item.size = Math.max(1, Math.max(Math.abs(point.x - interaction.start.x), Math.abs(point.y - interaction.start.y))); item.x = point.x < interaction.start.x ? interaction.start.x - item.size : interaction.start.x; item.y = point.y < interaction.start.y ? interaction.start.y - item.size : interaction.start.y; }
+    else if (item.type === "rectangle") Object.assign(item, rectangleGeometry(interaction.start, point));
     else if (item.type === "circle") item.radius = Math.max(1, Math.hypot(point.x - interaction.start.x, point.y - interaction.start.y));
     else if (item.type === "stroke" && item.points.length < 4096 && Math.hypot(point.x - item.points[item.points.length - 1].x, point.y - item.points[item.points.length - 1].y) > 0.75) item.points.push(point);
     refreshAnnotationElement(item);
@@ -7031,14 +7036,17 @@ async function endInteraction(event) {
     if (item.type === "stroke") item.points = simplifyStroke(item.points, 1.5 / Math.max(state.view.scale, 0.1));
     const saved = await finishAnnotationChange("draw annotation", interaction.historyBefore);
     const currentItem = findAnnotation(interaction.annotationId);
-    if (saved && currentItem && (currentItem.type === "line" || currentItem.type === "square" || currentItem.type === "circle")) openAnnotationEditor(currentItem);
+    if (saved && currentItem && (currentItem.type === "line" || currentItem.type === "square" || currentItem.type === "rectangle" || currentItem.type === "circle")) openAnnotationEditor(currentItem);
     return;
   }
 
   if (interaction.type === "annotation-move" || interaction.type === "annotation-resize") {
     state.activeInteraction = null;
     if (interaction.moved) await finishAnnotationChange(interaction.type === "annotation-move" ? "move annotation" : "resize annotation", interaction.historyBefore);
-    else renderGraph({ preserveView: true });
+    else {
+      state.annotations = cloneAnnotationDocument(interaction.historyBefore.annotations);
+      renderGraph({ preserveView: true });
+    }
     return;
   }
 

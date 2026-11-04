@@ -134,6 +134,7 @@ impl Default for AnnotationDocument {
 enum AnnotationItem {
     Line(AnnotationLine),
     Square(AnnotationSquare),
+    Rectangle(AnnotationRectangle),
     Circle(AnnotationCircle),
     Stroke(AnnotationStroke),
     Text(AnnotationText),
@@ -169,6 +170,18 @@ struct AnnotationCircle {
     cx: f64,
     cy: f64,
     radius: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AnnotationRectangle {
+    id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
 }
@@ -1169,6 +1182,25 @@ fn validate_annotations(annotations: &AnnotationDocument) -> Result<(), String> 
                     circle.name.as_deref().unwrap_or(""),
                 )?;
             }
+            AnnotationItem::Rectangle(rectangle) => {
+                validate_finite(&[
+                    rectangle.x,
+                    rectangle.y,
+                    rectangle.width,
+                    rectangle.height,
+                ])?;
+                if rectangle.width <= 0.0 || rectangle.height <= 0.0 {
+                    return Err(format!(
+                        "Rectangle annotation {} has invalid dimensions",
+                        rectangle.id
+                    ));
+                }
+                validate_name(rectangle.name.as_deref())?;
+                total_text_chars = add_annotation_text_chars(
+                    total_text_chars,
+                    rectangle.name.as_deref().unwrap_or(""),
+                )?;
+            }
             AnnotationItem::Stroke(stroke) => {
                 if stroke.points.len() < 2 {
                     return Err(format!(
@@ -1235,6 +1267,7 @@ fn annotation_id(item: &AnnotationItem) -> &str {
     match item {
         AnnotationItem::Line(item) => &item.id,
         AnnotationItem::Square(item) => &item.id,
+        AnnotationItem::Rectangle(item) => &item.id,
         AnnotationItem::Circle(item) => &item.id,
         AnnotationItem::Stroke(item) => &item.id,
         AnnotationItem::Text(item) => &item.id,
@@ -2134,7 +2167,22 @@ mod tests {
     #[test]
     fn annotations_round_trip_through_the_native_writer() {
         let notes = temp_notes_dir("annotations-round-trip");
-        let annotations = sample_annotations();
+        let mut annotations = sample_annotations();
+        annotations.items.push(AnnotationItem::Rectangle(AnnotationRectangle {
+            id: "wide-rectangle".into(),
+            x: -20.0,
+            y: 30.0,
+            width: 90.0,
+            height: 25.0,
+            name: Some("Wide area".into()),
+        }));
+        annotations.items.push(AnnotationItem::Square(AnnotationSquare {
+            id: "legacy-square".into(),
+            x: 4.0,
+            y: 8.0,
+            size: 12.0,
+            name: None,
+        }));
 
         write_annotations_blocking(notes.to_string_lossy().into_owned(), annotations.clone())
             .expect("write annotations");

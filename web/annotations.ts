@@ -10,12 +10,13 @@ export const MAX_ANNOTATION_DOCUMENT_BYTES = 4 * 1024 * 1024;
 export type Point = { x: number; y: number };
 export type LineAnnotation = { id: string; type: "line"; x1: number; y1: number; x2: number; y2: number; name?: string };
 export type SquareAnnotation = { id: string; type: "square"; x: number; y: number; size: number; name?: string };
+export type RectangleAnnotation = { id: string; type: "rectangle"; x: number; y: number; width: number; height: number; name?: string };
 export type CircleAnnotation = { id: string; type: "circle"; cx: number; cy: number; radius: number; name?: string };
 export type StrokeAnnotation = { id: string; type: "stroke"; points: Point[] };
 export type TextAnnotation = { id: string; type: "text"; x: number; y: number; text: string };
-export type Annotation = LineAnnotation | SquareAnnotation | CircleAnnotation | StrokeAnnotation | TextAnnotation;
+export type Annotation = LineAnnotation | SquareAnnotation | RectangleAnnotation | CircleAnnotation | StrokeAnnotation | TextAnnotation;
 export type AnnotationDocument = { version: 1; items: Annotation[] };
-export type AnnotationTool = "select" | "pen" | "line" | "square" | "circle" | "text";
+export type AnnotationTool = "select" | "pen" | "line" | "rectangle" | "circle" | "text";
 
 export const emptyAnnotationDocument = (): AnnotationDocument => ({ version: ANNOTATION_VERSION, items: [] });
 
@@ -27,6 +28,7 @@ const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
 const allowedKeysByType = {
   line: new Set(["id", "type", "x1", "y1", "x2", "y2", "name"]),
   square: new Set(["id", "type", "x", "y", "size", "name"]),
+  rectangle: new Set(["id", "type", "x", "y", "width", "height", "name"]),
   circle: new Set(["id", "type", "cx", "cy", "radius", "name"]),
   stroke: new Set(["id", "type", "points"]),
   text: new Set(["id", "type", "x", "y", "text"])
@@ -87,6 +89,11 @@ function normalizeAnnotation(raw: unknown, index: number): Annotation {
     if ((item.radius as number) <= 0) throw new Error(`Degenerate circle at index ${index}`);
     return withName({ id, type: "circle", cx: item.cx as number, cy: item.cy as number, radius: item.radius as number }, name);
   }
+  if (item.type === "rectangle") {
+    requireFinite(item, ["x", "y", "width", "height"], index);
+    if ((item.width as number) <= 0 || (item.height as number) <= 0) throw new Error(`Degenerate rectangle at index ${index}`);
+    return withName({ id, type: "rectangle", x: item.x as number, y: item.y as number, width: item.width as number, height: item.height as number }, name);
+  }
   if (item.type === "stroke") {
     if (!Array.isArray(item.points) || item.points.length < 2 || item.points.length > MAX_STROKE_POINTS) {
       throw new Error(`Invalid stroke points at index ${index}`);
@@ -130,6 +137,7 @@ export function cloneAnnotationDocument(document: AnnotationDocument): Annotatio
 export function annotationBounds(item: Annotation) {
   if (item.type === "line") return bounds(item.x1, item.y1, item.x2, item.y2);
   if (item.type === "square") return { minX: item.x, minY: item.y, maxX: item.x + item.size, maxY: item.y + item.size, width: item.size, height: item.size };
+  if (item.type === "rectangle") return { minX: item.x, minY: item.y, maxX: item.x + item.width, maxY: item.y + item.height, width: item.width, height: item.height };
   if (item.type === "circle") return { minX: item.cx - item.radius, minY: item.cy - item.radius, maxX: item.cx + item.radius, maxY: item.cy + item.radius, width: item.radius * 2, height: item.radius * 2 };
   if (item.type === "text") return { minX: item.x, minY: item.y - 18, maxX: item.x + Math.max(24, longestLine(item.text) * 8), maxY: item.y + Math.max(18, item.text.split("\n").length * 18), width: Math.max(24, longestLine(item.text) * 8), height: Math.max(36, item.text.split("\n").length * 18) };
   const xs = item.points.map((point) => point.x);
@@ -156,7 +164,7 @@ export function documentBounds(document: AnnotationDocument) {
 
 export function translateAnnotation(item: Annotation, dx: number, dy: number): Annotation {
   if (item.type === "line") return { ...item, x1: item.x1 + dx, y1: item.y1 + dy, x2: item.x2 + dx, y2: item.y2 + dy };
-  if (item.type === "square") return { ...item, x: item.x + dx, y: item.y + dy };
+  if (item.type === "square" || item.type === "rectangle") return { ...item, x: item.x + dx, y: item.y + dy };
   if (item.type === "circle") return { ...item, cx: item.cx + dx, cy: item.cy + dy };
   if (item.type === "text") return { ...item, x: item.x + dx, y: item.y + dy };
   return { ...item, points: item.points.map((point) => ({ x: point.x + dx, y: point.y + dy })) };
@@ -164,9 +172,20 @@ export function translateAnnotation(item: Annotation, dx: number, dy: number): A
 
 export function resizeAnnotation(item: Annotation, handle: string, point: Point): Annotation {
   if (item.type === "line") return handle === "start" ? { ...item, x1: point.x, y1: point.y } : { ...item, x2: point.x, y2: point.y };
-  if (item.type === "square") return { ...item, size: Math.max(1, Math.max(Math.abs(point.x - item.x), Math.abs(point.y - item.y))) };
+  if (item.type === "square" || item.type === "rectangle") {
+    return withName({ id: item.id, type: "rectangle", ...rectangleGeometry(item, point) }, item.name);
+  }
   if (item.type === "circle") return { ...item, radius: Math.max(1, Math.hypot(point.x - item.cx, point.y - item.cy)) };
   return item;
+}
+
+export function rectangleGeometry(start: Point, end: Point) {
+  return {
+    x: Math.min(start.x, end.x),
+    y: Math.min(start.y, end.y),
+    width: Math.max(1, Math.abs(end.x - start.x)),
+    height: Math.max(1, Math.abs(end.y - start.y))
+  };
 }
 
 export function simplifyStroke(points: Point[], tolerance = 1.5): Point[] {
@@ -202,9 +221,10 @@ function distanceToSegment(point: Point, start: Point, end: Point) {
   return Math.hypot(point.x - (start.x + t * (end.x - start.x)), point.y - (start.y + t * (end.y - start.y)));
 }
 
-export function annotationLabelPoint(item: LineAnnotation | SquareAnnotation | CircleAnnotation) {
+export function annotationLabelPoint(item: LineAnnotation | SquareAnnotation | RectangleAnnotation | CircleAnnotation) {
   if (item.type === "line") return { x: (item.x1 + item.x2) / 2, y: (item.y1 + item.y2) / 2 - 8 };
   if (item.type === "square") return { x: item.x + item.size / 2, y: item.y - 8 };
+  if (item.type === "rectangle") return { x: item.x + item.width / 2, y: item.y - 8 };
   return { x: item.cx, y: item.cy - item.radius - 8 };
 }
 
