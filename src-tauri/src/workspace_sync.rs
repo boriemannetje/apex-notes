@@ -341,6 +341,7 @@ fn validate_export(export: &Export) -> Result<(), String> {
     let mut bytes = 0usize;
     // Case-insensitive macOS filesystems must not alias two incoming destinations.
     let mut names = BTreeSet::new();
+    let mut directory_spellings = BTreeMap::new();
     let all_paths: BTreeSet<_> = export
         .files
         .keys()
@@ -360,6 +361,13 @@ fn validate_export(export: &Export) -> Result<(), String> {
                 prefix.push('/');
             }
             prefix.push_str(part);
+            if let Some(previous) =
+                directory_spellings.insert(prefix.to_ascii_lowercase(), prefix.clone())
+            {
+                if previous != prefix {
+                    return Err("Export contains case-colliding directory prefixes".into());
+                }
+            }
             if all_paths.contains(&prefix.to_ascii_lowercase()) {
                 return Err("Export contains a file/directory path collision".into());
             }
@@ -1156,11 +1164,15 @@ mod tests {
         for incoming in [
             export(&[("a.md", "A"), ("a.md/b.md", "B")]),
             export(&[("A.md", "A"), ("a.md/b.md", "B")]),
+            export(&[("A/root.md", "A"), ("a/child.md", "B")]),
+            export(&[("year/Month/a.md", "A"), ("year/month/b.md", "B")]),
             export(&[("café.md", "A")]),
             export(&[("cafe\u{301}.md", "A")]),
         ] {
             assert!(import_export(&fixture.0, "diary", incoming).is_err());
             assert!(!fixture.0.join("a.md").exists());
+            assert!(!fixture.0.join("A").exists());
+            assert!(!fixture.0.join("year").exists());
         }
         fs::write(fixture.0.join("Day.md"), "private local note").unwrap();
         assert!(import_export(&fixture.0, "diary", export(&[("day.md", "remote")])).is_err());
