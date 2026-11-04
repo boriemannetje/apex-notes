@@ -5,6 +5,17 @@ import { MAX_ANNOTATION_DOCUMENT_BYTES, MAX_ANNOTATION_NAME_LENGTH, MAX_ANNOTATI
 
 const parityFixtures = JSON.parse(readFileSync(new URL("../../tests/fixtures/annotations-parity.json", import.meta.url), "utf8"));
 
+test("downloadable agent skill examples produce valid canvas annotations", () => {
+  const skill = readFileSync(new URL("../../skills/apex-notes-writing/SKILL.md", import.meta.url), "utf8");
+  const examples = [...skill.matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
+  assert.ok(examples.length > 0, "Agents need a usable annotation document example");
+  for (const [, source] of examples) {
+    const document = normalizeAnnotationDocument(JSON.parse(source));
+    assert.ok(document.items.length > 0);
+    assert.ok(documentBounds(document), "Example shapes must be fittable on the canvas");
+  }
+});
+
 test("normalizes a valid document and rejects unsafe data", () => {
   const document = normalizeAnnotationDocument({ version: 1, items: [{ id: "a", type: "square", x: 1, y: 2, size: 10, name: " Box " }] });
   assert.equal(document.items[0].type, "square");

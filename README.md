@@ -78,7 +78,9 @@ The reusable writing-agent skill lives at:
 skills/apex-notes-writing/SKILL.md
 ```
 
-Put that skill in your note-taking folder or agent skill folder so a writing agent knows how to create notes, set `parent`, update `manifest.json`, and add contextual reference links through body wiki links.
+Put that skill in your note-taking folder or agent skill folder so an agent knows how to create notes, set `parent`, update `manifest.json`, and add contextual reference links through body wiki links. It also documents the agent-accessible `annotations.json` interface for named lines, squares, circles, freehand strokes, and multiline canvas text, with a valid example, coordinate rules, validation limits, and safe merge/reopen instructions. Shapes remain behind nodes and never change hierarchy. The skill explains automatic dates and how to preserve `dates.json` during external edits.
+
+The website's **Download skill** button points to the latest release's `apex-notes-SKILL.md`; the same self-contained instructions are also included in `apex-notes-writing-skill.zip`. The production release workflow publishes both from `skills/apex-notes-writing/`.
 
 ## Website
 
