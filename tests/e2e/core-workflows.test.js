@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { chromium } from "playwright";
+import { chromium, webkit } from "playwright";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const webRoot = path.join(repoRoot, "web");
@@ -18,7 +18,7 @@ let browser;
 
 test.before(async () => {
   ({ server, baseUrl } = await serveWebRoot());
-  browser = await chromium.launch({ headless: true });
+  browser = await (process.env.APEX_E2E_BROWSER === "webkit" ? webkit : chromium).launch({ headless: true });
 });
 
 test.after(async () => {
@@ -886,6 +886,74 @@ test("mouse wheel zoom is continuous, cursor anchored, bounded, and canvas scope
   }
   assert(Math.abs((await graphWheelSnapshot(page, clientX, clientY)).scale - 0.02) < 1e-6);
 
+  await page.close();
+});
+
+test("canvas screen strokes and resize handles stay stable through extreme zoom and dragging", async () => {
+  const workspace = sampleWorkspace();
+  workspace.annotations.items = [
+    { id: "paint-box", type: "square", x: -5000, y: -5000, size: 10000, name: "Boundary" },
+    { id: "paint-line", type: "line", x1: -6000, y1: 6000, x2: 6000, y2: 6000 }
+  ];
+  const page = await newMockedTauriPage(workspace);
+  await page.goto(`${baseUrl}/index.html`, { waitUntil: "networkidle" });
+  await page.getByRole("button", { name: "Open project" }).click();
+  const shape = page.locator("[data-annotation-id='paint-box'] .annotationShape");
+  const edgePoint = await shape.evaluate((element) => {
+    const box = element.getBBox();
+    const point = new DOMPoint(box.x, box.y + box.height * 0.3).matrixTransform(element.getScreenCTM());
+    return { x: point.x, y: point.y };
+  });
+  await page.mouse.click(edgePoint.x, edgePoint.y);
+  await page.locator(".annotationHandle").waitFor();
+  const graph = await page.locator("#graph").boundingBox();
+  const clientX = graph.x + graph.width / 2;
+  const clientY = graph.y + graph.height / 2;
+  const assertStrokeSizes = async () => {
+    const metrics = await page.locator(".graphCanvas").evaluate((canvas) => {
+      const width = (selector) => {
+        const element = canvas.querySelector(selector);
+        const css = getComputedStyle(element);
+        const matrix = element.getScreenCTM();
+        return parseFloat(css.strokeWidth) * (css.vectorEffect === "non-scaling-stroke" ? 1 : Math.hypot(matrix.a, matrix.b));
+      };
+      const handle = canvas.querySelector(".annotationHandle");
+      return {
+        handle: width(".annotationHandle"),
+        handleRadius: Number(handle.getAttribute("r")) * Math.hypot(handle.getScreenCTM().a, handle.getScreenCTM().b),
+        selected: width("[data-annotation-id='paint-box'] .annotationShape"),
+        line: width("[data-annotation-id='paint-line'] .annotationShape"),
+        hit: width(".annotationHit"),
+        hierarchy: width(".hierarchyEdge")
+      };
+    });
+    for (const [key, expected] of Object.entries({ handle: 1.5, handleRadius: 5, selected: 2.2, line: 1.6, hit: 18, hierarchy: 1 })) {
+      assert(Math.abs(metrics[key] - expected) < 0.02, `${key}: expected ${expected}px, got ${metrics[key]}px`);
+    }
+  };
+  for (let index = 0; index < 30; index += 1) await dispatchGraphWheel(page, { clientX, clientY, deltaY: 10_000 });
+  await assertStrokeSizes();
+  for (let index = 0; index < 20; index += 1) await dispatchGraphWheel(page, { clientX, clientY, deltaY: -10_000 });
+  await assertStrokeSizes();
+  await dispatchGraphWheel(page, { clientX, clientY, deltaY: 13 });
+  await assertStrokeSizes();
+  await page.getByRole("button", { name: "Fit graph to view", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".graphCanvas").transform.baseVal.consolidate().matrix.a < 0.1);
+  // Wait for the animated fit's geometry to settle through actionability,
+  // rather than starting a coordinate drag halfway through that animation.
+  await page.locator("[data-annotation-id='paint-box']").hover({ position: { x: 1, y: 180 } });
+  const start = await shape.evaluate((element) => {
+    const box = element.getBBox();
+    const point = new DOMPoint(box.x, box.y + box.height * 0.3).matrixTransform(element.getScreenCTM());
+    return { x: point.x, y: point.y };
+  });
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 60, start.y + 30, { steps: 12 });
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__apexTestState.workspace.annotations.items[0].x !== -5000);
+  assert.equal(await page.locator(".annotationItem").count(), 2, "Dragging must replace geometry, not accumulate old shapes");
+  await assertStrokeSizes();
   await page.close();
 });
 

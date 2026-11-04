@@ -5933,10 +5933,18 @@ function isValidGraphBounds(bounds) {
 function applyViewTransform(animate = false) {
   if (!els.graphCanvas) return;
   const perf = startPerfMeasure("applyViewTransform");
+  const scale = Math.max(state.view.scale, MIN_ZOOM);
+  // Ordinary SVG strokes keep repaint bounds local to each shape. WebKit can
+  // retain old-frame pixels with non-scaling-stroke under moving transforms
+  // (WebKit 278231 / 325849). Compensate widths once through an inherited unit.
+  const strokeUnit = `${1 / scale}px`;
+  if (els.graphCanvas.style.getPropertyValue("--graph-stroke-unit") !== strokeUnit) {
+    els.graphCanvas.style.setProperty("--graph-stroke-unit", strokeUnit);
+  }
   els.graphCanvas.style.transition = animate ? "transform 120ms ease" : "";
   els.graphCanvas.setAttribute(
     "transform",
-    `translate(${round(state.view.x)} ${round(state.view.y)}) scale(${round(state.view.scale)})`
+    `translate(${round(state.view.x)} ${round(state.view.y)}) scale(${scale})`
   );
   updateAnnotationHandleScale();
   finishPerfMeasure(perf);

@@ -1026,16 +1026,16 @@ body.isResizingEditor * {
 
 .annotationLayer { color: var(--muted); }
 .annotationItem { color: inherit; cursor: pointer; }
-.annotationHit { fill: none; stroke: transparent; stroke-width: 18; vector-effect: non-scaling-stroke; pointer-events: stroke; }
+.annotationHit { fill: none; stroke: transparent; stroke-width: calc(18 * var(--graph-stroke-unit, 1px)); pointer-events: stroke; }
 .annotationTextHit { fill: transparent; stroke: none; pointer-events: all; }
-.annotationShape { fill: none; stroke: currentColor; stroke-width: 1.6; vector-effect: non-scaling-stroke; pointer-events: none; }
+.annotationShape { fill: none; stroke: currentColor; stroke-width: calc(1.6 * var(--graph-stroke-unit, 1px)); pointer-events: none; }
 .annotationItem.selected { color: var(--accent); }
-.annotationItem.selected .annotationShape { stroke-width: 2.2; }
+.annotationItem.selected .annotationShape { stroke-width: calc(2.2 * var(--graph-stroke-unit, 1px)); }
 .annotationLabel, .annotationText { fill: currentColor; font-size: 13px; font-weight: 580; user-select: none; pointer-events: none; }
 .annotationLabelHit { fill: transparent; stroke: none; pointer-events: all; }
 .annotationText { white-space: pre; }
 .annotationHandleHit { fill: transparent; stroke: none; cursor: nwse-resize; pointer-events: all; }
-.annotationHandle { fill: var(--bg-raised); stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; cursor: nwse-resize; pointer-events: none; }
+.annotationHandle { fill: var(--bg-raised); stroke: var(--accent); stroke-width: calc(1.5 * var(--graph-stroke-unit, 1px)); cursor: nwse-resize; pointer-events: none; }
 .annotationItem[data-annotation-type="line"] .annotationHandle { cursor: crosshair; }
 .annotationItem[data-annotation-type="line"] .annotationHandleHit { cursor: crosshair; }
 .graph.annotationToolActive { cursor: crosshair; }
@@ -1209,19 +1209,18 @@ body.graphFullscreen .topbarActions {
   fill: none;
   stroke: var(--level-color, var(--line-3));
   pointer-events: none;
-  vector-effect: non-scaling-stroke;
   transition: opacity 150ms ease;
 }
 
 .hierarchyEdge {
   opacity: 1;
-  stroke-width: 1;
+  stroke-width: calc(1 * var(--graph-stroke-unit, 1px));
   stroke-linecap: round;
 }
 
 .referenceEdge {
   opacity: 0.11;
-  stroke-width: 0.85;
+  stroke-width: calc(0.85 * var(--graph-stroke-unit, 1px));
   stroke-linecap: round;
 }
 
@@ -1232,21 +1231,19 @@ body.graphFullscreen .topbarActions {
 .connectionRope {
   fill: none;
   stroke: var(--purple);
-  stroke-width: 2;
+  stroke-width: calc(2 * var(--graph-stroke-unit, 1px));
   stroke-linecap: round;
-  stroke-dasharray: 7 7;
+  stroke-dasharray: calc(7 * var(--graph-stroke-unit, 1px)) calc(7 * var(--graph-stroke-unit, 1px));
   filter: drop-shadow(0 0 5px rgba(184, 140, 255, 0.28));
   pointer-events: none;
-  vector-effect: non-scaling-stroke;
   animation: ropeFlow 760ms linear infinite;
 }
 
 .selectionRect {
   fill: rgba(159, 197, 255, 0.12);
   stroke: #9fc5ff;
-  stroke-width: 1.25;
-  stroke-dasharray: 7 5;
-  vector-effect: non-scaling-stroke;
+  stroke-width: calc(1.25 * var(--graph-stroke-unit, 1px));
+  stroke-dasharray: calc(7 * var(--graph-stroke-unit, 1px)) calc(5 * var(--graph-stroke-unit, 1px));
   pointer-events: none;
 }
 
@@ -1256,7 +1253,7 @@ body.graphFullscreen .topbarActions {
 
 @keyframes ropeFlow {
   to {
-    stroke-dashoffset: -28;
+    stroke-dashoffset: calc(-28 * var(--graph-stroke-unit, 1px));
   }
 }
 
@@ -1279,10 +1276,8 @@ body.graphFullscreen .topbarActions {
 .nodeDot {
   fill: var(--bg);
   stroke: var(--level-color, var(--fg));
-  stroke-width: 1.5;
-  vector-effect: non-scaling-stroke;
+  stroke-width: calc(1.5 * var(--graph-stroke-unit, 1px));
   transition:
-    stroke-width 110ms ease,
     fill 140ms ease,
     filter 160ms ease;
 }
@@ -1305,7 +1300,7 @@ body.graphFullscreen .topbarActions {
 
 .node:hover .nodeDot,
 .node:focus-visible .nodeDot {
-  stroke-width: 2.5;
+  stroke-width: calc(2.5 * var(--graph-stroke-unit, 1px));
   filter: drop-shadow(0 0 3px rgba(241, 238, 230, 0.18));
 }
 
@@ -1316,7 +1311,7 @@ body.graphFullscreen .topbarActions {
 .node.selected .nodeDot {
   fill: var(--level-color, var(--fg));
   stroke: var(--level-color, var(--fg));
-  stroke-width: 2.5;
+  stroke-width: calc(2.5 * var(--graph-stroke-unit, 1px));
   filter: drop-shadow(0 0 4px var(--level-color, var(--fg)));
 }
 
@@ -1333,7 +1328,7 @@ body.graphFullscreen .topbarActions {
 .node.ropeSource .nodeDot {
   fill: var(--purple-soft);
   stroke: var(--purple);
-  stroke-width: 2.5;
+  stroke-width: calc(2.5 * var(--graph-stroke-unit, 1px));
   filter: drop-shadow(0 0 4px rgba(184, 140, 255, 0.32));
 }
 
@@ -1351,7 +1346,7 @@ body.graphFullscreen .topbarActions {
 
 .ropeTarget .nodeDot {
   fill: var(--level-color, var(--fg));
-  stroke-width: 3;
+  stroke-width: calc(3 * var(--graph-stroke-unit, 1px));
 }
 
 .referenceEdge.selectedReferenceEdge {
