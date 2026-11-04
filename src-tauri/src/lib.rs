@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+mod workspace_sync;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -8,6 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
+use tauri_plugin_deep_link::DeepLinkExt;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -714,10 +716,30 @@ open -n "/Applications/Apex Notes.app"
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            app.deep_link().on_open_url(move |_event| {
+                if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             read_workspace,
+            workspace_sync::sync_workspace,
             list_note_files,
             read_notes,
             create_workspace,

@@ -14,6 +14,7 @@ Download the latest build at [apex-notes.netlify.app](https://apex-notes.netlify
 - Semi-transparent reference edges from body `[[wiki links]]`
 - Minimal, draggable graph view
 - Bundled writing-agent skill in `skills/apex-notes-writing/`
+- Browser deep links to open local workspaces or sync locally configured private exports (0.1.10+); see [browser handoff and sync contract](docs/browser-workspaces.md).
 
 ## Run
 
